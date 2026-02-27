@@ -419,3 +419,6 @@ FodyWeavers.xsd
 
 # Rust
 /target/
+
+# Claude Code
+/.claude/
