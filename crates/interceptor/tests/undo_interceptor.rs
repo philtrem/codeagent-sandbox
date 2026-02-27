@@ -30,7 +30,7 @@ fn ui_01_write_same_file_3x_in_one_step() {
     assert_eq!(fs::read_to_string(&target).unwrap(), "version 3");
 
     // Rollback should restore original
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert_tree_eq(&before, &after, &compare_opts());
@@ -56,7 +56,7 @@ fn ui_02_create_new_file_and_write() {
     assert!(new_file.exists());
     assert_eq!(fs::read_to_string(&new_file).unwrap(), "updated content");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(!new_file.exists());
@@ -87,7 +87,7 @@ fn ui_03_create_nested_dirs() {
 
     assert!(file.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(!dir1.exists());
@@ -112,7 +112,7 @@ fn ui_04_delete_file() {
 
     assert!(!target.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(target.exists());
@@ -138,7 +138,7 @@ fn ui_05_delete_tree() {
 
     assert!(!tree_root.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(tree_root.is_dir());
@@ -168,7 +168,7 @@ fn ui_06_rename_file_dest_absent() {
     assert!(to.exists());
     assert_eq!(fs::read_to_string(&to).unwrap(), "content of a");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(from.exists());
@@ -197,7 +197,7 @@ fn ui_07_rename_file_dest_exists() {
     assert!(!from.exists());
     assert_eq!(fs::read_to_string(&to).unwrap(), "content of a");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(from.exists());
@@ -242,7 +242,7 @@ fn ui_08_rename_dir_with_nested_files() {
         "nested content"
     );
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(src_dir.is_dir());
@@ -254,6 +254,229 @@ fn ui_08_rename_dir_with_nested_files() {
     assert_eq!(
         fs::read_to_string(src_dir.join("sub/nested.txt")).unwrap(),
         "nested content"
+    );
+    assert_tree_eq(&before, &after, &compare_opts());
+}
+
+// ---------------------------------------------------------------------------
+// UI-09: Open existing file with O_TRUNC
+// ---------------------------------------------------------------------------
+#[test]
+fn ui_09_truncate_open() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    let target = ws.working_dir.join("small.txt");
+    ops.open_trunc(&target);
+    interceptor.close_step(1).unwrap();
+
+    assert_eq!(fs::read_to_string(&target).unwrap(), "");
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "hello world");
+    assert_tree_eq(&before, &after, &compare_opts());
+}
+
+// ---------------------------------------------------------------------------
+// UI-10: Truncate via setattr to shorter length
+// ---------------------------------------------------------------------------
+#[test]
+fn ui_10_truncate_setattr() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    let target = ws.working_dir.join("medium.txt");
+    let original_len = fs::metadata(&target).unwrap().len();
+    assert_eq!(original_len, 4096);
+    ops.setattr_truncate(&target, 10);
+    interceptor.close_step(1).unwrap();
+
+    assert_eq!(fs::metadata(&target).unwrap().len(), 10);
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    assert_eq!(fs::metadata(&target).unwrap().len(), 4096);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "x".repeat(4096));
+    assert_tree_eq(&before, &after, &compare_opts());
+}
+
+// ---------------------------------------------------------------------------
+// UI-11: Chmod — flip executable bit (Unix only)
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+#[test]
+fn ui_11_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let target = ws.working_dir.join("run.sh");
+    let original_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(original_mode, 0o755);
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    ops.chmod(&target, 0o644);
+    interceptor.close_step(1).unwrap();
+
+    let changed_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(changed_mode, 0o644);
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    let restored_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(restored_mode, 0o755);
+    assert_tree_eq(&before, &after, &compare_opts());
+}
+
+// ---------------------------------------------------------------------------
+// UI-12: Set xattr on file (Linux only)
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+#[test]
+fn ui_12_xattr_set() {
+    let ws = TempWorkspace::new();
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let target = ws.working_dir.join("test.txt");
+    fs::write(&target, "xattr test content").unwrap();
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    ops.set_xattr(&target, "user.test", b"test_value");
+    interceptor.close_step(1).unwrap();
+
+    let xattr_value = xattr::get(&target, "user.test").unwrap();
+    assert_eq!(xattr_value, Some(b"test_value".to_vec()));
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    let xattr_after = xattr::get(&target, "user.test").unwrap();
+    assert_eq!(xattr_after, None);
+    assert_tree_eq(
+        &before,
+        &after,
+        &codeagent_test_support::snapshot::SnapshotCompareOptions {
+            mtime_tolerance_ns: i128::MAX,
+            check_xattrs: true,
+            ..Default::default()
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UI-13: Remove existing xattr (Linux only)
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+#[test]
+fn ui_13_xattr_remove() {
+    let ws = TempWorkspace::new();
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let target = ws.working_dir.join("test.txt");
+    fs::write(&target, "xattr test content").unwrap();
+    xattr::set(&target, "user.existing", b"original_value").unwrap();
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    ops.remove_xattr(&target, "user.existing");
+    interceptor.close_step(1).unwrap();
+
+    let xattr_value = xattr::get(&target, "user.existing").unwrap();
+    assert_eq!(xattr_value, None);
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    let xattr_restored = xattr::get(&target, "user.existing").unwrap();
+    assert_eq!(xattr_restored, Some(b"original_value".to_vec()));
+    assert_tree_eq(
+        &before,
+        &after,
+        &codeagent_test_support::snapshot::SnapshotCompareOptions {
+            mtime_tolerance_ns: i128::MAX,
+            check_xattrs: true,
+            ..Default::default()
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UI-14: Fallocate — extend file size
+// ---------------------------------------------------------------------------
+#[test]
+fn ui_14_fallocate() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    let target = ws.working_dir.join("small.txt");
+    let original_len = fs::metadata(&target).unwrap().len();
+    assert_eq!(original_len, 11); // "hello world"
+    ops.fallocate(&target, 1_000_000);
+    interceptor.close_step(1).unwrap();
+
+    assert_eq!(fs::metadata(&target).unwrap().len(), 1_000_000);
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    assert_eq!(fs::metadata(&target).unwrap().len(), 11);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "hello world");
+    assert_tree_eq(&before, &after, &compare_opts());
+}
+
+// ---------------------------------------------------------------------------
+// UI-15: Copy-file-range into existing file
+// ---------------------------------------------------------------------------
+#[test]
+fn ui_15_copy_file_range() {
+    let ws = TempWorkspace::new();
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    let src = ws.working_dir.join("source.txt");
+    let dst = ws.working_dir.join("destination.txt");
+    fs::write(&src, "source data to copy").unwrap();
+    fs::write(&dst, "original destination content").unwrap();
+
+    let before = ws.snapshot();
+
+    interceptor.open_step(1).unwrap();
+    ops.copy_file_range(&src, &dst);
+    interceptor.close_step(1).unwrap();
+
+    assert_eq!(fs::read_to_string(&dst).unwrap(), "source data to copy");
+
+    interceptor.rollback(1, false).unwrap();
+
+    let after = ws.snapshot();
+    assert_eq!(
+        fs::read_to_string(&dst).unwrap(),
+        "original destination content"
     );
     assert_tree_eq(&before, &after, &compare_opts());
 }

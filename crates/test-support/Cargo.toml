@@ -11,3 +11,6 @@ tempfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 codeagent-common = { path = "../common" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = { workspace = true }

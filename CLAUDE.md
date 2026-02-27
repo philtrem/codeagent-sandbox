@@ -40,6 +40,8 @@
   file to reflect the current state — including new files, new test counts, newly completed
   steps, and any changed conventions. This ensures future sessions start with accurate context
   rather than stale information.
+- **Ask before committing**: After completing a unit of work, ask the user whether they would
+  like to commit the changes rather than waiting for them to request it.
 
 ## Project-Specific Knowledge
 
@@ -59,20 +61,29 @@ Rust workspace at repo root: `resolver = "3"`, `edition = "2024"`, `rust-version
 Cargo.toml                         # workspace root
 crates/
   common/                          # codeagent-common — shared types and errors
-    src/lib.rs                     #   StepId, StepType, StepInfo, CodeAgentError, Result<T>
+    src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
+                                   #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
+                                   #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
+                                   #   CodeAgentError (incl. RollbackBlocked, SafeguardDenied), Result<T>
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
       write_interceptor.rs         #   WriteInterceptor trait (13 methods)
-      step_tracker.rs              #   StepTracker (Mutex-based step lifecycle)
+      safeguard.rs                 #   SafeguardHandler trait, SafeguardTracker (per-step counters)
+      step_tracker.rs              #   StepTracker (Mutex-based step lifecycle, incl. cancel_step)
       preimage.rs                  #   path_hash, PreimageMetadata, capture/restore preimages
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
-      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl
+      barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
+      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
+                                   #   notify_external_modification(), barriers(), rollback(count, force),
+                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
       wal_crash_recovery.rs        #   crash recovery tests CR-01..CR-07 + step reconstruction
+      undo_barriers.rs             #   undo barrier tests EB-01..EB-06, EB-08
+      safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -102,13 +113,21 @@ crates/
     preimages/{hash}.dat          # zstd level 3 compressed file contents
     preimages/{hash}.meta.json    # PreimageMetadata (path, type, mode, mtime, etc.)
   ```
+- **Undo barriers**: Barriers are placed "after" a specific completed step. A barrier with
+  `after_step_id = S` blocks rollback of step S (because the external modification happened
+  after S and rolling back S would destroy it). `rollback(count, force)` checks barriers;
+  `force: true` crosses and removes them. Barriers persist in `{undo_dir}/barriers.json`.
+- **Safeguards**: Configurable thresholds (delete count, overwrite-large-file, rename-over-existing)
+  checked in `pre_*` methods. On trigger, calls `SafeguardHandler::on_safeguard_triggered()` which
+  blocks until Allow/Deny. On Deny, `rollback_current_step()` undoes all operations in the current
+  step and cancels it. Once a safeguard kind is allowed for a step, it does not re-trigger.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
 - **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
-  tempfile, thiserror, zstd, chrono (+serde).
+  tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–3 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -133,14 +152,52 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–3
   - Shared test helpers extracted to `tests/common/mod.rs` (OperationApplier, compare_opts)
   - Integration tests CR-01..CR-07 + step reconstruction test (8 tests)
 
-- **TDD Steps 4–6** — not yet started (undo barriers, safeguards, metadata capture)
-- **TDD Steps 7–18** — not yet started (resource limits, control channel, STDIO API, MCP, etc.)
+- **TDD Step 4 (Undo Barriers)** — complete
+  - `BarrierId`, `BarrierInfo`, `ExternalModificationPolicy`, `RollbackResult` types in common crate
+  - `RollbackBlocked` error variant for barrier-blocked rollback
+  - `BarrierTracker` module with in-memory state + JSON persistence (`barriers.json`)
+  - `UndoInterceptor::notify_external_modification()` — creates barriers under `Barrier` policy
+  - `UndoInterceptor::rollback(count, force)` — checks barriers, blocks or force-crosses
+  - `UndoInterceptor::barriers()` — query all barriers
+  - `UndoInterceptor::with_policy()` — constructor with configurable policy
+  - Integration tests EB-01..EB-06, EB-08 covering: barrier creation, rollback blocking,
+    force rollback, barrier querying, internal writes no-barrier, multiple barriers,
+    warn policy (7 tests)
+
+- **TDD Step 5 (Safeguards — Interceptor Level)** — complete
+  - `SafeguardId`, `SafeguardKind`, `SafeguardConfig`, `SafeguardEvent`, `SafeguardDecision` types in common crate
+  - `SafeguardDenied` error variant in `CodeAgentError`
+  - `SafeguardHandler` trait — synchronous blocking callback for safeguard decisions
+  - `SafeguardTracker` — per-step counters (delete count, overwrite, rename-over), threshold checks,
+    allowed-kind tracking to prevent re-triggering after Allow
+  - `StepTracker::cancel_step()` — clears active step without adding to completed list
+  - `UndoInterceptor::with_safeguard()` — constructor with configurable safeguard config + handler
+  - `UndoInterceptor::rollback_current_step()` — mid-step rollback on deny (writes manifest,
+    rolls back WAL, cancels step)
+  - Safeguard checks in `pre_unlink` (delete threshold), `pre_write`/`pre_open_trunc` (overwrite
+    large file), `pre_rename` (rename-over-existing)
+  - Integration tests SG-01..SG-06 + 5 edge cases (11 tests)
+
+- **TDD Step 6 (Metadata Capture)** — complete
+  - `xattr` crate added as Linux-only dependency for reading/writing extended attributes
+  - `read_xattrs()` implemented in `preimage.rs` and `snapshot.rs` (Linux: real xattr reads;
+    other platforms: empty map)
+  - `restore_metadata()` in `rollback.rs` now restores xattrs on Linux (removes stale, sets stored)
+  - OperationApplier extended with: `open_trunc`, `setattr_truncate`, `chmod` (Unix),
+    `fallocate`, `copy_file_range`, `set_xattr` (Linux), `remove_xattr` (Linux)
+  - Integration tests UI-09..UI-15 covering: truncate-open, truncate-setattr, chmod (Unix),
+    xattr-set (Linux), xattr-remove (Linux), fallocate, copy-file-range (7 tests; 4 on Windows)
+
+- **TDD Step 7** — not yet started (resource limits + pruning)
+- **TDD Steps 8–18** — not yet started (control channel, STDIO API, MCP, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (57 currently)
+cargo test --workspace           # run all tests (84 on Windows, 87 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
+cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier tests only
+cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
 ```

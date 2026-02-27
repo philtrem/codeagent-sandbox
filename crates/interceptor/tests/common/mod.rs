@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
 
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
@@ -67,6 +68,57 @@ impl<'a> OperationApplier<'a> {
         } else {
             self.interceptor.post_create(to).unwrap();
         }
+    }
+
+    /// Open an existing file with O_TRUNC (truncates to zero length).
+    pub fn open_trunc(&self, path: &Path) {
+        self.interceptor.pre_open_trunc(path).unwrap();
+        File::create(path).unwrap();
+    }
+
+    /// Truncate an existing file to a shorter length via setattr.
+    pub fn setattr_truncate(&self, path: &Path, new_len: u64) {
+        self.interceptor.pre_setattr(path).unwrap();
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_len(new_len).unwrap();
+    }
+
+    /// Change mode bits on a file (Unix only).
+    #[cfg(unix)]
+    pub fn chmod(&self, path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        self.interceptor.pre_setattr(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Extend a file to a larger size via fallocate.
+    pub fn fallocate(&self, path: &Path, new_len: u64) {
+        self.interceptor.pre_fallocate(path).unwrap();
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_len(new_len).unwrap();
+    }
+
+    /// Simulate copy_file_range by reading source contents and writing to destination.
+    pub fn copy_file_range(&self, src: &Path, dst: &Path) {
+        let src_contents = fs::read(src).unwrap();
+        self.interceptor.pre_copy_file_range(dst).unwrap();
+        let mut file = File::options().write(true).open(dst).unwrap();
+        file.write_all(&src_contents).unwrap();
+        file.set_len(src_contents.len() as u64).unwrap();
+    }
+
+    /// Set an extended attribute on a file (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn set_xattr(&self, path: &Path, key: &str, value: &[u8]) {
+        self.interceptor.pre_xattr(path).unwrap();
+        xattr::set(path, key, value).unwrap();
+    }
+
+    /// Remove an extended attribute from a file (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn remove_xattr(&self, path: &Path, key: &str) {
+        self.interceptor.pre_xattr(path).unwrap();
+        xattr::remove(path, key).unwrap();
     }
 
     /// Recursively record all entries under a directory as newly created.

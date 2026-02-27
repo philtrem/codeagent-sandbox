@@ -3,11 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use codeagent_common::{CodeAgentError, Result, StepId};
+use codeagent_common::{
+    BarrierInfo, CodeAgentError, ExternalModificationPolicy, Result, RollbackResult,
+    SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
+};
 
+use crate::barrier::BarrierTracker;
 use crate::manifest::StepManifest;
 use crate::preimage::{capture_creation_marker, capture_preimage, path_hash};
 use crate::rollback;
+use crate::safeguard::{SafeguardHandler, SafeguardTracker};
 use crate::step_tracker::StepTracker;
 use crate::write_interceptor::WriteInterceptor;
 
@@ -26,6 +31,9 @@ pub struct UndoInterceptor {
     working_root: PathBuf,
     undo_dir: PathBuf,
     step_tracker: StepTracker,
+    barrier_tracker: Mutex<BarrierTracker>,
+    policy: ExternalModificationPolicy,
+    safeguard_handler: Option<Box<dyn SafeguardHandler>>,
     inner: Mutex<UndoInterceptorInner>,
 }
 
@@ -34,10 +42,58 @@ struct UndoInterceptorInner {
     touched_paths: HashSet<String>,
     /// Manifest for the current in-progress step.
     current_manifest: Option<StepManifest>,
+    /// Per-step safeguard counter and threshold tracker.
+    safeguard_tracker: SafeguardTracker,
 }
 
 impl UndoInterceptor {
     pub fn new(working_root: PathBuf, undo_dir: PathBuf) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            ExternalModificationPolicy::default(),
+            SafeguardConfig::default(),
+            None,
+        )
+    }
+
+    pub fn with_policy(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        policy: ExternalModificationPolicy,
+    ) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            policy,
+            SafeguardConfig::default(),
+            None,
+        )
+    }
+
+    pub fn with_safeguard(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        policy: ExternalModificationPolicy,
+        safeguard_config: SafeguardConfig,
+        safeguard_handler: Box<dyn SafeguardHandler>,
+    ) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            policy,
+            safeguard_config,
+            Some(safeguard_handler),
+        )
+    }
+
+    fn build(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        policy: ExternalModificationPolicy,
+        safeguard_config: SafeguardConfig,
+        safeguard_handler: Option<Box<dyn SafeguardHandler>>,
+    ) -> Self {
         // Initialize the on-disk layout
         let version_path = undo_dir.join("version");
         if !version_path.exists() {
@@ -68,13 +124,20 @@ impl UndoInterceptor {
             }
         }
 
+        // Load barriers from disk
+        let barrier_tracker = BarrierTracker::load(&undo_dir);
+
         Self {
             working_root,
             undo_dir,
             step_tracker,
+            barrier_tracker: Mutex::new(barrier_tracker),
+            policy,
+            safeguard_handler,
             inner: Mutex::new(UndoInterceptorInner {
                 touched_paths: HashSet::new(),
                 current_manifest: None,
+                safeguard_tracker: SafeguardTracker::new(safeguard_config),
             }),
         }
     }
@@ -86,6 +149,7 @@ impl UndoInterceptor {
         let mut inner = self.inner.lock().unwrap();
         inner.touched_paths.clear();
         inner.current_manifest = Some(StepManifest::new(id));
+        inner.safeguard_tracker.reset();
 
         // Create WAL directory for this step
         let wal_dir = self.wal_in_progress_dir();
@@ -127,11 +191,31 @@ impl UndoInterceptor {
     }
 
     /// Rollback the most recent N steps (pop semantics — removed from history).
-    pub fn rollback(&self, count: usize) -> Result<()> {
+    ///
+    /// If `force` is false and any undo barriers exist between the current state
+    /// and the target, the rollback is rejected with `RollbackBlocked`.
+    /// If `force` is true, barriers are crossed and removed.
+    pub fn rollback(&self, count: usize, force: bool) -> Result<RollbackResult> {
         let completed = self.step_tracker.completed_steps();
         let steps_to_rollback: Vec<StepId> =
             completed.iter().rev().take(count).copied().collect();
 
+        // Check for blocking barriers
+        let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+        let blocking: Vec<BarrierInfo> = barrier_tracker
+            .barriers_blocking_rollback(&steps_to_rollback)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if !blocking.is_empty() && !force {
+            return Err(CodeAgentError::RollbackBlocked {
+                count: blocking.len(),
+                barriers: blocking,
+            });
+        }
+
+        // Perform the rollback
         for step_id in &steps_to_rollback {
             let step_dir = self.step_dir(*step_id);
             if step_dir.exists() {
@@ -141,12 +225,48 @@ impl UndoInterceptor {
             }
         }
 
-        Ok(())
+        // Remove crossed barriers (pop semantics)
+        if !blocking.is_empty() {
+            barrier_tracker.remove_barriers_for_steps(&steps_to_rollback);
+            barrier_tracker.save(&self.undo_dir)?;
+        }
+
+        Ok(RollbackResult {
+            steps_rolled_back: steps_to_rollback.len(),
+            barriers_crossed: blocking,
+        })
     }
 
     /// Get the list of completed step IDs.
     pub fn completed_steps(&self) -> Vec<StepId> {
         self.step_tracker.completed_steps()
+    }
+
+    /// Record an external modification, optionally creating an undo barrier.
+    ///
+    /// Under `Barrier` policy, creates a barrier and returns it.
+    /// Under `Warn` policy, returns `None` (no barrier created).
+    pub fn notify_external_modification(
+        &self,
+        affected_paths: Vec<PathBuf>,
+    ) -> Result<Option<BarrierInfo>> {
+        match self.policy {
+            ExternalModificationPolicy::Barrier => {
+                let completed = self.step_tracker.completed_steps();
+                let after_step_id = completed.last().copied().unwrap_or(0);
+
+                let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+                let barrier = barrier_tracker.create_barrier(after_step_id, affected_paths);
+                barrier_tracker.save(&self.undo_dir)?;
+                Ok(Some(barrier))
+            }
+            ExternalModificationPolicy::Warn => Ok(None),
+        }
+    }
+
+    /// Return all current undo barriers.
+    pub fn barriers(&self) -> Vec<BarrierInfo> {
+        self.barrier_tracker.lock().unwrap().barriers()
     }
 
     /// Recover from a crash by rolling back any incomplete step in the WAL.
@@ -258,6 +378,78 @@ impl UndoInterceptor {
         Ok(manifest)
     }
 
+    /// Roll back the current in-progress step and cancel it.
+    /// Used when a safeguard denies the current operation — undoes all
+    /// operations already applied in this step.
+    fn rollback_current_step(&self) -> Result<()> {
+        let wal_dir = self.wal_in_progress_dir();
+
+        // Write manifest and clear inner state
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(ref manifest) = inner.current_manifest {
+                manifest.write_to(&wal_dir)?;
+            }
+            inner.touched_paths.clear();
+            inner.current_manifest = None;
+            inner.safeguard_tracker.reset();
+        }
+
+        // Roll back using the WAL data
+        if wal_dir.exists() {
+            rollback::rollback_step(&wal_dir, &self.working_root)?;
+            fs::remove_dir_all(&wal_dir)?;
+        }
+
+        // Cancel the step (not completed, just discarded)
+        self.step_tracker.cancel_step()?;
+
+        Ok(())
+    }
+
+    /// Process a safeguard event: call the handler and act on the decision.
+    /// Returns `Ok(())` if there is no event or if the handler allows.
+    /// Returns `Err(SafeguardDenied)` if the handler denies.
+    fn handle_safeguard_event(&self, event: Option<SafeguardEvent>) -> Result<()> {
+        let event = match event {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+
+        let handler = match &self.safeguard_handler {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+
+        let step_id = event.step_id;
+        let safeguard_id = event.safeguard_id;
+        let kind = event.kind.clone();
+
+        let decision = handler.on_safeguard_triggered(event);
+
+        match decision {
+            SafeguardDecision::Allow => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.safeguard_tracker.mark_allowed(&kind);
+                Ok(())
+            }
+            SafeguardDecision::Deny => {
+                self.rollback_current_step()?;
+                Err(CodeAgentError::SafeguardDenied {
+                    safeguard_id,
+                    step_id,
+                })
+            }
+        }
+    }
+
+    /// Get the forward-slash-normalized relative path string for a path.
+    fn relative_path_str(&self, path: &Path) -> String {
+        path.strip_prefix(&self.working_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    }
+
     fn wal_in_progress_dir(&self) -> PathBuf {
         self.undo_dir.join("wal").join("in_progress")
     }
@@ -354,32 +546,60 @@ fn normalized_relative_path(relative: &Path) -> String {
 
 impl WriteInterceptor for UndoInterceptor {
     fn pre_write(&self, path: &Path) -> Result<()> {
-        if self.step_tracker.current_step().is_some() {
+        if let Some(step_id) = self.step_tracker.current_step() {
+            let file_size = path.metadata().map(|m| m.len()).ok();
             self.ensure_preimage(path)?;
+
+            if let Some(size) = file_size {
+                let relative = self.relative_path_str(path);
+                let event = {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.safeguard_tracker.check_overwrite(&relative, size, step_id)
+                };
+                self.handle_safeguard_event(event)?;
+            }
         }
         Ok(())
     }
 
     fn pre_unlink(&self, path: &Path, is_dir: bool) -> Result<()> {
-        if self.step_tracker.current_step().is_some() {
+        if let Some(step_id) = self.step_tracker.current_step() {
             self.ensure_preimage(path)?;
             if is_dir {
                 self.capture_tree_preimages(path)?;
             }
+
+            let relative = self.relative_path_str(path);
+            let event = {
+                let mut inner = self.inner.lock().unwrap();
+                inner.safeguard_tracker.check_delete(&relative, step_id)
+            };
+            self.handle_safeguard_event(event)?;
         }
         Ok(())
     }
 
     fn pre_rename(&self, from: &Path, to: &Path) -> Result<()> {
-        if self.step_tracker.current_step().is_some() {
+        if let Some(step_id) = self.step_tracker.current_step() {
+            let destination_exists = to.symlink_metadata().is_ok();
             self.ensure_preimage(from)?;
-            // If destination exists, capture its preimage too
-            if to.symlink_metadata().is_ok() {
+            if destination_exists {
                 self.ensure_preimage(to)?;
             }
-            // For directory renames, capture all children of the source
             if from.is_dir() {
                 self.capture_tree_preimages(from)?;
+            }
+
+            if destination_exists {
+                let source_rel = self.relative_path_str(from);
+                let dest_rel = self.relative_path_str(to);
+                let event = {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner
+                        .safeguard_tracker
+                        .check_rename_over(&source_rel, &dest_rel, step_id)
+                };
+                self.handle_safeguard_event(event)?;
             }
         }
         Ok(())
@@ -428,8 +648,18 @@ impl WriteInterceptor for UndoInterceptor {
     }
 
     fn pre_open_trunc(&self, path: &Path) -> Result<()> {
-        if self.step_tracker.current_step().is_some() {
+        if let Some(step_id) = self.step_tracker.current_step() {
+            let file_size = path.metadata().map(|m| m.len()).ok();
             self.ensure_preimage(path)?;
+
+            if let Some(size) = file_size {
+                let relative = self.relative_path_str(path);
+                let event = {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.safeguard_tracker.check_overwrite(&relative, size, step_id)
+                };
+                self.handle_safeguard_event(event)?;
+            }
         }
         Ok(())
     }

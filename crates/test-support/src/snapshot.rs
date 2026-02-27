@@ -152,10 +152,16 @@ fn read_mtime_ns(metadata: &fs::Metadata) -> i128 {
 }
 
 #[cfg(target_os = "linux")]
-fn read_xattrs(_path: &Path) -> BTreeMap<String, Vec<u8>> {
-    // xattr reading can be added via libc or the xattr crate when needed.
-    // For now, return an empty map to avoid adding a dependency.
-    BTreeMap::new()
+fn read_xattrs(path: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut result = BTreeMap::new();
+    if let Ok(attrs) = xattr::list(path) {
+        for attr in attrs {
+            if let Ok(Some(value)) = xattr::get(path, &attr) {
+                result.insert(attr.to_string_lossy().into_owned(), value);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(not(target_os = "linux"))]

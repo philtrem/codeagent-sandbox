@@ -73,6 +73,19 @@ impl StepTracker {
         let mut inner = self.inner.lock().unwrap();
         inner.completed_steps.push(id);
     }
+
+    /// Cancel the active step without adding it to the completed list.
+    /// Used when a safeguard denies the current step mid-flight.
+    pub fn cancel_step(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.active_step {
+            Some(_) => {
+                inner.active_step = None;
+                Ok(())
+            }
+            None => Err(CodeAgentError::NoActiveStep),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +157,23 @@ mod tests {
         tracker.add_completed_step(5);
         tracker.add_completed_step(10);
         assert_eq!(tracker.completed_steps(), vec![5, 10]);
+    }
+
+    #[test]
+    fn cancel_step_clears_active_without_completing() {
+        let tracker = StepTracker::new();
+        tracker.open_step(1).unwrap();
+        assert_eq!(tracker.current_step(), Some(1));
+
+        tracker.cancel_step().unwrap();
+        assert!(tracker.current_step().is_none());
+        assert!(tracker.completed_steps().is_empty());
+    }
+
+    #[test]
+    fn cancel_step_without_active_fails() {
+        let tracker = StepTracker::new();
+        let err = tracker.cancel_step().unwrap_err();
+        assert!(matches!(err, CodeAgentError::NoActiveStep));
     }
 }
