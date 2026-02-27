@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/common",
+    "crates/interceptor",
+    "crates/test-support",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+blake3 = "1"
+filetime = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+zstd = "0.13"
+chrono = { version = "0.4", features = ["serde"] }

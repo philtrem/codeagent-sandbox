@@ -1,0 +1,146 @@
+# Agent Instructions
+
+## General
+- You are Claude Code. Actions that would be time consuming for a human — writing tests, building
+  features, refactoring code — are fast and comparatively cheap for you.
+- Conversation history gets compacted once the context window reaches its limit.
+  Important details from earlier in the conversation — including plans, discoveries, and
+  decisions — may be lost. Proactively write important information to files so it persists
+  beyond context compression.
+
+## Planning
+- **Confirm before implementing**: After writing a plan but before starting implementation, always present the plan to the user and ask if they have any questions or concerns. Do not begin coding until the user confirms.
+
+## Core Principles
+- **Verify before deleting**: Before deleting any files or folders, always verify they are not referenced elsewhere in the codebase using grep or other search tools. Never assume a file is unused.
+- **Verify assumptions**: Before acting on any assumption about the codebase (API signatures, available methods, file locations, type constraints, etc.), read the relevant source. Use grep, glob, or file reads to confirm. Do not assume — check.
+- **Verify with builds and tests**: After making changes, build the affected project and run existing tests to confirm nothing is broken. When the correct behaviour of a piece of logic is non-obvious, write a test to verify it — including temporary/throwaway tests if that is the fastest way to confirm an assumption. Remove temporary tests once they have served their purpose.
+
+## Code Documentation
+- **Do not** add comments that merely describe the changes made (e.g., "Modified this to fix bug X").
+- Comments should be reserved for explaining the **code and functionality** themselves (the "how" and "why" of the logic), adhering to standard clean code practices.
+
+## Variable Naming
+- Use clear, descriptive names for all variables.
+- Avoid obscure abbreviations (e.g., use `isCollection` instead of `isColl`).
+
+## Workflow
+- **Write plans to a file before implementing**: For non-trivial tasks, write the plan to a
+  markdown file in the repo before starting implementation. Delete when done.
+- **Stop and reassess after repeated failures**: If consecutive fix attempts fail to resolve
+  an issue, stop and reconsider the approach rather than continuing to apply further fixes.
+- **Commits should be focused and well-delimited**: Each commit should represent one coherent,
+  self-contained piece of work (e.g. a bug fix, a single new feature, a refactor, a docs update).
+  Do not bundle unrelated changes into a single commit. Compare DIFFs to do so. When a file
+  contains changes that belong in separate commits, use `git add -p` to stage specific hunks
+  rather than editing the file, committing, and re-applying changes.
+  Do not add any Claude attribution or co-author lines to commit messages.
+- **Keep CLAUDE.md up to date**: After completing a TDD step or any significant implementation
+  milestone, update the **Implementation Status** and **Workspace Structure** sections of this
+  file to reflect the current state — including new files, new test counts, newly completed
+  steps, and any changed conventions. This ensures future sessions start with accurate context
+  rather than stale information.
+
+## Project-Specific Knowledge
+
+### Project Overview
+Code Agent is a sandboxed coding agent that runs inside a Linux VM (QEMU), with host-side
+filesystem interception for N-step undo capability. The project will be released as open source
+under MIT OR Apache-2.0 dual license.
+
+Design documents:
+- `project-plan.md` — full architecture (WriteInterceptor trait, undo log, STDIO API, MCP server, VM)
+- `testing-plan.md` — 6-layer test pyramid (L1–L6), test matrix UI-01..UI-24, spec decisions
+
+### Workspace Structure
+Rust workspace at repo root: `resolver = "3"`, `edition = "2024"`, `rust-version = "1.85"`.
+
+```
+Cargo.toml                         # workspace root
+crates/
+  common/                          # codeagent-common — shared types and errors
+    src/lib.rs                     #   StepId, StepType, StepInfo, CodeAgentError, Result<T>
+  interceptor/                     # codeagent-interceptor — undo log core
+    src/
+      lib.rs                       #   module declarations
+      write_interceptor.rs         #   WriteInterceptor trait (13 methods)
+      step_tracker.rs              #   StepTracker (Mutex-based step lifecycle)
+      preimage.rs                  #   path_hash, PreimageMetadata, capture/restore preimages
+      manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
+      rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
+      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl
+    tests/
+      common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
+      undo_interceptor.rs          #   integration tests UI-01..UI-08
+      wal_crash_recovery.rs        #   crash recovery tests CR-01..CR-07 + step reconstruction
+  test-support/                    # codeagent-test-support — test utilities
+    src/
+      lib.rs                       #   re-exports
+      snapshot.rs                  #   TreeSnapshot, EntrySnapshot, assert_tree_eq
+      workspace.rs                 #   TempWorkspace (isolated temp dir pairs)
+      fixtures.rs                  #   small_tree, rename_tree, symlink_tree, deep_tree
+```
+
+### Key Conventions
+- **Cross-platform path handling**: All internal path strings (preimage metadata, manifest keys,
+  touched-paths sets, path hashes) use forward slashes. Convert with `.replace('\\', "/")`.
+  The `preimage::path_hash()` function normalizes before hashing.
+- **Platform-conditional compilation**: `#[cfg(unix)]` for real mode bits and symlinks,
+  `#[cfg(windows)]` for synthetic mode (0o755/0o644) and `symlink_file`, `#[cfg(target_os = "linux")]`
+  reserved for xattrs.
+- **First-touch semantics**: `UndoInterceptor` captures a preimage only on the first mutating
+  touch of a path within a step. The `touched_paths: HashSet<String>` guards against duplicates.
+- **Rollback is pop**: Rolling back removes steps from history (not reversible). Two-pass algorithm:
+  (1) delete created paths deepest-first, recreate dirs shallowest-first, restore files;
+  (2) restore directory metadata deepest-first so child ops don't clobber parent mtime.
+- **On-disk layout**:
+  ```
+  {undo_dir}/version            # "1"
+  {undo_dir}/wal/in_progress/   # active step (promoted to steps/ on close)
+  {undo_dir}/steps/{id}/        # completed steps
+    manifest.json
+    preimages/{hash}.dat          # zstd level 3 compressed file contents
+    preimages/{hash}.meta.json    # PreimageMetadata (path, type, mode, mtime, etc.)
+  ```
+- **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
+  rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
+- **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
+  tempfile, thiserror, zstd, chrono (+serde).
+
+### Implementation Status
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–3 are complete:
+
+- **TDD Step 1 (Test Oracle Infrastructure)** — complete
+  - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
+  - `codeagent-test-support`: TreeSnapshot with blake3 hashing, assert_tree_eq with configurable
+    mtime tolerance and exclude patterns, TempWorkspace, fixture builders (18 unit tests)
+
+- **TDD Step 2 (UndoInterceptor Core)** — complete
+  - WriteInterceptor trait (13 methods matching project-plan §4.3.3)
+  - StepTracker, preimage capture (zstd + JSON metadata), StepManifest, two-pass rollback
+  - UndoInterceptor wiring it all together (19 unit tests)
+  - Integration tests UI-01..UI-08 covering: write 3x, create+write, nested dirs, delete file,
+    delete tree, rename (dest absent), rename (dest exists), rename dir with children (8 tests)
+
+- **TDD Step 3 (WAL + Crash Recovery)** — complete
+  - `RecoveryInfo` struct reports paths restored/deleted and manifest validity
+  - `UndoInterceptor::recover()` — always-rollback-incomplete policy per project-plan §4.8:
+    detects `wal/in_progress/`, handles empty WAL, valid manifest, and missing/corrupt manifest
+    (falls back to reconstructing manifest from `preimages/*.meta.json` files)
+  - `rebuild_manifest_from_preimages()` — scans preimage metadata when manifest is unavailable
+  - `UndoInterceptor::new()` now reconstructs completed steps from on-disk `steps/` directory
+  - `StepTracker::add_completed_step()` — supports disk-based state reconstruction
+  - Shared test helpers extracted to `tests/common/mod.rs` (OperationApplier, compare_opts)
+  - Integration tests CR-01..CR-07 + step reconstruction test (8 tests)
+
+- **TDD Steps 4–6** — not yet started (undo barriers, safeguards, metadata capture)
+- **TDD Steps 7–18** — not yet started (resource limits, control channel, STDIO API, MCP, etc.)
+
+### Build & Test Commands
+```sh
+cargo check --workspace          # type-check
+cargo test --workspace           # run all tests (57 currently)
+cargo clippy --workspace --tests # lint (must be warning-free)
+cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
+cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
+```
