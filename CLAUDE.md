@@ -124,7 +124,7 @@ crates/
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
 - **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
-  tempfile, thiserror, zstd, chrono (+serde).
+  tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5 are complete:
@@ -178,13 +178,23 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5
     large file), `pre_rename` (rename-over-existing)
   - Integration tests SG-01..SG-06 + 5 edge cases (11 tests)
 
-- **TDD Step 6** — not yet started (metadata capture)
-- **TDD Steps 7–18** — not yet started (resource limits, control channel, STDIO API, MCP, etc.)
+- **TDD Step 6 (Metadata Capture)** — complete
+  - `xattr` crate added as Linux-only dependency for reading/writing extended attributes
+  - `read_xattrs()` implemented in `preimage.rs` and `snapshot.rs` (Linux: real xattr reads;
+    other platforms: empty map)
+  - `restore_metadata()` in `rollback.rs` now restores xattrs on Linux (removes stale, sets stored)
+  - OperationApplier extended with: `open_trunc`, `setattr_truncate`, `chmod` (Unix),
+    `fallocate`, `copy_file_range`, `set_xattr` (Linux), `remove_xattr` (Linux)
+  - Integration tests UI-09..UI-15 covering: truncate-open, truncate-setattr, chmod (Unix),
+    xattr-set (Linux), xattr-remove (Linux), fallocate, copy-file-range (7 tests; 4 on Windows)
+
+- **TDD Step 7** — not yet started (resource limits + pruning)
+- **TDD Steps 8–18** — not yet started (control channel, STDIO API, MCP, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (80 currently)
+cargo test --workspace           # run all tests (84 on Windows, 87 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only

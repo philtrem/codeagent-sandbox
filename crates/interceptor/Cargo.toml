@@ -15,6 +15,9 @@ zstd = { workspace = true }
 chrono = { workspace = true }
 codeagent-common = { path = "../common" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = { workspace = true }
+
 [dev-dependencies]
 codeagent-test-support = { path = "../test-support" }
 tempfile = { workspace = true }

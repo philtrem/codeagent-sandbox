@@ -136,7 +136,22 @@ fn restore_metadata(
         fs::set_permissions(path, perms)?;
     }
 
-    // Restore mtime
+    // Restore xattrs (Linux only)
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(current_attrs) = xattr::list(path) {
+            for attr in current_attrs {
+                if !meta.xattrs.contains_key(&*attr.to_string_lossy()) {
+                    let _ = xattr::remove(path, &attr);
+                }
+            }
+        }
+        for (key, value) in &meta.xattrs {
+            let _ = xattr::set(path, key, value);
+        }
+    }
+
+    // Restore mtime last so xattr changes don't clobber it
     restore_mtime(path, meta.mtime_ns)?;
 
     Ok(())
