@@ -1,1 +1,1 @@
-# codingagent-sandbox
+# Coding Agent Sandbox
