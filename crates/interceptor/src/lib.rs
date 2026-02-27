@@ -1,4 +1,5 @@
 pub mod barrier;
+pub mod gitignore;
 pub mod manifest;
 pub mod preimage;
 pub mod resource_limits;

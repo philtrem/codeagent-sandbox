@@ -9,6 +9,7 @@ use codeagent_common::{
 };
 
 use crate::barrier::BarrierTracker;
+use crate::gitignore::GitignoreFilter;
 use crate::manifest::StepManifest;
 use crate::preimage::{capture_creation_marker, capture_preimage, path_hash};
 use crate::resource_limits;
@@ -40,6 +41,7 @@ pub struct UndoInterceptor {
     policy: ExternalModificationPolicy,
     resource_limits: Mutex<ResourceLimitsConfig>,
     safeguard_handler: Option<Box<dyn SafeguardHandler>>,
+    gitignore_filter: Option<GitignoreFilter>,
     /// When true, undo operations are disabled due to a version mismatch.
     undo_disabled: Mutex<bool>,
     /// (expected, found) version strings when a mismatch is detected.
@@ -69,6 +71,7 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             ResourceLimitsConfig::default(),
+            false,
         )
     }
 
@@ -84,6 +87,7 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             ResourceLimitsConfig::default(),
+            false,
         )
     }
 
@@ -101,6 +105,7 @@ impl UndoInterceptor {
             safeguard_config,
             Some(safeguard_handler),
             ResourceLimitsConfig::default(),
+            false,
         )
     }
 
@@ -116,6 +121,19 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             resource_limits,
+            false,
+        )
+    }
+
+    pub fn with_gitignore(working_root: PathBuf, undo_dir: PathBuf) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            ExternalModificationPolicy::default(),
+            SafeguardConfig::default(),
+            None,
+            ResourceLimitsConfig::default(),
+            true,
         )
     }
 
@@ -126,6 +144,7 @@ impl UndoInterceptor {
         safeguard_config: SafeguardConfig,
         safeguard_handler: Option<Box<dyn SafeguardHandler>>,
         resource_limits: ResourceLimitsConfig,
+        respect_gitignore: bool,
     ) -> Self {
         let mut undo_disabled = false;
         let mut version_mismatch_info = None;
@@ -175,6 +194,12 @@ impl UndoInterceptor {
         // Load barriers from disk
         let barrier_tracker = BarrierTracker::load(&undo_dir);
 
+        let gitignore_filter = if respect_gitignore {
+            GitignoreFilter::build(&working_root)
+        } else {
+            None
+        };
+
         Self {
             working_root,
             undo_dir,
@@ -183,6 +208,7 @@ impl UndoInterceptor {
             policy,
             resource_limits: Mutex::new(resource_limits),
             safeguard_handler,
+            gitignore_filter,
             undo_disabled: Mutex::new(undo_disabled),
             version_mismatch_info: Mutex::new(version_mismatch_info),
             inner: Mutex::new(UndoInterceptorInner {
@@ -627,6 +653,13 @@ impl UndoInterceptor {
         })?;
         let relative_str = normalized_relative_path(relative);
 
+        if let Some(ref filter) = self.gitignore_filter {
+            let is_dir = file_path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
+            if filter.is_ignored(&relative_str, is_dir) {
+                return Ok(false);
+            }
+        }
+
         let mut inner = self.inner.lock().unwrap();
 
         // Skip if step is already unprotected (exceeded size limit)
@@ -676,6 +709,13 @@ impl UndoInterceptor {
         })?;
         let relative_str = normalized_relative_path(relative);
 
+        if let Some(ref filter) = self.gitignore_filter {
+            let is_dir = file_path.is_dir();
+            if filter.is_ignored(&relative_str, is_dir) {
+                return Ok(());
+            }
+        }
+
         let mut inner = self.inner.lock().unwrap();
 
         // Skip if step is already unprotected
@@ -708,6 +748,17 @@ impl UndoInterceptor {
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
             let path = entry.path();
+
+            // Skip ignored subtrees early to avoid unnecessary I/O
+            if let Some(ref filter) = self.gitignore_filter {
+                if let Ok(relative) = path.strip_prefix(&self.working_root) {
+                    let relative_str = normalized_relative_path(relative);
+                    if filter.is_ignored(&relative_str, path.is_dir()) {
+                        continue;
+                    }
+                }
+            }
+
             self.ensure_preimage(&path)?;
             if path.is_dir() {
                 self.capture_tree_preimages(&path)?;

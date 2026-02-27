@@ -77,10 +77,12 @@ crates/
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
       barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
       resource_limits.rs             #   calculate_step_size, calculate_total_log_size, evict_if_needed
+      gitignore.rs                 #   GitignoreFilter (opt-in .gitignore-aware preimage skipping)
       undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
                                    #   notify_external_modification(), barriers(), rollback(count, force),
                                    #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
-                                   #   with_resource_limits(), discard(), is_undo_disabled(), version check
+                                   #   with_resource_limits(), with_gitignore(), discard(), is_undo_disabled(),
+                                   #   version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
@@ -88,6 +90,7 @@ crates/
       undo_barriers.rs             #   undo barrier tests EB-01..EB-06, EB-08
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
       resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
+      gitignore.rs                 #   gitignore filter tests GI-01..GI-08
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -132,8 +135,12 @@ crates/
   (`version` file ≠ `CURRENT_VERSION`) disables undo; `discard()` re-enables it.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
-- **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
-  tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
+- **Gitignore filtering**: Opt-in via `UndoInterceptor::with_gitignore()`. When enabled, the
+  `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
+  Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
+  and `capture_tree_preimages` — no preimage, no manifest entry.
+- **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
+  serde_json, tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–7 are complete:
@@ -217,11 +224,12 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–7
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (98 on Windows, 101 on Linux)
+cargo test --workspace           # run all tests (106 on Windows, 109 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
 cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier tests only
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
 cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
+cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
 ```
