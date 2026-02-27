@@ -64,7 +64,8 @@ crates/
     src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
                                    #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
                                    #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
-                                   #   CodeAgentError (incl. RollbackBlocked, SafeguardDenied), Result<T>
+                                   #   ResourceLimitsConfig, CodeAgentError (incl. RollbackBlocked,
+                                   #   SafeguardDenied, StepUnprotected, UndoDisabled), Result<T>
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
@@ -75,15 +76,18 @@ crates/
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
       barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
+      resource_limits.rs             #   calculate_step_size, calculate_total_log_size, evict_if_needed
       undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
                                    #   notify_external_modification(), barriers(), rollback(count, force),
-                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*
+                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
+                                   #   with_resource_limits(), discard(), is_undo_disabled(), version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
       wal_crash_recovery.rs        #   crash recovery tests CR-01..CR-07 + step reconstruction
       undo_barriers.rs             #   undo barrier tests EB-01..EB-06, EB-08
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
+      resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -121,13 +125,18 @@ crates/
   checked in `pre_*` methods. On trigger, calls `SafeguardHandler::on_safeguard_triggered()` which
   blocks until Allow/Deny. On Deny, `rollback_current_step()` undoes all operations in the current
   step and cancels it. Once a safeguard kind is allowed for a step, it does not re-trigger.
+- **Resource limits**: `ResourceLimitsConfig` controls max log size, max step count, and max
+  single-step preimage data size. On `close_step`, FIFO eviction removes oldest steps to stay
+  within budget. Steps exceeding `max_single_step_size_bytes` are marked `unprotected` — they
+  cannot be rolled back but do not block rollback of subsequent steps. Version mismatch
+  (`version` file ≠ `CURRENT_VERSION`) disables undo; `discard()` re-enables it.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
 - **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
   tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–7 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -188,16 +197,31 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5
   - Integration tests UI-09..UI-15 covering: truncate-open, truncate-setattr, chmod (Unix),
     xattr-set (Linux), xattr-remove (Linux), fallocate, copy-file-range (7 tests; 4 on Windows)
 
-- **TDD Step 7** — not yet started (resource limits + pruning)
+- **TDD Step 7 (Resource Limits + Pruning)** — complete
+  - `ResourceLimitsConfig` in common crate: `max_log_size_bytes`, `max_step_count`,
+    `max_single_step_size_bytes` (all `Option`, default `None`)
+  - `StepUnprotected` and `UndoDisabled` error variants in `CodeAgentError`
+  - `StepManifest::unprotected` field marks steps that exceeded single-step size limit
+  - Atomic preimage writes (temp-file-then-rename) for `.meta.json` and `.dat` files
+  - `capture_preimage` returns `(PreimageMetadata, u64)` — includes compressed data size
+  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size`, `evict_if_needed`
+    (FIFO eviction by step count and log size)
+  - `UndoInterceptor::with_resource_limits()` — constructor with limits config
+  - `close_step` returns `Result<Vec<StepId>>` — list of evicted step IDs
+  - Unprotected step tracking: skips preimage capture after threshold exceeded, blocks rollback
+  - Version mismatch detection on construction, `is_undo_disabled()`, `discard()` to re-enable
+  - Integration tests UI-16..UI-19, UL-01..UL-08 (12 tests)
+
 - **TDD Steps 8–18** — not yet started (control channel, STDIO API, MCP, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (84 on Windows, 87 on Linux)
+cargo test --workspace           # run all tests (98 on Windows, 101 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
 cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier tests only
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
+cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
 ```
