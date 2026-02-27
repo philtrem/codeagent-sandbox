@@ -298,7 +298,7 @@ fn step_reconstruction_from_disk() {
     assert_eq!(interceptor.completed_steps(), vec![1, 2]);
 
     // Rollback should still work
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
     assert_eq!(interceptor.completed_steps(), vec![1]);
 
     // File should be back to step 1 content

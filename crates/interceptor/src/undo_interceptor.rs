@@ -3,8 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use codeagent_common::{CodeAgentError, Result, StepId};
+use codeagent_common::{
+    BarrierInfo, CodeAgentError, ExternalModificationPolicy, Result, RollbackResult, StepId,
+};
 
+use crate::barrier::BarrierTracker;
 use crate::manifest::StepManifest;
 use crate::preimage::{capture_creation_marker, capture_preimage, path_hash};
 use crate::rollback;
@@ -26,6 +29,8 @@ pub struct UndoInterceptor {
     working_root: PathBuf,
     undo_dir: PathBuf,
     step_tracker: StepTracker,
+    barrier_tracker: Mutex<BarrierTracker>,
+    policy: ExternalModificationPolicy,
     inner: Mutex<UndoInterceptorInner>,
 }
 
@@ -38,6 +43,14 @@ struct UndoInterceptorInner {
 
 impl UndoInterceptor {
     pub fn new(working_root: PathBuf, undo_dir: PathBuf) -> Self {
+        Self::with_policy(working_root, undo_dir, ExternalModificationPolicy::default())
+    }
+
+    pub fn with_policy(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        policy: ExternalModificationPolicy,
+    ) -> Self {
         // Initialize the on-disk layout
         let version_path = undo_dir.join("version");
         if !version_path.exists() {
@@ -68,10 +81,15 @@ impl UndoInterceptor {
             }
         }
 
+        // Load barriers from disk
+        let barrier_tracker = BarrierTracker::load(&undo_dir);
+
         Self {
             working_root,
             undo_dir,
             step_tracker,
+            barrier_tracker: Mutex::new(barrier_tracker),
+            policy,
             inner: Mutex::new(UndoInterceptorInner {
                 touched_paths: HashSet::new(),
                 current_manifest: None,
@@ -127,11 +145,31 @@ impl UndoInterceptor {
     }
 
     /// Rollback the most recent N steps (pop semantics — removed from history).
-    pub fn rollback(&self, count: usize) -> Result<()> {
+    ///
+    /// If `force` is false and any undo barriers exist between the current state
+    /// and the target, the rollback is rejected with `RollbackBlocked`.
+    /// If `force` is true, barriers are crossed and removed.
+    pub fn rollback(&self, count: usize, force: bool) -> Result<RollbackResult> {
         let completed = self.step_tracker.completed_steps();
         let steps_to_rollback: Vec<StepId> =
             completed.iter().rev().take(count).copied().collect();
 
+        // Check for blocking barriers
+        let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+        let blocking: Vec<BarrierInfo> = barrier_tracker
+            .barriers_blocking_rollback(&steps_to_rollback)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if !blocking.is_empty() && !force {
+            return Err(CodeAgentError::RollbackBlocked {
+                count: blocking.len(),
+                barriers: blocking,
+            });
+        }
+
+        // Perform the rollback
         for step_id in &steps_to_rollback {
             let step_dir = self.step_dir(*step_id);
             if step_dir.exists() {
@@ -141,12 +179,48 @@ impl UndoInterceptor {
             }
         }
 
-        Ok(())
+        // Remove crossed barriers (pop semantics)
+        if !blocking.is_empty() {
+            barrier_tracker.remove_barriers_for_steps(&steps_to_rollback);
+            barrier_tracker.save(&self.undo_dir)?;
+        }
+
+        Ok(RollbackResult {
+            steps_rolled_back: steps_to_rollback.len(),
+            barriers_crossed: blocking,
+        })
     }
 
     /// Get the list of completed step IDs.
     pub fn completed_steps(&self) -> Vec<StepId> {
         self.step_tracker.completed_steps()
+    }
+
+    /// Record an external modification, optionally creating an undo barrier.
+    ///
+    /// Under `Barrier` policy, creates a barrier and returns it.
+    /// Under `Warn` policy, returns `None` (no barrier created).
+    pub fn notify_external_modification(
+        &self,
+        affected_paths: Vec<PathBuf>,
+    ) -> Result<Option<BarrierInfo>> {
+        match self.policy {
+            ExternalModificationPolicy::Barrier => {
+                let completed = self.step_tracker.completed_steps();
+                let after_step_id = completed.last().copied().unwrap_or(0);
+
+                let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+                let barrier = barrier_tracker.create_barrier(after_step_id, affected_paths);
+                barrier_tracker.save(&self.undo_dir)?;
+                Ok(Some(barrier))
+            }
+            ExternalModificationPolicy::Warn => Ok(None),
+        }
+    }
+
+    /// Return all current undo barriers.
+    pub fn barriers(&self) -> Vec<BarrierInfo> {
+        self.barrier_tracker.lock().unwrap().barriers()
     }
 
     /// Recover from a crash by rolling back any incomplete step in the WAL.

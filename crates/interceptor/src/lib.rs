@@ -1,3 +1,4 @@
+pub mod barrier;
 pub mod manifest;
 pub mod preimage;
 pub mod rollback;

@@ -30,7 +30,7 @@ fn ui_01_write_same_file_3x_in_one_step() {
     assert_eq!(fs::read_to_string(&target).unwrap(), "version 3");
 
     // Rollback should restore original
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert_tree_eq(&before, &after, &compare_opts());
@@ -56,7 +56,7 @@ fn ui_02_create_new_file_and_write() {
     assert!(new_file.exists());
     assert_eq!(fs::read_to_string(&new_file).unwrap(), "updated content");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(!new_file.exists());
@@ -87,7 +87,7 @@ fn ui_03_create_nested_dirs() {
 
     assert!(file.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(!dir1.exists());
@@ -112,7 +112,7 @@ fn ui_04_delete_file() {
 
     assert!(!target.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(target.exists());
@@ -138,7 +138,7 @@ fn ui_05_delete_tree() {
 
     assert!(!tree_root.exists());
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(tree_root.is_dir());
@@ -168,7 +168,7 @@ fn ui_06_rename_file_dest_absent() {
     assert!(to.exists());
     assert_eq!(fs::read_to_string(&to).unwrap(), "content of a");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(from.exists());
@@ -197,7 +197,7 @@ fn ui_07_rename_file_dest_exists() {
     assert!(!from.exists());
     assert_eq!(fs::read_to_string(&to).unwrap(), "content of a");
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(from.exists());
@@ -242,7 +242,7 @@ fn ui_08_rename_dir_with_nested_files() {
         "nested content"
     );
 
-    interceptor.rollback(1).unwrap();
+    interceptor.rollback(1, false).unwrap();
 
     let after = ws.snapshot();
     assert!(src_dir.is_dir());

@@ -59,7 +59,9 @@ Rust workspace at repo root: `resolver = "3"`, `edition = "2024"`, `rust-version
 Cargo.toml                         # workspace root
 crates/
   common/                          # codeagent-common — shared types and errors
-    src/lib.rs                     #   StepId, StepType, StepInfo, CodeAgentError, Result<T>
+    src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
+                                   #   ExternalModificationPolicy, RollbackResult,
+                                   #   CodeAgentError (incl. RollbackBlocked), Result<T>
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
@@ -68,11 +70,14 @@ crates/
       preimage.rs                  #   path_hash, PreimageMetadata, capture/restore preimages
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
-      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl
+      barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
+      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
+                                   #   notify_external_modification(), barriers(), rollback(count, force)
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
       wal_crash_recovery.rs        #   crash recovery tests CR-01..CR-07 + step reconstruction
+      undo_barriers.rs             #   undo barrier tests EB-01..EB-06, EB-08
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -102,6 +107,10 @@ crates/
     preimages/{hash}.dat          # zstd level 3 compressed file contents
     preimages/{hash}.meta.json    # PreimageMetadata (path, type, mode, mtime, etc.)
   ```
+- **Undo barriers**: Barriers are placed "after" a specific completed step. A barrier with
+  `after_step_id = S` blocks rollback of step S (because the external modification happened
+  after S and rolling back S would destroy it). `rollback(count, force)` checks barriers;
+  `force: true` crosses and removes them. Barriers persist in `{undo_dir}/barriers.json`.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
 - **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
@@ -133,14 +142,27 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–3
   - Shared test helpers extracted to `tests/common/mod.rs` (OperationApplier, compare_opts)
   - Integration tests CR-01..CR-07 + step reconstruction test (8 tests)
 
-- **TDD Steps 4–6** — not yet started (undo barriers, safeguards, metadata capture)
+- **TDD Step 4 (Undo Barriers)** — complete
+  - `BarrierId`, `BarrierInfo`, `ExternalModificationPolicy`, `RollbackResult` types in common crate
+  - `RollbackBlocked` error variant for barrier-blocked rollback
+  - `BarrierTracker` module with in-memory state + JSON persistence (`barriers.json`)
+  - `UndoInterceptor::notify_external_modification()` — creates barriers under `Barrier` policy
+  - `UndoInterceptor::rollback(count, force)` — checks barriers, blocks or force-crosses
+  - `UndoInterceptor::barriers()` — query all barriers
+  - `UndoInterceptor::with_policy()` — constructor with configurable policy
+  - Integration tests EB-01..EB-06, EB-08 covering: barrier creation, rollback blocking,
+    force rollback, barrier querying, internal writes no-barrier, multiple barriers,
+    warn policy (7 tests)
+
+- **TDD Steps 5–6** — not yet started (safeguards, metadata capture)
 - **TDD Steps 7–18** — not yet started (resource limits, control channel, STDIO API, MCP, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (57 currently)
+cargo test --workspace           # run all tests (73 currently)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
+cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier tests only
 ```
