@@ -9,6 +9,9 @@ pub type StepId = i64;
 /// Identifies an undo barrier. Monotonically increasing within a session.
 pub type BarrierId = u64;
 
+/// Identifies a safeguard trigger instance. Monotonically increasing within a session.
+pub type SafeguardId = u64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepType {
@@ -61,6 +64,66 @@ pub struct RollbackResult {
     pub barriers_crossed: Vec<BarrierInfo>,
 }
 
+/// The kind of safeguard that was triggered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SafeguardKind {
+    /// The number of delete operations in a step reached the configured threshold.
+    DeleteThreshold { count: u64, threshold: u64 },
+    /// An existing file larger than the configured size threshold is being overwritten.
+    OverwriteLargeFile {
+        path: String,
+        file_size: u64,
+        threshold: u64,
+    },
+    /// A rename operation would overwrite an existing destination file.
+    RenameOverExisting {
+        source: String,
+        destination: String,
+    },
+}
+
+/// Configuration for safeguard thresholds. Each threshold is optional — `None` means
+/// the safeguard is disabled for that kind.
+#[derive(Debug, Clone)]
+pub struct SafeguardConfig {
+    /// Maximum number of delete operations in a single step before triggering.
+    pub delete_threshold: Option<u64>,
+    /// Trigger when overwriting an existing file larger than this many bytes.
+    pub overwrite_file_size_threshold: Option<u64>,
+    /// Trigger when a rename would overwrite an existing destination file.
+    pub rename_over_existing: bool,
+    /// Seconds to wait for a confirmation before auto-denying.
+    pub timeout_seconds: u64,
+}
+
+impl Default for SafeguardConfig {
+    fn default() -> Self {
+        Self {
+            delete_threshold: None,
+            overwrite_file_size_threshold: None,
+            rename_over_existing: false,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+/// Information about a triggered safeguard, sent to the handler for a decision.
+#[derive(Debug, Clone)]
+pub struct SafeguardEvent {
+    pub safeguard_id: SafeguardId,
+    pub step_id: StepId,
+    pub kind: SafeguardKind,
+    /// Representative paths involved in the trigger.
+    pub sample_paths: Vec<String>,
+}
+
+/// The user's decision in response to a safeguard trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafeguardDecision {
+    Allow,
+    Deny,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CodeAgentError {
     #[error("I/O error: {source}")]
@@ -103,6 +166,12 @@ pub enum CodeAgentError {
     RollbackBlocked {
         count: usize,
         barriers: Vec<BarrierInfo>,
+    },
+
+    #[error("safeguard denied: step {step_id} rolled back (safeguard {safeguard_id})")]
+    SafeguardDenied {
+        safeguard_id: SafeguardId,
+        step_id: StepId,
     },
 }
 
@@ -192,5 +261,25 @@ mod tests {
             barriers: vec![],
         };
         assert!(err.to_string().contains("2 undo barrier(s)"));
+    }
+
+    #[test]
+    fn safeguard_config_default_all_disabled() {
+        let config = SafeguardConfig::default();
+        assert_eq!(config.delete_threshold, None);
+        assert_eq!(config.overwrite_file_size_threshold, None);
+        assert!(!config.rename_over_existing);
+        assert_eq!(config.timeout_seconds, 30);
+    }
+
+    #[test]
+    fn safeguard_denied_error_display() {
+        let err = CodeAgentError::SafeguardDenied {
+            safeguard_id: 1,
+            step_id: 42,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("safeguard denied"));
+        assert!(msg.contains("42"));
     }
 }
