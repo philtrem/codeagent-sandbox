@@ -107,6 +107,21 @@ crates/
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
       resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
       gitignore.rs                 #   gitignore filter tests GI-01..GI-08
+  stdio/                           # codeagent-stdio — STDIO API (JSON Lines over stdin/stdout)
+    src/
+      lib.rs                       #   module declarations + re-exports
+      error.rs                     #   StdioError enum (9 variants) + ErrorDetail
+      version.rs                   #   PROTOCOL_VERSION, MIN/MAX_SUPPORTED_VERSION
+      protocol.rs                  #   RequestEnvelope, Request (15 variants), payload structs,
+                                   #   ResponseEnvelope, ErrorDetail, Event (9 variants),
+                                   #   EventEnvelope, LogEntry
+      parser.rs                    #   parse_request() with 1MB size limit, envelope-based
+                                   #   two-step parsing, missing field detection
+      path_validation.rs           #   validate_path() — logical .. resolution + containment
+      router.rs                    #   RequestHandler trait, Router (path validation + dispatch)
+      server.rs                    #   StdioServer async loop (stdin → router → stdout/stderr)
+    tests/
+      stdio_api.rs                 #   SA-01..SA-12 contract tests (37 tests)
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -165,12 +180,20 @@ crates/
   default 100ms idle / 2s max) waits for in-flight FS ops to drain before closing the step.
   Writes outside any command step open ambient steps (negative IDs, auto-close after 5s inactivity).
   The handler is async (tokio) and uses `tokio::spawn` for quiescence/ambient timeout tasks.
+- **STDIO API protocol**: JSON Lines over stdin/stdout. Envelope-based two-step parsing:
+  first parse `RequestEnvelope` (type + request_id + payload), then dispatch on type to
+  parse typed payload. Responses: `{"type":"response","request_id":"...","status":"ok"|"error",...}`.
+  Events: `{"type":"event.*","payload":{...}}`. Error codes are string-based (e.g.,
+  `"unknown_operation"`, `"missing_field"`, `"path_outside_root"`). Protocol version is
+  declared in `session.start` payload (optional `protocol_version` field; absent = v1).
+  Path containment for `fs.read`/`fs.list` uses logical `..` resolution without filesystem
+  access — rejects traversal and absolute paths outside root.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
-  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time), xattr (Linux only), zstd,
-  chrono (+serde).
+  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
+  zstd, chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–9 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–10 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -280,12 +303,30 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–9
     for deterministic time (10 tests)
   - InFlightTracker unit tests (7 tests)
 
-- **TDD Steps 10–18** — not yet started (STDIO API, MCP, fuzz, E2E, etc.)
+- **TDD Step 10 (STDIO API Contract Tests)** — complete
+  - `codeagent-stdio` crate: STDIO API protocol types, JSONL parsing, error taxonomy,
+    path validation, request routing, async server loop
+  - `StdioError` — 9 variants: MalformedJson, UnknownOperation, MissingField, InvalidField,
+    OversizedMessage, UnsupportedProtocolVersion, PathOutsideRoot, MissingRequestId, Io
+  - `ErrorDetail` — structured error response body (code, message, optional field)
+  - `Request` enum — 15 variants: session.{start,stop,reset,status}, undo.{rollback,history,
+    configure,discard}, agent.{execute,prompt}, fs.{list,read,status}, safeguard.{configure,confirm}
+  - `Event` enum — 9 variants: StepCompleted, AgentOutput, TerminalOutput, Warning, Error,
+    SafeguardTriggered, ExternalModification, Recovery, UndoVersionMismatch
+  - Envelope-based two-step parsing: `RequestEnvelope` → type dispatch → typed payload parse
+  - `validate_path()` — logical `..` resolution + containment check (no filesystem access)
+  - `RequestHandler` trait — 15 async methods; `Router` validates paths and protocol version
+  - `StdioServer` — async loop with `tokio::select!` for request/event multiplexing
+  - `LogEntry` — structured JSON Lines log format for stderr (timestamp, level, component)
+  - Integration tests SA-01..SA-12 with `ServerHarness` (in-process server via `tokio::io::duplex`)
+  - Unit tests: 31 (protocol, parser, path_validation). Contract tests: 37 (SA-01..SA-12 + edge cases)
+
+- **TDD Steps 11–18** — not yet started (MCP, fuzz, E2E, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (186 on Windows, 189 on Linux)
+cargo test --workspace           # run all tests (254 on Windows, 257 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -295,4 +336,5 @@ cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource 
 cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
 cargo test -p codeagent-control --test control_channel         # CC unit tests only
 cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
+cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 ```

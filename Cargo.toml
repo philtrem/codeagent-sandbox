@@ -4,6 +4,7 @@ members = [
     "crates/common",
     "crates/control",
     "crates/interceptor",
+    "crates/stdio",
     "crates/test-support",
 ]
 
