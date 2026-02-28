@@ -1,0 +1,20 @@
+[package]
+name = "codeagent-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+codeagent-common = { path = "../common" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] }
+
+[dev-dependencies]
+codeagent-interceptor = { path = "../interceptor" }
+codeagent-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "test-util", "io-util"] }

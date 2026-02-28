@@ -158,6 +158,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeagent-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "codeagent-common",
+ "codeagent-interceptor",
+ "codeagent-test-support",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "codeagent-stdio"
 version = "0.1.0"
 dependencies = [
