@@ -4,17 +4,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use codeagent_common::{
-    BarrierInfo, CodeAgentError, ExternalModificationPolicy, Result, RollbackResult,
-    SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
+    BarrierInfo, CodeAgentError, ExternalModificationPolicy, ResourceLimitsConfig, Result,
+    RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
 };
 
 use crate::barrier::BarrierTracker;
+use crate::gitignore::GitignoreFilter;
 use crate::manifest::StepManifest;
 use crate::preimage::{capture_creation_marker, capture_preimage, path_hash};
+use crate::resource_limits;
 use crate::rollback;
 use crate::safeguard::{SafeguardHandler, SafeguardTracker};
 use crate::step_tracker::StepTracker;
 use crate::write_interceptor::WriteInterceptor;
+
+/// The current on-disk format version. Compared against the `version` file
+/// inside the undo directory on startup.
+const CURRENT_VERSION: &str = "1";
 
 /// Information about a crash recovery that was performed on startup.
 #[derive(Debug, Clone)]
@@ -33,7 +39,13 @@ pub struct UndoInterceptor {
     step_tracker: StepTracker,
     barrier_tracker: Mutex<BarrierTracker>,
     policy: ExternalModificationPolicy,
+    resource_limits: Mutex<ResourceLimitsConfig>,
     safeguard_handler: Option<Box<dyn SafeguardHandler>>,
+    gitignore_filter: Option<GitignoreFilter>,
+    /// When true, undo operations are disabled due to a version mismatch.
+    undo_disabled: Mutex<bool>,
+    /// (expected, found) version strings when a mismatch is detected.
+    version_mismatch_info: Mutex<Option<(String, String)>>,
     inner: Mutex<UndoInterceptorInner>,
 }
 
@@ -44,6 +56,10 @@ struct UndoInterceptorInner {
     current_manifest: Option<StepManifest>,
     /// Per-step safeguard counter and threshold tracker.
     safeguard_tracker: SafeguardTracker,
+    /// Cumulative compressed preimage data size for the current step.
+    current_step_data_size: u64,
+    /// Set when the current step exceeds `max_single_step_size_bytes`.
+    step_unprotected: bool,
 }
 
 impl UndoInterceptor {
@@ -54,6 +70,8 @@ impl UndoInterceptor {
             ExternalModificationPolicy::default(),
             SafeguardConfig::default(),
             None,
+            ResourceLimitsConfig::default(),
+            false,
         )
     }
 
@@ -68,6 +86,8 @@ impl UndoInterceptor {
             policy,
             SafeguardConfig::default(),
             None,
+            ResourceLimitsConfig::default(),
+            false,
         )
     }
 
@@ -84,6 +104,36 @@ impl UndoInterceptor {
             policy,
             safeguard_config,
             Some(safeguard_handler),
+            ResourceLimitsConfig::default(),
+            false,
+        )
+    }
+
+    pub fn with_resource_limits(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        resource_limits: ResourceLimitsConfig,
+    ) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            ExternalModificationPolicy::default(),
+            SafeguardConfig::default(),
+            None,
+            resource_limits,
+            false,
+        )
+    }
+
+    pub fn with_gitignore(working_root: PathBuf, undo_dir: PathBuf) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            ExternalModificationPolicy::default(),
+            SafeguardConfig::default(),
+            None,
+            ResourceLimitsConfig::default(),
+            true,
         )
     }
 
@@ -93,12 +143,27 @@ impl UndoInterceptor {
         policy: ExternalModificationPolicy,
         safeguard_config: SafeguardConfig,
         safeguard_handler: Option<Box<dyn SafeguardHandler>>,
+        resource_limits: ResourceLimitsConfig,
+        respect_gitignore: bool,
     ) -> Self {
-        // Initialize the on-disk layout
+        let mut undo_disabled = false;
+        let mut version_mismatch_info = None;
+
+        // Initialize the on-disk layout or check the existing version
         let version_path = undo_dir.join("version");
-        if !version_path.exists() {
+        if version_path.exists() {
+            let found_version = fs::read_to_string(&version_path)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if found_version != CURRENT_VERSION {
+                undo_disabled = true;
+                version_mismatch_info =
+                    Some((CURRENT_VERSION.to_string(), found_version));
+            }
+        } else {
             fs::create_dir_all(&undo_dir).unwrap_or(());
-            let _ = fs::write(&version_path, "1");
+            let _ = fs::write(&version_path, CURRENT_VERSION);
             fs::create_dir_all(undo_dir.join("wal")).unwrap_or(());
             fs::create_dir_all(undo_dir.join("steps")).unwrap_or(());
         }
@@ -106,26 +171,34 @@ impl UndoInterceptor {
         let step_tracker = StepTracker::new();
 
         // Reconstruct completed steps from on-disk steps/ directory
-        let steps_dir = undo_dir.join("steps");
-        if steps_dir.exists() {
-            let mut step_ids: Vec<StepId> = Vec::new();
-            if let Ok(entries) = fs::read_dir(&steps_dir) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if let Ok(id) = name.parse::<StepId>() {
-                            step_ids.push(id);
+        if !undo_disabled {
+            let steps_dir = undo_dir.join("steps");
+            if steps_dir.exists() {
+                let mut step_ids: Vec<StepId> = Vec::new();
+                if let Ok(entries) = fs::read_dir(&steps_dir) {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if let Ok(id) = name.parse::<StepId>() {
+                                step_ids.push(id);
+                            }
                         }
                     }
                 }
-            }
-            step_ids.sort();
-            for id in step_ids {
-                step_tracker.add_completed_step(id);
+                step_ids.sort();
+                for id in step_ids {
+                    step_tracker.add_completed_step(id);
+                }
             }
         }
 
         // Load barriers from disk
         let barrier_tracker = BarrierTracker::load(&undo_dir);
+
+        let gitignore_filter = if respect_gitignore {
+            GitignoreFilter::build(&working_root)
+        } else {
+            None
+        };
 
         Self {
             working_root,
@@ -133,23 +206,46 @@ impl UndoInterceptor {
             step_tracker,
             barrier_tracker: Mutex::new(barrier_tracker),
             policy,
+            resource_limits: Mutex::new(resource_limits),
             safeguard_handler,
+            gitignore_filter,
+            undo_disabled: Mutex::new(undo_disabled),
+            version_mismatch_info: Mutex::new(version_mismatch_info),
             inner: Mutex::new(UndoInterceptorInner {
                 touched_paths: HashSet::new(),
                 current_manifest: None,
                 safeguard_tracker: SafeguardTracker::new(safeguard_config),
+                current_step_data_size: 0,
+                step_unprotected: false,
             }),
         }
     }
 
+    /// Check if undo is disabled due to a version mismatch.
+    fn check_undo_enabled(&self) -> Result<()> {
+        if *self.undo_disabled.lock().unwrap() {
+            let info = self.version_mismatch_info.lock().unwrap();
+            if let Some((ref expected, ref found)) = *info {
+                return Err(CodeAgentError::UndoDisabled {
+                    expected_version: expected.clone(),
+                    found_version: found.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Open a new undo step.
     pub fn open_step(&self, id: StepId) -> Result<()> {
+        self.check_undo_enabled()?;
         self.step_tracker.open_step(id)?;
 
         let mut inner = self.inner.lock().unwrap();
         inner.touched_paths.clear();
         inner.current_manifest = Some(StepManifest::new(id));
         inner.safeguard_tracker.reset();
+        inner.current_step_data_size = 0;
+        inner.step_unprotected = false;
 
         // Create WAL directory for this step
         let wal_dir = self.wal_in_progress_dir();
@@ -162,12 +258,17 @@ impl UndoInterceptor {
     }
 
     /// Close the current step, promoting WAL to steps/.
-    pub fn close_step(&self, id: StepId) -> Result<()> {
-        // Write the manifest before promotion
+    /// Returns the list of step IDs that were evicted due to resource limits.
+    pub fn close_step(&self, id: StepId) -> Result<Vec<StepId>> {
+        // Write the manifest before promotion, including unprotected flag
         {
             let inner = self.inner.lock().unwrap();
             if let Some(ref manifest) = inner.current_manifest {
-                manifest.write_to(&self.wal_in_progress_dir())?;
+                let mut manifest_to_write = manifest.clone();
+                if inner.step_unprotected {
+                    manifest_to_write.unprotected = true;
+                }
+                manifest_to_write.write_to(&self.wal_in_progress_dir())?;
             }
         }
 
@@ -183,11 +284,27 @@ impl UndoInterceptor {
 
         self.step_tracker.close_step(id)?;
 
-        let mut inner = self.inner.lock().unwrap();
-        inner.touched_paths.clear();
-        inner.current_manifest = None;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.touched_paths.clear();
+            inner.current_manifest = None;
+            inner.current_step_data_size = 0;
+            inner.step_unprotected = false;
+        }
 
-        Ok(())
+        // Run eviction after step promotion
+        let limits = self.resource_limits.lock().unwrap().clone();
+        let steps_dir = self.undo_dir.join("steps");
+        let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+        let evicted = resource_limits::evict_if_needed(
+            &steps_dir,
+            &self.step_tracker,
+            &mut barrier_tracker,
+            &limits,
+            &self.undo_dir,
+        )?;
+
+        Ok(evicted)
     }
 
     /// Rollback the most recent N steps (pop semantics — removed from history).
@@ -195,10 +312,23 @@ impl UndoInterceptor {
     /// If `force` is false and any undo barriers exist between the current state
     /// and the target, the rollback is rejected with `RollbackBlocked`.
     /// If `force` is true, barriers are crossed and removed.
+    /// If any step in the rollback range is unprotected, returns `StepUnprotected`.
     pub fn rollback(&self, count: usize, force: bool) -> Result<RollbackResult> {
         let completed = self.step_tracker.completed_steps();
         let steps_to_rollback: Vec<StepId> =
             completed.iter().rev().take(count).copied().collect();
+
+        // Check for unprotected steps
+        for step_id in &steps_to_rollback {
+            let step_dir = self.step_dir(*step_id);
+            if step_dir.exists() {
+                if let Ok(manifest) = StepManifest::read_from(&step_dir) {
+                    if manifest.unprotected {
+                        return Err(CodeAgentError::StepUnprotected { step_id: *step_id });
+                    }
+                }
+            }
+        }
 
         // Check for blocking barriers
         let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
@@ -267,6 +397,57 @@ impl UndoInterceptor {
     /// Return all current undo barriers.
     pub fn barriers(&self) -> Vec<BarrierInfo> {
         self.barrier_tracker.lock().unwrap().barriers()
+    }
+
+    /// Whether undo is disabled due to a version mismatch.
+    pub fn is_undo_disabled(&self) -> bool {
+        *self.undo_disabled.lock().unwrap()
+    }
+
+    /// Returns the version mismatch info if undo is disabled, as (expected, found).
+    pub fn version_mismatch(&self) -> Option<(String, String)> {
+        self.version_mismatch_info.lock().unwrap().clone()
+    }
+
+    /// Discard the entire undo log and reinitialize with the current version.
+    /// Used after a version mismatch when the user confirms discarding old history.
+    pub fn discard(&self) -> Result<()> {
+        // Remove the entire undo directory contents
+        if self.undo_dir.exists() {
+            fs::remove_dir_all(&self.undo_dir)?;
+        }
+
+        // Reinitialize the on-disk layout
+        fs::create_dir_all(&self.undo_dir)?;
+        fs::write(self.undo_dir.join("version"), CURRENT_VERSION)?;
+        fs::create_dir_all(self.undo_dir.join("wal"))?;
+        fs::create_dir_all(self.undo_dir.join("steps"))?;
+
+        // Clear in-memory state
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.touched_paths.clear();
+            inner.current_manifest = None;
+            inner.current_step_data_size = 0;
+            inner.step_unprotected = false;
+        }
+
+        // Clear step tracker (remove all completed steps)
+        for step_id in self.step_tracker.completed_steps() {
+            self.step_tracker.remove_completed_step(step_id);
+        }
+
+        // Clear barriers
+        {
+            let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
+            *barrier_tracker = BarrierTracker::load(&self.undo_dir);
+        }
+
+        // Re-enable undo
+        *self.undo_disabled.lock().unwrap() = false;
+        *self.version_mismatch_info.lock().unwrap() = None;
+
+        Ok(())
     }
 
     /// Recover from a crash by rolling back any incomplete step in the WAL.
@@ -393,6 +574,8 @@ impl UndoInterceptor {
             inner.touched_paths.clear();
             inner.current_manifest = None;
             inner.safeguard_tracker.reset();
+            inner.current_step_data_size = 0;
+            inner.step_unprotected = false;
         }
 
         // Roll back using the WAL data
@@ -460,6 +643,7 @@ impl UndoInterceptor {
 
     /// Ensure the preimage for an existing path is captured on first touch.
     /// Returns true if this was the first touch (preimage was captured).
+    /// Skips capture if the step is already marked unprotected.
     fn ensure_preimage(&self, file_path: &Path) -> Result<bool> {
         let relative = file_path.strip_prefix(&self.working_root).map_err(|_| {
             CodeAgentError::Preimage {
@@ -469,7 +653,19 @@ impl UndoInterceptor {
         })?;
         let relative_str = normalized_relative_path(relative);
 
+        if let Some(ref filter) = self.gitignore_filter {
+            let is_dir = file_path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
+            if filter.is_ignored(&relative_str, is_dir) {
+                return Ok(false);
+            }
+        }
+
         let mut inner = self.inner.lock().unwrap();
+
+        // Skip if step is already unprotected (exceeded size limit)
+        if inner.step_unprotected {
+            return Ok(false);
+        }
 
         // First-touch check
         if inner.touched_paths.contains(&relative_str) {
@@ -484,12 +680,22 @@ impl UndoInterceptor {
         let wal_preimage_dir = self.wal_in_progress_dir().join("preimages");
         let hash = path_hash(relative);
 
-        let meta = capture_preimage(file_path, &self.working_root, &wal_preimage_dir)?;
+        let (meta, data_size) = capture_preimage(file_path, &self.working_root, &wal_preimage_dir)?;
         if let Some(ref mut manifest) = inner.current_manifest {
             manifest.add_entry(&relative_str, &hash, true, meta.file_type.as_str());
         }
 
         inner.touched_paths.insert(relative_str);
+
+        // Track cumulative data size and check threshold
+        inner.current_step_data_size += data_size;
+        let limits = self.resource_limits.lock().unwrap();
+        if let Some(max_size) = limits.max_single_step_size_bytes {
+            if inner.current_step_data_size > max_size {
+                inner.step_unprotected = true;
+            }
+        }
+
         Ok(true)
     }
 
@@ -503,7 +709,19 @@ impl UndoInterceptor {
         })?;
         let relative_str = normalized_relative_path(relative);
 
+        if let Some(ref filter) = self.gitignore_filter {
+            let is_dir = file_path.is_dir();
+            if filter.is_ignored(&relative_str, is_dir) {
+                return Ok(());
+            }
+        }
+
         let mut inner = self.inner.lock().unwrap();
+
+        // Skip if step is already unprotected
+        if inner.step_unprotected {
+            return Ok(());
+        }
 
         if inner.touched_paths.contains(&relative_str) {
             return Ok(());
@@ -530,6 +748,17 @@ impl UndoInterceptor {
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
             let path = entry.path();
+
+            // Skip ignored subtrees early to avoid unnecessary I/O
+            if let Some(ref filter) = self.gitignore_filter {
+                if let Ok(relative) = path.strip_prefix(&self.working_root) {
+                    let relative_str = normalized_relative_path(relative);
+                    if filter.is_ignored(&relative_str, path.is_dir()) {
+                        continue;
+                    }
+                }
+            }
+
             self.ensure_preimage(&path)?;
             if path.is_dir() {
                 self.capture_tree_preimages(&path)?;

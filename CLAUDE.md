@@ -64,7 +64,24 @@ crates/
     src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
                                    #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
                                    #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
-                                   #   CodeAgentError (incl. RollbackBlocked, SafeguardDenied), Result<T>
+                                   #   ResourceLimitsConfig, CodeAgentError (incl. RollbackBlocked,
+                                   #   SafeguardDenied, StepUnprotected, UndoDisabled), Result<T>
+  control/                         # codeagent-control — control channel protocol + handler
+    src/
+      lib.rs                       #   module declarations + re-exports
+      error.rs                     #   ControlChannelError enum
+      protocol.rs                  #   HostMessage (Exec, Cancel, RollbackNotify),
+                                   #   VmMessage (StepStarted, Output, StepCompleted),
+                                   #   OutputStream
+      parser.rs                    #   JSONL parsing with 1MB size limit
+      state_machine.rs             #   ControlChannelState, ControlEvent, PendingCommand,
+                                   #   ActiveCommand — validates message sequences
+      handler.rs                   #   StepManager trait, QuiescenceConfig, HandlerEvent,
+                                   #   ControlChannelHandler (quiescence + ambient steps)
+      in_flight.rs                 #   InFlightTracker (Arc<AtomicUsize> + Notify)
+    tests/
+      control_channel.rs           #   CC-01..CC-07 + edge cases
+      control_channel_integration.rs # CC-08..CC-12 + edge cases (MockStepManager, paused time)
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
@@ -75,15 +92,21 @@ crates/
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
       barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
+      resource_limits.rs             #   calculate_step_size, calculate_total_log_size, evict_if_needed
+      gitignore.rs                 #   GitignoreFilter (opt-in .gitignore-aware preimage skipping)
       undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
                                    #   notify_external_modification(), barriers(), rollback(count, force),
-                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*
+                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
+                                   #   with_resource_limits(), with_gitignore(), discard(), is_undo_disabled(),
+                                   #   version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
       wal_crash_recovery.rs        #   crash recovery tests CR-01..CR-07 + step reconstruction
       undo_barriers.rs             #   undo barrier tests EB-01..EB-06, EB-08
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
+      resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
+      gitignore.rs                 #   gitignore filter tests GI-01..GI-08
   test-support/                    # codeagent-test-support — test utilities
     src/
       lib.rs                       #   re-exports
@@ -121,13 +144,33 @@ crates/
   checked in `pre_*` methods. On trigger, calls `SafeguardHandler::on_safeguard_triggered()` which
   blocks until Allow/Deny. On Deny, `rollback_current_step()` undoes all operations in the current
   step and cancels it. Once a safeguard kind is allowed for a step, it does not re-trigger.
+- **Resource limits**: `ResourceLimitsConfig` controls max log size, max step count, and max
+  single-step preimage data size. On `close_step`, FIFO eviction removes oldest steps to stay
+  within budget. Steps exceeding `max_single_step_size_bytes` are marked `unprotected` — they
+  cannot be rolled back but do not block rollback of subsequent steps. Version mismatch
+  (`version` file ≠ `CURRENT_VERSION`) disables undo; `discard()` re-enables it.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
-- **Dependencies** (all permissively licensed): blake3, filetime, serde (+derive), serde_json,
-  tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
+- **Gitignore filtering**: Opt-in via `UndoInterceptor::with_gitignore()`. When enabled, the
+  `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
+  Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
+  and `capture_tree_preimages` — no preimage, no manifest entry.
+- **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
+  `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
+  Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
+  parsing). The `ControlChannelState` validates sequences and emits `ControlEvent`s;
+  protocol violations produce `ProtocolError` events without breaking the channel.
+- **Control channel handler**: `ControlChannelHandler<S: StepManager>` integrates the protocol
+  state machine with step lifecycle. After `step_completed`, a quiescence window (configurable,
+  default 100ms idle / 2s max) waits for in-flight FS ops to drain before closing the step.
+  Writes outside any command step open ambient steps (negative IDs, auto-close after 5s inactivity).
+  The handler is async (tokio) and uses `tokio::spawn` for quiescence/ambient timeout tasks.
+- **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
+  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time), xattr (Linux only), zstd,
+  chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–9 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -188,16 +231,68 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–5
   - Integration tests UI-09..UI-15 covering: truncate-open, truncate-setattr, chmod (Unix),
     xattr-set (Linux), xattr-remove (Linux), fallocate, copy-file-range (7 tests; 4 on Windows)
 
-- **TDD Step 7** — not yet started (resource limits + pruning)
-- **TDD Steps 8–18** — not yet started (control channel, STDIO API, MCP, etc.)
+- **TDD Step 7 (Resource Limits + Pruning)** — complete
+  - `ResourceLimitsConfig` in common crate: `max_log_size_bytes`, `max_step_count`,
+    `max_single_step_size_bytes` (all `Option`, default `None`)
+  - `StepUnprotected` and `UndoDisabled` error variants in `CodeAgentError`
+  - `StepManifest::unprotected` field marks steps that exceeded single-step size limit
+  - Atomic preimage writes (temp-file-then-rename) for `.meta.json` and `.dat` files
+  - `capture_preimage` returns `(PreimageMetadata, u64)` — includes compressed data size
+  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size`, `evict_if_needed`
+    (FIFO eviction by step count and log size)
+  - `UndoInterceptor::with_resource_limits()` — constructor with limits config
+  - `close_step` returns `Result<Vec<StepId>>` — list of evicted step IDs
+  - Unprotected step tracking: skips preimage capture after threshold exceeded, blocks rollback
+  - Version mismatch detection on construction, `is_undo_disabled()`, `discard()` to re-enable
+  - Integration tests UI-16..UI-19, UL-01..UL-08 (12 tests)
+
+- **TDD Step 8 (Control Channel Parsing + State Machine)** — complete
+  - `codeagent-control` crate: control channel protocol types, JSONL parsing, state machine
+  - `ControlChannelError` — MalformedJson, UnknownMessageType, OversizedMessage,
+    UnexpectedStepCompleted, DuplicateStepStarted, OutputForUnknownCommand,
+    UnexpectedStepStarted, CancelUnknownCommand
+  - `HostMessage` enum (Exec, Cancel, RollbackNotify) — serde-tagged, per project-plan §4.2
+  - `VmMessage` enum (StepStarted, Output, StepCompleted) — serde-tagged
+  - `parse_vm_message` / `parse_host_message` — JSONL parsing with 1MB size limit (rejects
+    before deserialization), distinguishes malformed JSON from unknown message types
+  - `ControlChannelState` — tracks pending (exec sent) and active (step_started received)
+    commands, validates sequences, emits `ControlEvent`s for the caller
+  - `cancel_command` — handles cancellation of pending or active commands
+  - Protocol error resilience: violations produce `ControlEvent::ProtocolError`, channel continues
+  - Integration tests CC-01..CC-07 + edge cases (18 tests), unit tests (28 tests)
+
+- **TDD Step 9 (Control Channel Integration — Fake Shim)** — complete
+  - `StepManager` trait in `handler.rs` — abstracts step lifecycle for testability
+  - `InFlightTracker` in `in_flight.rs` — `Arc<AtomicUsize>` + `tokio::sync::Notify` for
+    tracking in-flight filesystem operations and quiescence drain detection
+  - `QuiescenceConfig` — configurable idle timeout (100ms), max timeout (2s), ambient
+    inactivity timeout (5s)
+  - `HandlerEvent` enum — StepStarted, Output, StepCompleted, AmbientStepOpened,
+    AmbientStepClosed, ProtocolError
+  - `ControlChannelHandler<S: StepManager>` — integrates `ControlChannelState` with step
+    lifecycle, quiescence window (spawned tokio task), ambient step management
+  - Quiescence algorithm: after `step_completed`, wait for in-flight drain + idle_timeout,
+    bounded by max_timeout; prevents hangs when operations never complete
+  - Ambient steps: negative IDs (-1, -2, ...), auto-close after inactivity timeout,
+    reset on each write, closed by new exec commands
+  - `MockStepManager` in test file — records open/close calls for assertion
+  - Integration tests CC-08..CC-12 + 5 edge cases using `#[tokio::test(start_paused = true)]`
+    for deterministic time (10 tests)
+  - InFlightTracker unit tests (7 tests)
+
+- **TDD Steps 10–18** — not yet started (STDIO API, MCP, fuzz, E2E, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (84 on Windows, 87 on Linux)
+cargo test --workspace           # run all tests (186 on Windows, 189 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
 cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier tests only
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
+cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
+cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
+cargo test -p codeagent-control --test control_channel         # CC unit tests only
+cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
 ```

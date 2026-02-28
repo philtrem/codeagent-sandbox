@@ -12,6 +12,10 @@ pub struct StepManifest {
     pub timestamp: String,
     pub command: Option<String>,
     pub entries: BTreeMap<String, ManifestEntry>,
+    /// When true, preimage capture was incomplete (exceeded the single-step size
+    /// limit). The step cannot be rolled back.
+    #[serde(default)]
+    pub unprotected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +32,7 @@ impl StepManifest {
             timestamp: chrono::Utc::now().to_rfc3339(),
             command: None,
             entries: BTreeMap::new(),
+            unprotected: false,
         }
     }
 
@@ -108,5 +113,35 @@ mod tests {
         let manifest = StepManifest::new(1);
         assert!(manifest.entries.is_empty());
         assert!(manifest.command.is_none());
+        assert!(!manifest.unprotected);
+    }
+
+    #[test]
+    fn manifest_unprotected_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let mut manifest = StepManifest::new(1);
+        manifest.unprotected = true;
+        manifest.add_entry("file.txt", "hash", true, "regular");
+
+        manifest.write_to(dir.path()).unwrap();
+        let loaded = StepManifest::read_from(dir.path()).unwrap();
+
+        assert!(loaded.unprotected);
+    }
+
+    #[test]
+    fn manifest_without_unprotected_field_defaults_to_false() {
+        let dir = TempDir::new().unwrap();
+        // Simulate a manifest written by an older version without the unprotected field
+        let json = r#"{
+            "step_id": 1,
+            "timestamp": "2024-01-01T00:00:00Z",
+            "command": null,
+            "entries": {}
+        }"#;
+        fs::write(dir.path().join("manifest.json"), json).unwrap();
+
+        let loaded = StepManifest::read_from(dir.path()).unwrap();
+        assert!(!loaded.unprotected);
     }
 }

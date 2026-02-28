@@ -50,12 +50,15 @@ pub struct PreimageMetadata {
 
 /// Capture the preimage of an existing path: metadata + compressed contents.
 /// Writes `{path_hash}.dat` (zstd-compressed) and `{path_hash}.meta.json`
-/// to `preimage_dir`.
+/// to `preimage_dir` using atomic temp-file-then-rename.
+///
+/// Returns the metadata and the number of data bytes written (compressed .dat
+/// file size; 0 for directories and symlinks).
 pub fn capture_preimage(
     file_path: &Path,
     working_root: &Path,
     preimage_dir: &Path,
-) -> codeagent_common::Result<PreimageMetadata> {
+) -> codeagent_common::Result<(PreimageMetadata, u64)> {
     let relative = file_path.strip_prefix(working_root).map_err(|_| {
         CodeAgentError::Preimage {
             path: file_path.to_path_buf(),
@@ -65,7 +68,9 @@ pub fn capture_preimage(
 
     let hash = path_hash(relative);
     let meta_path = preimage_dir.join(format!("{hash}.meta.json"));
+    let meta_tmp = preimage_dir.join(format!("{hash}.meta.json.tmp"));
     let data_path = preimage_dir.join(format!("{hash}.dat"));
+    let data_tmp = preimage_dir.join(format!("{hash}.dat.tmp"));
 
     let metadata = fs::symlink_metadata(file_path)?;
 
@@ -98,8 +103,10 @@ pub fn capture_preimage(
     };
 
     let meta_json = serde_json::to_string_pretty(&preimage_meta)?;
-    fs::write(&meta_path, meta_json)?;
+    fs::write(&meta_tmp, meta_json)?;
+    fs::rename(&meta_tmp, &meta_path)?;
 
+    let mut data_bytes_written: u64 = 0;
     if file_type == PreimageFileType::Regular {
         let contents = fs::read(file_path)?;
         let compressed = zstd::encode_all(contents.as_slice(), 3)
@@ -107,10 +114,12 @@ pub fn capture_preimage(
                 path: file_path.to_path_buf(),
                 message: format!("zstd compression failed: {e}"),
             })?;
-        fs::write(&data_path, compressed)?;
+        data_bytes_written = compressed.len() as u64;
+        fs::write(&data_tmp, &compressed)?;
+        fs::rename(&data_tmp, &data_path)?;
     }
 
-    Ok(preimage_meta)
+    Ok((preimage_meta, data_bytes_written))
 }
 
 /// Capture a "not existed" preimage marker for newly created paths.
@@ -149,7 +158,9 @@ pub fn capture_creation_marker(
     };
 
     let meta_json = serde_json::to_string_pretty(&preimage_meta)?;
-    fs::write(&meta_path, meta_json)?;
+    let meta_tmp = preimage_dir.join(format!("{hash}.meta.json.tmp"));
+    fs::write(&meta_tmp, meta_json)?;
+    fs::rename(&meta_tmp, &meta_path)?;
 
     Ok(preimage_meta)
 }
@@ -237,12 +248,13 @@ mod tests {
         let file_path = working.join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
 
-        let meta = capture_preimage(&file_path, &working, &preimages).unwrap();
+        let (meta, data_size) = capture_preimage(&file_path, &working, &preimages).unwrap();
 
         assert!(meta.existed_before);
         assert_eq!(meta.relative_path, "test.txt");
         assert_eq!(meta.file_type, PreimageFileType::Regular);
         assert_eq!(meta.size, 11);
+        assert!(data_size > 0);
 
         // Verify .meta.json was written
         let hash = path_hash(Path::new("test.txt"));
@@ -258,7 +270,8 @@ mod tests {
         fs::create_dir_all(working.join("subdir")).unwrap();
         fs::create_dir_all(&preimages).unwrap();
 
-        let meta = capture_preimage(&working.join("subdir"), &working, &preimages).unwrap();
+        let (meta, data_size) = capture_preimage(&working.join("subdir"), &working, &preimages).unwrap();
+        assert_eq!(data_size, 0);
 
         assert!(meta.existed_before);
         assert_eq!(meta.file_type, PreimageFileType::Directory);

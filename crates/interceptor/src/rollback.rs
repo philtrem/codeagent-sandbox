@@ -192,7 +192,7 @@ mod tests {
         fs::write(&file, "original content").unwrap();
 
         // Capture preimage manually
-        let meta = capture_preimage(&file, &working, &preimage_dir).unwrap();
+        let (meta, _) = capture_preimage(&file, &working, &preimage_dir).unwrap();
         let hash = crate::preimage::path_hash(Path::new("test.txt"));
 
         let mut manifest = StepManifest::new(1);
@@ -252,8 +252,8 @@ mod tests {
         // Capture preimages
         let dir_hash = crate::preimage::path_hash(Path::new("mydir"));
         let file_hash = crate::preimage::path_hash(Path::new("mydir/file.txt"));
-        let dir_meta = capture_preimage(&sub_dir, &working, &preimage_dir).unwrap();
-        let file_meta = capture_preimage(&file, &working, &preimage_dir).unwrap();
+        let (dir_meta, _) = capture_preimage(&sub_dir, &working, &preimage_dir).unwrap();
+        let (file_meta, _) = capture_preimage(&file, &working, &preimage_dir).unwrap();
 
         let mut manifest = StepManifest::new(1);
         manifest.add_entry("mydir", &dir_hash, true, dir_meta.file_type.as_str());

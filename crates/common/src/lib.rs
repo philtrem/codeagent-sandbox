@@ -82,6 +82,22 @@ pub enum SafeguardKind {
     },
 }
 
+/// Configuration for undo log resource limits. Each limit is optional — `None` means
+/// no limit is enforced for that dimension.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceLimitsConfig {
+    /// Maximum total size of the undo log in bytes. When exceeded, oldest steps
+    /// are evicted (FIFO) until the log fits within budget.
+    pub max_log_size_bytes: Option<u64>,
+    /// Maximum number of completed steps to retain. When exceeded, oldest steps
+    /// are evicted in FIFO order.
+    pub max_step_count: Option<usize>,
+    /// Maximum cumulative preimage data size for a single step. When exceeded,
+    /// the step stops capturing preimages and is marked "unprotected" — it cannot
+    /// be rolled back individually, but subsequent steps can still be.
+    pub max_single_step_size_bytes: Option<u64>,
+}
+
 /// Configuration for safeguard thresholds. Each threshold is optional — `None` means
 /// the safeguard is disabled for that kind.
 #[derive(Debug, Clone)]
@@ -172,6 +188,15 @@ pub enum CodeAgentError {
     SafeguardDenied {
         safeguard_id: SafeguardId,
         step_id: StepId,
+    },
+
+    #[error("step {step_id} is unprotected (preimage capture exceeded size limit)")]
+    StepUnprotected { step_id: StepId },
+
+    #[error("undo disabled: version mismatch (expected {expected_version}, found {found_version})")]
+    UndoDisabled {
+        expected_version: String,
+        found_version: String,
     },
 }
 
@@ -270,6 +295,34 @@ mod tests {
         assert_eq!(config.overwrite_file_size_threshold, None);
         assert!(!config.rename_over_existing);
         assert_eq!(config.timeout_seconds, 30);
+    }
+
+    #[test]
+    fn resource_limits_config_default_all_none() {
+        let config = ResourceLimitsConfig::default();
+        assert_eq!(config.max_log_size_bytes, None);
+        assert_eq!(config.max_step_count, None);
+        assert_eq!(config.max_single_step_size_bytes, None);
+    }
+
+    #[test]
+    fn step_unprotected_error_display() {
+        let err = CodeAgentError::StepUnprotected { step_id: 5 };
+        let msg = err.to_string();
+        assert!(msg.contains("unprotected"));
+        assert!(msg.contains("5"));
+    }
+
+    #[test]
+    fn undo_disabled_error_display() {
+        let err = CodeAgentError::UndoDisabled {
+            expected_version: "1".to_string(),
+            found_version: "2".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("version mismatch"));
+        assert!(msg.contains("expected 1"));
+        assert!(msg.contains("found 2"));
     }
 
     #[test]
