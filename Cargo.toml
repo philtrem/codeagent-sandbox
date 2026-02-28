@@ -23,3 +23,4 @@ thiserror = "2"
 xattr = "1"
 zstd = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }

@@ -66,7 +66,7 @@ crates/
                                    #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
                                    #   ResourceLimitsConfig, CodeAgentError (incl. RollbackBlocked,
                                    #   SafeguardDenied, StepUnprotected, UndoDisabled), Result<T>
-  control/                         # codeagent-control — control channel protocol
+  control/                         # codeagent-control — control channel protocol + handler
     src/
       lib.rs                       #   module declarations + re-exports
       error.rs                     #   ControlChannelError enum
@@ -76,8 +76,12 @@ crates/
       parser.rs                    #   JSONL parsing with 1MB size limit
       state_machine.rs             #   ControlChannelState, ControlEvent, PendingCommand,
                                    #   ActiveCommand — validates message sequences
+      handler.rs                   #   StepManager trait, QuiescenceConfig, HandlerEvent,
+                                   #   ControlChannelHandler (quiescence + ambient steps)
+      in_flight.rs                 #   InFlightTracker (Arc<AtomicUsize> + Notify)
     tests/
       control_channel.rs           #   CC-01..CC-07 + edge cases
+      control_channel_integration.rs # CC-08..CC-12 + edge cases (MockStepManager, paused time)
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
@@ -156,11 +160,17 @@ crates/
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
   parsing). The `ControlChannelState` validates sequences and emits `ControlEvent`s;
   protocol violations produce `ProtocolError` events without breaking the channel.
+- **Control channel handler**: `ControlChannelHandler<S: StepManager>` integrates the protocol
+  state machine with step lifecycle. After `step_completed`, a quiescence window (configurable,
+  default 100ms idle / 2s max) waits for in-flight FS ops to drain before closing the step.
+  Writes outside any command step open ambient steps (negative IDs, auto-close after 5s inactivity).
+  The handler is async (tokio) and uses `tokio::spawn` for quiescence/ambient timeout tasks.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
-  serde_json, tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
+  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time), xattr (Linux only), zstd,
+  chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–8 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–9 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -251,12 +261,31 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–8
   - Protocol error resilience: violations produce `ControlEvent::ProtocolError`, channel continues
   - Integration tests CC-01..CC-07 + edge cases (18 tests), unit tests (28 tests)
 
-- **TDD Steps 9–18** — not yet started (control channel integration, STDIO API, MCP, etc.)
+- **TDD Step 9 (Control Channel Integration — Fake Shim)** — complete
+  - `StepManager` trait in `handler.rs` — abstracts step lifecycle for testability
+  - `InFlightTracker` in `in_flight.rs` — `Arc<AtomicUsize>` + `tokio::sync::Notify` for
+    tracking in-flight filesystem operations and quiescence drain detection
+  - `QuiescenceConfig` — configurable idle timeout (100ms), max timeout (2s), ambient
+    inactivity timeout (5s)
+  - `HandlerEvent` enum — StepStarted, Output, StepCompleted, AmbientStepOpened,
+    AmbientStepClosed, ProtocolError
+  - `ControlChannelHandler<S: StepManager>` — integrates `ControlChannelState` with step
+    lifecycle, quiescence window (spawned tokio task), ambient step management
+  - Quiescence algorithm: after `step_completed`, wait for in-flight drain + idle_timeout,
+    bounded by max_timeout; prevents hangs when operations never complete
+  - Ambient steps: negative IDs (-1, -2, ...), auto-close after inactivity timeout,
+    reset on each write, closed by new exec commands
+  - `MockStepManager` in test file — records open/close calls for assertion
+  - Integration tests CC-08..CC-12 + 5 edge cases using `#[tokio::test(start_paused = true)]`
+    for deterministic time (10 tests)
+  - InFlightTracker unit tests (7 tests)
+
+- **TDD Steps 10–18** — not yet started (STDIO API, MCP, fuzz, E2E, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (152 on Windows, 155 on Linux)
+cargo test --workspace           # run all tests (186 on Windows, 189 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -264,5 +293,6 @@ cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier test
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
 cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
 cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
-cargo test -p codeagent-control --test control_channel         # CC control channel tests only
+cargo test -p codeagent-control --test control_channel         # CC unit tests only
+cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
 ```
