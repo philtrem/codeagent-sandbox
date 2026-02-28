@@ -121,6 +121,15 @@ impl<'a> OperationApplier<'a> {
         xattr::remove(path, key).unwrap();
     }
 
+    /// Create a symlink pointing to `target` at `link_path`.
+    pub fn create_symlink(&self, target: &Path, link_path: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link_path).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link_path).unwrap();
+        self.interceptor.post_symlink(target, link_path).unwrap();
+    }
+
     /// Recursively record all entries under a directory as newly created.
     pub fn record_tree_creation(&self, dir: &Path) {
         self.interceptor.post_mkdir(dir).unwrap();

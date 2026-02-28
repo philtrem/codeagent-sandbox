@@ -40,6 +40,27 @@ pub enum ExternalModificationPolicy {
     Warn,
 }
 
+/// Controls how the undo interceptor handles symlinks.
+///
+/// Symlinks can point outside the working root, creating security risks:
+/// - **Read risk**: preimage capture follows a symlink and stores content from
+///   outside the sandbox.
+/// - **Write risk**: rollback restores a symlink that points outside the sandbox,
+///   then subsequent operations write through it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymlinkPolicy {
+    /// Do not capture or restore symlinks. Symlink paths are silently skipped
+    /// during preimage capture, creation recording, and rollback restore.
+    #[default]
+    Ignore,
+    /// Capture symlink preimages (read through symlinks) but do not restore
+    /// them during rollback (no write through symlinks).
+    ReadOnly,
+    /// Full symlink support: capture preimages and restore on rollback.
+    ReadWrite,
+}
+
 /// A marker in the undo history that prevents rollback from crossing it.
 ///
 /// Barriers are created when external modifications are detected in the working
@@ -323,6 +344,24 @@ mod tests {
         assert!(msg.contains("version mismatch"));
         assert!(msg.contains("expected 1"));
         assert!(msg.contains("found 2"));
+    }
+
+    #[test]
+    fn symlink_policy_default_is_ignore() {
+        assert_eq!(SymlinkPolicy::default(), SymlinkPolicy::Ignore);
+    }
+
+    #[test]
+    fn symlink_policy_serde_round_trip() {
+        for variant in [
+            SymlinkPolicy::Ignore,
+            SymlinkPolicy::ReadOnly,
+            SymlinkPolicy::ReadWrite,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: SymlinkPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, deserialized);
+        }
     }
 
     #[test]

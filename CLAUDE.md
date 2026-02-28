@@ -63,9 +63,10 @@ crates/
   common/                          # codeagent-common — shared types and errors
     src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
                                    #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
-                                   #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
-                                   #   ResourceLimitsConfig, CodeAgentError (incl. RollbackBlocked,
-                                   #   SafeguardDenied, StepUnprotected, UndoDisabled), Result<T>
+                                   #   SafeguardDecision, ExternalModificationPolicy, SymlinkPolicy,
+                                   #   RollbackResult, ResourceLimitsConfig, CodeAgentError (incl.
+                                   #   RollbackBlocked, SafeguardDenied, StepUnprotected,
+                                   #   UndoDisabled), Result<T>
   control/                         # codeagent-control — control channel protocol + handler
     src/
       lib.rs                       #   module declarations + re-exports
@@ -97,8 +98,8 @@ crates/
       undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
                                    #   notify_external_modification(), barriers(), rollback(count, force),
                                    #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
-                                   #   with_resource_limits(), with_gitignore(), discard(), is_undo_disabled(),
-                                   #   version check
+                                   #   with_resource_limits(), with_gitignore(), with_symlink_policy(),
+                                   #   discard(), is_undo_disabled(), version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
       undo_interceptor.rs          #   integration tests UI-01..UI-08
@@ -107,6 +108,7 @@ crates/
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
       resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
       gitignore.rs                 #   gitignore filter tests GI-01..GI-08
+      symlink_policy.rs            #   symlink policy tests SY-01..SY-08
       proptest_model.rs            #   model-based property tests (proptest): undo_model, undo_model_multi_step_rollback
   mcp/                             # codeagent-mcp — MCP server (JSON-RPC 2.0 over local socket)
     src/
@@ -204,6 +206,12 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
   Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
   and `capture_tree_preimages` — no preimage, no manifest entry.
+- **Symlink policy**: Three-state `SymlinkPolicy` enum (`Ignore`, `ReadOnly`, `ReadWrite`),
+  default `Ignore`. Configured via `UndoInterceptor::with_symlink_policy()`. `Ignore` skips
+  symlinks in `ensure_preimage`, `record_creation`, `capture_tree_preimages`, `post_symlink`,
+  and `pre_link`. `ReadOnly` allows preimage capture (read-side) but skips symlink restore on
+  rollback (write-side). `ReadWrite` enables full symlink support. Write is conditional on
+  read — the enum prevents the invalid `read=false, write=true` combination.
 - **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
   `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
@@ -411,7 +419,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (313 on Windows, 316 on Linux)
+cargo test --workspace           # run all tests (321 on Windows, 324 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -419,6 +427,7 @@ cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier test
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
 cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
 cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
+cargo test -p codeagent-interceptor --test symlink_policy      # SY symlink policy tests only
 cargo test -p codeagent-control --test control_channel         # CC unit tests only
 cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use codeagent_common::{
     BarrierInfo, CodeAgentError, ExternalModificationPolicy, ResourceLimitsConfig, Result,
-    RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
+    RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId, SymlinkPolicy,
 };
 
 use crate::barrier::BarrierTracker;
@@ -41,6 +41,7 @@ pub struct UndoInterceptor {
     policy: ExternalModificationPolicy,
     resource_limits: Mutex<ResourceLimitsConfig>,
     safeguard_handler: Option<Box<dyn SafeguardHandler>>,
+    symlink_policy: SymlinkPolicy,
     gitignore_filter: Option<GitignoreFilter>,
     /// When true, undo operations are disabled due to a version mismatch.
     undo_disabled: Mutex<bool>,
@@ -71,6 +72,7 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             ResourceLimitsConfig::default(),
+            SymlinkPolicy::default(),
             false,
         )
     }
@@ -87,6 +89,7 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             ResourceLimitsConfig::default(),
+            SymlinkPolicy::default(),
             false,
         )
     }
@@ -105,6 +108,7 @@ impl UndoInterceptor {
             safeguard_config,
             Some(safeguard_handler),
             ResourceLimitsConfig::default(),
+            SymlinkPolicy::default(),
             false,
         )
     }
@@ -121,6 +125,24 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             resource_limits,
+            SymlinkPolicy::default(),
+            false,
+        )
+    }
+
+    pub fn with_symlink_policy(
+        working_root: PathBuf,
+        undo_dir: PathBuf,
+        symlink_policy: SymlinkPolicy,
+    ) -> Self {
+        Self::build(
+            working_root,
+            undo_dir,
+            ExternalModificationPolicy::default(),
+            SafeguardConfig::default(),
+            None,
+            ResourceLimitsConfig::default(),
+            symlink_policy,
             false,
         )
     }
@@ -133,10 +155,12 @@ impl UndoInterceptor {
             SafeguardConfig::default(),
             None,
             ResourceLimitsConfig::default(),
+            SymlinkPolicy::default(),
             true,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         working_root: PathBuf,
         undo_dir: PathBuf,
@@ -144,6 +168,7 @@ impl UndoInterceptor {
         safeguard_config: SafeguardConfig,
         safeguard_handler: Option<Box<dyn SafeguardHandler>>,
         resource_limits: ResourceLimitsConfig,
+        symlink_policy: SymlinkPolicy,
         respect_gitignore: bool,
     ) -> Self {
         let mut undo_disabled = false;
@@ -208,6 +233,7 @@ impl UndoInterceptor {
             policy,
             resource_limits: Mutex::new(resource_limits),
             safeguard_handler,
+            symlink_policy,
             gitignore_filter,
             undo_disabled: Mutex::new(undo_disabled),
             version_mismatch_info: Mutex::new(version_mismatch_info),
@@ -349,7 +375,7 @@ impl UndoInterceptor {
         for step_id in &steps_to_rollback {
             let step_dir = self.step_dir(*step_id);
             if step_dir.exists() {
-                rollback::rollback_step(&step_dir, &self.working_root)?;
+                rollback::rollback_step(&step_dir, &self.working_root, self.symlink_policy)?;
                 fs::remove_dir_all(&step_dir)?;
                 self.step_tracker.remove_completed_step(*step_id);
             }
@@ -500,7 +526,7 @@ impl UndoInterceptor {
             if !manifest_valid {
                 manifest.write_to(&wal_dir)?;
             }
-            rollback::rollback_step(&wal_dir, &self.working_root)?;
+            rollback::rollback_step(&wal_dir, &self.working_root, self.symlink_policy)?;
         }
 
         fs::remove_dir_all(&wal_dir)?;
@@ -580,7 +606,7 @@ impl UndoInterceptor {
 
         // Roll back using the WAL data
         if wal_dir.exists() {
-            rollback::rollback_step(&wal_dir, &self.working_root)?;
+            rollback::rollback_step(&wal_dir, &self.working_root, self.symlink_policy)?;
             fs::remove_dir_all(&wal_dir)?;
         }
 
@@ -673,7 +699,15 @@ impl UndoInterceptor {
         }
 
         // Path must exist to capture a preimage
-        if file_path.symlink_metadata().is_err() {
+        let symlink_meta = file_path.symlink_metadata();
+        if symlink_meta.is_err() {
+            return Ok(false);
+        }
+
+        // Skip symlinks when policy is Ignore
+        if self.symlink_policy == SymlinkPolicy::Ignore
+            && symlink_meta.unwrap().is_symlink()
+        {
             return Ok(false);
         }
 
@@ -701,6 +735,16 @@ impl UndoInterceptor {
 
     /// Record that a path was newly created (did not exist before the step).
     fn record_creation(&self, file_path: &Path) -> Result<()> {
+        // Skip symlinks when policy is Ignore
+        if self.symlink_policy == SymlinkPolicy::Ignore
+            && file_path
+                .symlink_metadata()
+                .map(|m| m.is_symlink())
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
         let relative = file_path.strip_prefix(&self.working_root).map_err(|_| {
             CodeAgentError::Preimage {
                 path: file_path.to_path_buf(),
@@ -748,6 +792,16 @@ impl UndoInterceptor {
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
             let path = entry.path();
+
+            // Skip symlinks when policy is Ignore
+            if self.symlink_policy == SymlinkPolicy::Ignore
+                && path
+                    .symlink_metadata()
+                    .map(|m| m.is_symlink())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
 
             // Skip ignored subtrees early to avoid unnecessary I/O
             if let Some(ref filter) = self.gitignore_filter {
@@ -856,6 +910,9 @@ impl WriteInterceptor for UndoInterceptor {
     }
 
     fn pre_link(&self, target: &Path, _link_path: &Path) -> Result<()> {
+        if self.symlink_policy == SymlinkPolicy::Ignore {
+            return Ok(());
+        }
         if self.step_tracker.current_step().is_some() {
             self.ensure_preimage(target)?;
         }
@@ -863,6 +920,9 @@ impl WriteInterceptor for UndoInterceptor {
     }
 
     fn post_symlink(&self, _target: &Path, link_path: &Path) -> Result<()> {
+        if self.symlink_policy == SymlinkPolicy::Ignore {
+            return Ok(());
+        }
         if self.step_tracker.current_step().is_some() {
             self.record_creation(link_path)?;
         }
