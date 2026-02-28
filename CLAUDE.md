@@ -107,6 +107,7 @@ crates/
       safeguards.rs                #   safeguard tests SG-01..SG-06 + edge cases
       resource_limits.rs           #   resource limit tests UI-16..UI-19, UL-01..UL-08
       gitignore.rs                 #   gitignore filter tests GI-01..GI-08
+      proptest_model.rs            #   model-based property tests (proptest): undo_model, undo_model_multi_step_rollback
   mcp/                             # codeagent-mcp — MCP server (JSON-RPC 2.0 over local socket)
     src/
       lib.rs                       #   module declarations + re-exports
@@ -231,7 +232,7 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde).
+  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–11 are complete:
@@ -394,12 +395,23 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
   - 48 seed corpus files across 5 targets (derived from unit test inputs)
   - `p9_wire` target skipped (9P server is Phase 3, not yet built)
 
-- **TDD Steps 13–18** — not yet started (E2E, model-based tests, benchmarks, etc.)
+- **TDD Step 17 (Model-Based Property Tests)** — complete
+  - `proptest` crate added as workspace dev-dependency (v1, MIT/Apache-2.0)
+  - `crates/interceptor/tests/proptest_model.rs` — model-based property tests using proptest
+  - `Op` enum with 10 variants: WriteFile, CreateFile, DeleteFile, DeleteTree, Mkdir,
+    Rename, OpenTrunc, SetattrTruncate, Fallocate, CopyFileRange
+  - Pre-filter approach: operations generated freely, invalid ones skipped at runtime
+  - Weighted `prop_oneof!` strategy (writes/creates weighted higher to maintain state)
+  - `undo_model` (50 cases) — per-step optional rollback with snapshot comparison
+  - `undo_model_multi_step_rollback` (30 cases) — apply all steps, rollback all, verify initial state
+  - Helper functions: `collect_files`, `collect_dirs`, `apply_op` (runtime index resolution)
+
+- **TDD Steps 13–16, 18** — not yet started (E2E requires QEMU/KVM; benchmarks)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (311 on Windows, 314 on Linux)
+cargo test --workspace           # run all tests (313 on Windows, 316 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -411,6 +423,7 @@ cargo test -p codeagent-control --test control_channel         # CC unit tests o
 cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
+cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
 
 # Fuzz targets (require nightly + cargo-fuzz; Linux only for libFuzzer)
 cd fuzz && cargo fuzz list                                         # list all 5 fuzz targets
