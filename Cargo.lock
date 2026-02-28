@@ -123,6 +123,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeagent-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "codeagent-interceptor"
 version = "0.1.0"
 dependencies = [

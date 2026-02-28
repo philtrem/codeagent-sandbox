@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/common",
+    "crates/control",
     "crates/interceptor",
     "crates/test-support",
 ]

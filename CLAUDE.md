@@ -66,6 +66,18 @@ crates/
                                    #   SafeguardDecision, ExternalModificationPolicy, RollbackResult,
                                    #   ResourceLimitsConfig, CodeAgentError (incl. RollbackBlocked,
                                    #   SafeguardDenied, StepUnprotected, UndoDisabled), Result<T>
+  control/                         # codeagent-control — control channel protocol
+    src/
+      lib.rs                       #   module declarations + re-exports
+      error.rs                     #   ControlChannelError enum
+      protocol.rs                  #   HostMessage (Exec, Cancel, RollbackNotify),
+                                   #   VmMessage (StepStarted, Output, StepCompleted),
+                                   #   OutputStream
+      parser.rs                    #   JSONL parsing with 1MB size limit
+      state_machine.rs             #   ControlChannelState, ControlEvent, PendingCommand,
+                                   #   ActiveCommand — validates message sequences
+    tests/
+      control_channel.rs           #   CC-01..CC-07 + edge cases
   interceptor/                     # codeagent-interceptor — undo log core
     src/
       lib.rs                       #   module declarations
@@ -139,11 +151,16 @@ crates/
   `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
   Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
   and `capture_tree_preimages` — no preimage, no manifest entry.
+- **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
+  `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
+  Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
+  parsing). The `ControlChannelState` validates sequences and emits `ControlEvent`s;
+  protocol violations produce `ProtocolError` events without breaking the channel.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, xattr (Linux only), zstd, chrono (+serde).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–7 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–8 are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -219,12 +236,27 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–7
   - Version mismatch detection on construction, `is_undo_disabled()`, `discard()` to re-enable
   - Integration tests UI-16..UI-19, UL-01..UL-08 (12 tests)
 
-- **TDD Steps 8–18** — not yet started (control channel, STDIO API, MCP, etc.)
+- **TDD Step 8 (Control Channel Parsing + State Machine)** — complete
+  - `codeagent-control` crate: control channel protocol types, JSONL parsing, state machine
+  - `ControlChannelError` — MalformedJson, UnknownMessageType, OversizedMessage,
+    UnexpectedStepCompleted, DuplicateStepStarted, OutputForUnknownCommand,
+    UnexpectedStepStarted, CancelUnknownCommand
+  - `HostMessage` enum (Exec, Cancel, RollbackNotify) — serde-tagged, per project-plan §4.2
+  - `VmMessage` enum (StepStarted, Output, StepCompleted) — serde-tagged
+  - `parse_vm_message` / `parse_host_message` — JSONL parsing with 1MB size limit (rejects
+    before deserialization), distinguishes malformed JSON from unknown message types
+  - `ControlChannelState` — tracks pending (exec sent) and active (step_started received)
+    commands, validates sequences, emits `ControlEvent`s for the caller
+  - `cancel_command` — handles cancellation of pending or active commands
+  - Protocol error resilience: violations produce `ControlEvent::ProtocolError`, channel continues
+  - Integration tests CC-01..CC-07 + edge cases (18 tests), unit tests (28 tests)
+
+- **TDD Steps 9–18** — not yet started (control channel integration, STDIO API, MCP, etc.)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (106 on Windows, 109 on Linux)
+cargo test --workspace           # run all tests (152 on Windows, 155 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -232,4 +264,5 @@ cargo test -p codeagent-interceptor --test undo_barriers       # EB barrier test
 cargo test -p codeagent-interceptor --test safeguards          # SG safeguard tests only
 cargo test -p codeagent-interceptor --test resource_limits     # UL/UI resource limit tests only
 cargo test -p codeagent-interceptor --test gitignore           # GI gitignore filter tests only
+cargo test -p codeagent-control --test control_channel         # CC control channel tests only
 ```
