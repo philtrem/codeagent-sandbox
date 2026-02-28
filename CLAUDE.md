@@ -147,6 +147,20 @@ crates/
       snapshot.rs                  #   TreeSnapshot, EntrySnapshot, assert_tree_eq
       workspace.rs                 #   TempWorkspace (isolated temp dir pairs)
       fixtures.rs                  #   small_tree, rename_tree, symlink_tree, deep_tree
+fuzz/                              # L5 fuzz targets (excluded from workspace; cargo-fuzz)
+  Cargo.toml                      #   libfuzzer-sys + deps on control/stdio/mcp/interceptor
+  fuzz_targets/
+    control_jsonl.rs               #   parse_vm_message + parse_host_message
+    stdio_json.rs                  #   parse_request
+    mcp_jsonrpc.rs                 #   parse_jsonrpc
+    undo_manifest.rs               #   serde_json::from_str::<StepManifest>
+    path_normalize.rs              #   validate_path (MCP + STDIO)
+  corpus/                          #   seed inputs per target (48 files total)
+    control_jsonl/                 #   10 seeds
+    stdio_json/                    #   12 seeds
+    mcp_jsonrpc/                   #   9 seeds
+    undo_manifest/                 #   7 seeds
+    path_normalize/                #   10 seeds
 ```
 
 ### Key Conventions
@@ -369,7 +383,18 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
   - Unit tests: 30 (error, protocol, parser, path_validation).
     Contract tests: 27 (MC-01..MC-08 + edge cases)
 
-- **TDD Steps 12–18** — not yet started (fuzz, E2E, etc.)
+- **TDD Step 12 (Fuzz Targets — Initial)** — complete
+  - `fuzz/` directory with `cargo-fuzz` infrastructure (excluded from workspace)
+  - 5 fuzz targets covering all existing parsers (INV-7 parser robustness):
+    - `control_jsonl` — `parse_vm_message` + `parse_host_message`
+    - `stdio_json` — `parse_request`
+    - `mcp_jsonrpc` — `parse_jsonrpc`
+    - `undo_manifest` — `serde_json::from_str::<StepManifest>`
+    - `path_normalize` — `validate_path` (MCP + STDIO)
+  - 48 seed corpus files across 5 targets (derived from unit test inputs)
+  - `p9_wire` target skipped (9P server is Phase 3, not yet built)
+
+- **TDD Steps 13–18** — not yet started (E2E, model-based tests, benchmarks, etc.)
 
 ### Build & Test Commands
 ```sh
@@ -386,4 +411,12 @@ cargo test -p codeagent-control --test control_channel         # CC unit tests o
 cargo test -p codeagent-control --test control_channel_integration # CC integration tests only
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
+
+# Fuzz targets (require nightly + cargo-fuzz; Linux only for libFuzzer)
+cd fuzz && cargo fuzz list                                         # list all 5 fuzz targets
+cd fuzz && cargo fuzz run control_jsonl -- -max_total_time=30      # fuzz smoke (30s)
+cd fuzz && cargo fuzz run stdio_json -- -max_total_time=30
+cd fuzz && cargo fuzz run mcp_jsonrpc -- -max_total_time=30
+cd fuzz && cargo fuzz run undo_manifest -- -max_total_time=30
+cd fuzz && cargo fuzz run path_normalize -- -max_total_time=30
 ```

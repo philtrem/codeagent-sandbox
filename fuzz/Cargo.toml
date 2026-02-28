@@ -1,0 +1,51 @@
+[package]
+name = "codeagent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.codeagent-control]
+path = "../crates/control"
+
+[dependencies.codeagent-stdio]
+path = "../crates/stdio"
+
+[dependencies.codeagent-mcp]
+path = "../crates/mcp"
+
+[dependencies.codeagent-interceptor]
+path = "../crates/interceptor"
+
+[dependencies.serde_json]
+version = "1"
+
+[[bin]]
+name = "control_jsonl"
+path = "fuzz_targets/control_jsonl.rs"
+doc = false
+
+[[bin]]
+name = "stdio_json"
+path = "fuzz_targets/stdio_json.rs"
+doc = false
+
+[[bin]]
+name = "mcp_jsonrpc"
+path = "fuzz_targets/mcp_jsonrpc.rs"
+doc = false
+
+[[bin]]
+name = "undo_manifest"
+path = "fuzz_targets/undo_manifest.rs"
+doc = false
+
+[[bin]]
+name = "path_normalize"
+path = "fuzz_targets/path_normalize.rs"
+doc = false
