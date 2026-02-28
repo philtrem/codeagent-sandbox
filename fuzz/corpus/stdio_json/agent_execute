@@ -1,0 +1,1 @@
+{"type":"agent.execute","request_id":"9","payload":{"command":"npm install","cwd":"/mnt"}}

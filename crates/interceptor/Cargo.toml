@@ -22,3 +22,4 @@ xattr = { workspace = true }
 [dev-dependencies]
 codeagent-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
+proptest = { workspace = true }

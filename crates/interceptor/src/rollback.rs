@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use codeagent_common::SymlinkPolicy;
+
 use crate::manifest::StepManifest;
 use crate::preimage::{PreimageFileType, PreimageMetadata, read_preimage_metadata};
 
@@ -14,6 +16,7 @@ use crate::preimage::{PreimageFileType, PreimageMetadata, read_preimage_metadata
 pub fn rollback_step(
     step_dir: &Path,
     working_root: &Path,
+    symlink_policy: SymlinkPolicy,
 ) -> codeagent_common::Result<()> {
     let manifest = StepManifest::read_from(step_dir)?;
     let preimage_dir = step_dir.join("preimages");
@@ -71,6 +74,12 @@ pub fn rollback_step(
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
             }
+        }
+
+        if meta.file_type == PreimageFileType::Symlink
+            && symlink_policy != SymlinkPolicy::ReadWrite
+        {
+            continue;
         }
 
         match meta.file_type {
@@ -204,7 +213,7 @@ mod tests {
         assert!(!file.exists());
 
         // Rollback
-        rollback_step(&step_dir, &working).unwrap();
+        rollback_step(&step_dir, &working, SymlinkPolicy::default()).unwrap();
         assert!(file.exists());
         assert_eq!(fs::read_to_string(&file).unwrap(), "original content");
     }
@@ -230,7 +239,7 @@ mod tests {
         manifest.write_to(&step_dir).unwrap();
 
         // Rollback should delete the file
-        rollback_step(&step_dir, &working).unwrap();
+        rollback_step(&step_dir, &working, SymlinkPolicy::default()).unwrap();
         assert!(!file.exists());
     }
 
@@ -270,7 +279,7 @@ mod tests {
         assert!(!sub_dir.exists());
 
         // Rollback
-        rollback_step(&step_dir, &working).unwrap();
+        rollback_step(&step_dir, &working, SymlinkPolicy::default()).unwrap();
         assert!(sub_dir.is_dir());
         assert_eq!(fs::read_to_string(&file).unwrap(), "data");
     }

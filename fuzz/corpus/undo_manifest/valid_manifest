@@ -1,0 +1,1 @@
+{"step_id":42,"timestamp":"2024-01-01T00:00:00Z","command":"rm -rf node_modules","entries":{"src/main.rs":{"existed_before":true,"path_hash":"abc123","file_type":"regular"},"new_file.txt":{"existed_before":false,"path_hash":"def456","file_type":"regular"}}}
