@@ -212,6 +212,10 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   and `pre_link`. `ReadOnly` allows preimage capture (read-side) but skips symlink restore on
   rollback (write-side). `ReadWrite` enables full symlink support. Write is conditional on
   read — the enum prevents the invalid `read=false, write=true` combination.
+- **Shared directory access modes**: Each working directory in `session.start` has an `access`
+  field: `read_write` (default) or `read_only`. Enforced at both mount level (virtiofsd/9P
+  flags) and interceptor level (write rejection). `read_only` directories have no undo
+  tracking — no `WriteInterceptor` instance, no preimage capture. See project-plan §4.10.
 - **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
   `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
