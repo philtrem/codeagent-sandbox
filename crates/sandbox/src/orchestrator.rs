@@ -216,11 +216,32 @@ impl Orchestrator {
 
         let control_socket_path = socket_dir.join("control.sock");
 
+        // Create InFlightTracker before backends so they can share it with
+        // the control channel handler for quiescence detection.
+        let in_flight_tracker = InFlightTracker::new();
+
         // 1. Start filesystem backends (Linux/macOS only)
         let mut fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>> = Vec::new();
         let mut fs_socket_paths = Vec::new();
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            use crate::fs_backend::{FilesystemBackend, InterceptedBackend};
+            for (index, working_dir) in working_dirs.iter().enumerate() {
+                let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
+                let mut backend = InterceptedBackend::new(
+                    working_dir.clone(),
+                    fs_socket.clone(),
+                    interceptors[index].clone(),
+                    in_flight_tracker.clone(),
+                );
+                backend.start()?;
+                fs_socket_paths.push(fs_socket);
+                fs_backends.push(Box::new(backend));
+            }
+        }
+
+        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
         {
             use crate::fs_backend::{FilesystemBackend, VirtioFsBackend};
             for (index, working_dir) in working_dirs.iter().enumerate() {
@@ -282,11 +303,10 @@ impl Orchestrator {
             };
 
             // 4. Create control channel handler
-            use codeagent_control::{ControlChannelHandler, InFlightTracker, QuiescenceConfig};
+            use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
             use crate::event_bridge::run_event_bridge;
             use crate::step_adapter::StepManagerAdapter;
 
-            let in_flight_tracker = InFlightTracker::new();
             let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
             let quiescence_config = QuiescenceConfig::default();
 

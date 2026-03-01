@@ -1,11 +1,6 @@
 use crate::error::AgentError;
 
 /// Abstraction over the filesystem backend (virtiofsd or 9P server).
-///
-/// The real implementations will hold an `Arc<dyn WriteInterceptor>` and an
-/// `InFlightTracker` to intercept POSIX syscalls and track in-flight operations.
-/// For now, `VirtioFsBackend` launches the upstream (unmodified) virtiofsd;
-/// the forked version with `WriteInterceptor` hooks will be a drop-in replacement.
 pub trait FilesystemBackend: Send + Sync {
     fn start(&mut self) -> Result<(), AgentError>;
     fn stop(&mut self) -> Result<(), AgentError>;
@@ -120,6 +115,60 @@ impl FilesystemBackend for VirtioFsBackend {
 
 #[cfg(not(target_os = "windows"))]
 impl Drop for VirtioFsBackend {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// In-process virtiofsd backend with WriteInterceptor hooks.
+///
+/// Wraps `InterceptedVirtioFsBackend` from the virtiofs-backend crate,
+/// adapting its error type to `AgentError` for use in the Orchestrator.
+#[cfg(target_os = "linux")]
+pub struct InterceptedBackend {
+    inner: codeagent_virtiofs_backend::daemon::InterceptedVirtioFsBackend,
+}
+
+#[cfg(target_os = "linux")]
+impl InterceptedBackend {
+    pub fn new(
+        shared_dir: PathBuf,
+        socket_path: PathBuf,
+        interceptor: std::sync::Arc<dyn codeagent_interceptor::write_interceptor::WriteInterceptor>,
+        in_flight: codeagent_control::InFlightTracker,
+    ) -> Self {
+        Self {
+            inner: codeagent_virtiofs_backend::daemon::InterceptedVirtioFsBackend::new(
+                shared_dir,
+                socket_path,
+                interceptor,
+                in_flight,
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl FilesystemBackend for InterceptedBackend {
+    fn start(&mut self) -> Result<(), AgentError> {
+        self.inner.start().map_err(|error| AgentError::VirtioFsFailed {
+            reason: error.to_string(),
+        })
+    }
+
+    fn stop(&mut self) -> Result<(), AgentError> {
+        self.inner.stop().map_err(|error| AgentError::VirtioFsFailed {
+            reason: error.to_string(),
+        })
+    }
+
+    fn is_running(&self) -> bool {
+        self.inner.is_running()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for InterceptedBackend {
     fn drop(&mut self) {
         let _ = self.stop();
     }

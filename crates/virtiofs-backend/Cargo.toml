@@ -1,0 +1,20 @@
+[package]
+name = "codeagent-virtiofs-backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+codeagent-common = { path = "../common" }
+codeagent-interceptor = { path = "../interceptor" }
+codeagent-control = { path = "../control" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+virtiofsd = "1.13"
+vhost-user-backend = "0.18"
+vhost = { version = "0.13", features = ["vhost-user"] }
+vm-memory = "0.16"
+log = "0.4"

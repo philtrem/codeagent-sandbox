@@ -187,7 +187,9 @@ crates/
                                    #   serialize_host_message
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns upstream
-                                   #   virtiofsd with --shared-dir/--socket-path/--cache=never
+                                   #   virtiofsd (fallback for macOS),
+                                   #   InterceptedBackend [cfg(linux)] — wraps virtiofs-backend
+                                   #   crate's InterceptedVirtioFsBackend as FilesystemBackend
       qemu.rs                      #   QemuConfig (full command-line builder with platform-specific
                                    #   machine/accel/fs args), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
@@ -209,6 +211,22 @@ crates/
     tests/
       shim_integration.rs          #   SH-01..SH-08 integration tests (8 tests, SH-06 ignored on
                                    #   Windows) using tokio::io::duplex()
+  virtiofs-backend/                 # codeagent-virtiofs-backend — intercepted virtiofs filesystem backend
+    Cargo.toml                     #   depends on virtiofsd (Linux only), codeagent-interceptor, codeagent-control
+    src/
+      lib.rs                       #   module declarations (inode_map always; error, intercepted_fs, daemon
+                                   #   behind #[cfg(target_os = "linux")])
+      inode_map.rs                 #   InodePathMap: inode→host path mapping (RwLock<HashMap<u64, PathBuf>>),
+                                   #   FUSE_ROOT_ID, insert/get/resolve/remove/rename/rename_subtree
+      error.rs                     #   VirtioFsBackendError enum (Io, Interceptor, Daemon) [Linux only]
+      intercepted_fs.rs            #   InterceptedFs: wraps PassthroughFs, implements FileSystem trait (44
+                                   #   methods), WriteInterceptor pre/post hooks on 16 mutating methods,
+                                   #   InFlightGuard drop guard, inode_map tracking [Linux only]
+      daemon.rs                    #   InterceptedVirtioFsBackend: in-process vhost-user daemon, start/stop/
+                                   #   is_running, spawns daemon on background thread [Linux only]
+    tests/
+      filesystem_backend.rs        #   FB-01..FB-16 L3 integration tests (16 tests, all #[ignore],
+                                   #   Linux only) — POSIX syscalls → WriteInterceptor method verification
   e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
     src/
       lib.rs                       #   module declarations + re-exports
@@ -323,8 +341,9 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Dev-only**: proptest
-  (model-based testing), criterion (performance benchmarks, with html_reports).
+  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Linux-only** (virtiofs
+  backend): virtiofsd (Apache-2.0/BSD-3), vhost-user-backend, vhost, vm-memory, log. **Dev-only**:
+  proptest (model-based testing), criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD steps are complete:
@@ -609,21 +628,25 @@ integration code are built. The remaining work is:
 1. ~~**Host-side agent binary** — complete (see above)~~
 2. ~~**VM-side shim** — complete (see above)~~
 3. ~~**QEMU integration** — complete (see above)~~
-4. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
-   requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
-   hooks in the request handlers. Currently `VirtioFsBackend` launches upstream (unmodified)
-   virtiofsd; the forked version with `WriteInterceptor` hooks will be a drop-in replacement.
+4. ~~**virtiofsd intercepted backend** (Linux, Phase 1) — complete. The `codeagent-virtiofs-backend`
+   crate wraps upstream virtiofsd as a library dependency (not a source fork). `InterceptedFs`
+   implements virtiofsd's `FileSystem` trait (44 methods), intercepting 16 mutating methods
+   with `WriteInterceptor` pre/post hooks and `InFlightTracker` for quiescence detection.
+   `InterceptedVirtioFsBackend` runs the daemon in-process on a background thread. Integrated
+   into the Orchestrator via `InterceptedBackend` adapter in `fs_backend.rs`.~~
 5. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
    calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
 6. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
    Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
+7. **macOS virtiofs support** (Phase 2) — the `InterceptedFs` approach works identically on macOS,
+   but virtiofsd's Linux-specific APIs (`/proc/self/fd`, `O_PATH`) need the portability layer
+   described in project-plan Appendix C §C.8. Currently macOS falls back to `VirtioFsBackend`
+   (external process, no interception).
 
-**Known test gap**: There are no integration tests at the **filesystem backend level** — i.e.,
-tests that verify the virtiofsd fork or 9P server correctly translates POSIX syscalls into
-`WriteInterceptor` method calls (e.g., that `rename(2)` calls `pre_rename` then `post_rename`).
-Currently, the undo interceptor is tested directly via `OperationApplier` (L2), and the full
-VM pipeline is tested via E2E tests (L4). The L3 filesystem backend integration tests should
-be added when the backends are implemented.
+**L3 filesystem backend tests**: FB-01..FB-16 are written in
+`crates/virtiofs-backend/tests/filesystem_backend.rs` (Linux only, all `#[ignore]`).
+They verify that POSIX syscalls arriving via FUSE trigger the correct `WriteInterceptor`
+method calls. Will become runnable when QEMU/KVM infrastructure is available in CI.
 
 ### Planned Upstream Test Adaptation
 The testing plan (§9) identifies five external test suites to adapt. None are implemented yet;
@@ -640,7 +663,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~370 on Windows, ~373 on Linux; 22 E2E+shim ignored)
+cargo test --workspace           # run all tests (~386 on Windows, ~389 on Linux; 22 E2E+shim + 16 FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -658,6 +681,8 @@ cargo test -p codeagent-sandbox                                        # sandbox
 cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
+cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)
+cargo test -p codeagent-virtiofs-backend --test filesystem_backend --ignored # FB L3 integration tests (Linux, requires FUSE)
 
 # E2E tests (require QEMU/KVM; all #[ignore] by default)
 cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)

@@ -24,6 +24,9 @@ codeagent-control = { path = "../control" }
 codeagent-stdio = { path = "../stdio" }
 codeagent-mcp = { path = "../mcp" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+codeagent-virtiofs-backend = { path = "../virtiofs-backend" }
+
 [dev-dependencies]
 codeagent-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
