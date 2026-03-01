@@ -23,3 +23,16 @@ xattr = { workspace = true }
 codeagent-test-support = { path = "../test-support" }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "preimage_capture"
+harness = false
+
+[[bench]]
+name = "rollback_restore"
+harness = false
+
+[[bench]]
+name = "manifest_io"
+harness = false

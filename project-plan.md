@@ -825,14 +825,18 @@ However, a single session can expose **multiple working directories** to the VM.
 - For the virtiofsd backend (Linux/macOS), each working directory gets its own virtiofsd instance and vhost-user socket. QEMU is configured with multiple `vhost-user-fs-pci` devices.
 - For the 9P backend (Windows), each working directory gets a separate `virtio-9p-pci` device.
 - Each working directory has its own `WriteInterceptor` instance and undo log. Undo operations are per-directory — rolling back step N in directory A does not affect directory B.
+- Each working directory has an **access mode**: `read_write` (default) or `read_only`. This is enforced at two levels:
+  - **Mount level:** The filesystem backend (virtiofsd or 9P server) is configured with read-only mount options for `read_only` directories, preventing writes at the transport layer.
+  - **Interceptor level:** The `WriteInterceptor` rejects write operations targeting `read_only` directories, providing a second layer of enforcement.
+  - **Undo scope:** `read_only` directories have no undo tracking — no `WriteInterceptor` instance, no preimage capture, no manifest entries. Since nothing should be written there, undo is not applicable.
 - The STDIO API and MCP server operations accept a `directory` parameter (index or path) to disambiguate which working directory an operation targets. If omitted, the first (primary) directory is assumed.
 
 **Configuration:**
 ```json
 → {"type":"session.start","request_id":"1","payload":{
      "working_directories": [
-       {"path": "/home/user/project", "label": "project"},
-       {"path": "/home/user/shared-lib", "label": "shared-lib"}
+       {"path": "/home/user/project", "label": "project", "access": "read_write"},
+       {"path": "/home/user/shared-lib", "label": "shared-lib", "access": "read_only"}
      ],
      "network_policy": "open",
      "vm_mode": "persistent"

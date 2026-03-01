@@ -150,6 +150,25 @@ crates/
       snapshot.rs                  #   TreeSnapshot, EntrySnapshot, assert_tree_eq
       workspace.rs                 #   TempWorkspace (isolated temp dir pairs)
       fixtures.rs                  #   small_tree, rename_tree, symlink_tree, deep_tree
+    benches/
+      snapshot_capture.rs          #   L6 criterion benchmark: TreeSnapshot::capture (100/1000/10000 files)
+  interceptor/                     # (benches listed below under interceptor/)
+    benches/
+      preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
+      rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
+      manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
+  e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
+    src/
+      lib.rs                       #   module declarations + re-exports
+      constants.rs                 #   AGENT_BIN_ENV, timeouts (SESSION_START_TIMEOUT, etc.)
+      messages.rs                  #   STDIO API message builders (session_start, agent_execute, etc.)
+      jsonl_client.rs              #   JsonlClient (spawn agent, demux stdout responses/events)
+      mcp_client.rs                #   McpClient (Unix domain socket, JSON-RPC 2.0) [cfg(unix)]
+    tests/
+      session_lifecycle.rs         #   SL-01..SL-08 session lifecycle E2E tests (8 tests, all #[ignore])
+      undo_roundtrip.rs            #   UR-01..UR-05 undo round-trip E2E tests (5 tests, all #[ignore])
+      pjdfstest_subset.rs          #   PJ-01..PJ-05 POSIX filesystem semantics (5 tests, all #[ignore])
+      safeguard_flow.rs            #   SF-01..SF-03 safeguard E2E flow (3 tests, all #[ignore])
 fuzz/                              # L5 fuzz targets (excluded from workspace; cargo-fuzz)
   Cargo.toml                      #   libfuzzer-sys + deps on control/stdio/mcp/interceptor
   fuzz_targets/
@@ -212,6 +231,10 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   and `pre_link`. `ReadOnly` allows preimage capture (read-side) but skips symlink restore on
   rollback (write-side). `ReadWrite` enables full symlink support. Write is conditional on
   read — the enum prevents the invalid `read=false, write=true` combination.
+- **Shared directory access modes**: Each working directory in `session.start` has an `access`
+  field: `read_write` (default) or `read_only`. Enforced at both mount level (virtiofsd/9P
+  flags) and interceptor level (write rejection). `read_only` directories have no undo
+  tracking — no `WriteInterceptor` instance, no preimage capture. See project-plan §4.10.
 - **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
   `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
@@ -240,10 +263,11 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing).
+  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing),
+  criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–11 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD steps are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -414,12 +438,53 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
   - `undo_model_multi_step_rollback` (30 cases) — apply all steps, rollback all, verify initial state
   - Helper functions: `collect_files`, `collect_dirs`, `apply_op` (runtime index resolution)
 
-- **TDD Steps 13–16, 18** — not yet started (E2E requires QEMU/KVM; benchmarks)
+- **TDD Step 18 (Performance Baselines — Criterion Benchmarks)** — complete
+  - `criterion` crate added as workspace dev-dependency (v0.5, MIT/Apache-2.0)
+  - `crates/interceptor/benches/preimage_capture.rs` — preimage capture throughput +
+    isolated zstd compression (4KB, 1MB, 100MB) with `Throughput::Bytes` reporting
+  - `crates/interceptor/benches/rollback_restore.rs` — rollback restore throughput
+    (4KB, 1MB, 100MB) with `iter_batched` for per-iteration re-dirtying
+  - `crates/interceptor/benches/manifest_io.rs` — manifest write/read (filesystem I/O) +
+    serialize/deserialize (in-memory) for 10, 100, 1000 paths
+  - `crates/test-support/benches/snapshot_capture.rs` — TreeSnapshot::capture for
+    100, 1000, 10000 files with two-level directory structure
+  - Deterministic pseudo-random data (LCG) for realistic zstd compression ratios
+  - HTML reports generated in `target/criterion/`
+
+- **TDD Step 13 (QEMU E2E: Session Lifecycle)** — complete (tests written, all `#[ignore]`)
+  - `codeagent-e2e-tests` crate: E2E test infrastructure + STDIO API test client
+  - `JsonlClient` — spawns agent binary, background stdout demux (responses keyed by
+    request_id via oneshot channels, events buffered per type with Notify)
+  - `McpClient` — Unix domain socket JSON-RPC 2.0 client (`#[cfg(unix)]`)
+  - Message builders: `session_start`, `session_stop`, `session_reset`, `session_status`,
+    `agent_execute`, `undo_rollback`, `undo_rollback_force`, `undo_history`,
+    `safeguard_configure`, `safeguard_confirm` (atomic request_id counter)
+  - `E2eError` — 7 variants: BinaryNotFound, Io, ResponseTimeout, EventTimeout,
+    ProcessExited, JsonSerialize, StdinClosed
+  - Integration tests SL-01..SL-08: invalid working dir, multiple dirs, persistent stop,
+    ephemeral stop, session reset, QEMU launch failure, control channel disconnect,
+    resource cleanup (8 tests)
+
+- **TDD Step 14 (QEMU E2E: Undo Round-Trip)** — complete (tests written, all `#[ignore]`)
+  - Integration tests UR-01..UR-05: single file write rollback, multi-file mutation rollback,
+    multi-step partial rollback, delete tree rollback, rename rollback (5 tests)
+  - `setup_session()` and `execute_and_wait()` test helpers
+  - E2E-specific `compare_opts()` with 2s mtime tolerance for VM filesystem granularity
+
+- **TDD Step 15 (QEMU E2E: pjdfstest Subset)** — complete (tests written, all `#[ignore]`)
+  - Integration tests PJ-01..PJ-05: create+unlink, rename, chmod, symlink,
+    mkdir+rmdir (5 tests)
+  - `exec_collect_output()` helper for running shell commands and asserting output
+
+- **TDD Step 16 (QEMU E2E: Safeguard Flow)** — complete (tests written, all `#[ignore]`)
+  - Integration tests SF-01..SF-03: delete threshold deny+rollback, large file overwrite
+    allow, rename-over-existing configure+confirm round-trip (3 tests)
+  - `setup_session_with_safeguards()` helper with configurable delete threshold
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (321 on Windows, 324 on Linux)
+cargo test --workspace           # run all tests (330 on Windows, 333 on Linux; 21 E2E ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -433,6 +498,23 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+
+# E2E tests (require QEMU/KVM; all #[ignore] by default)
+cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)
+cargo test -p codeagent-e2e-tests --ignored                            # run all E2E tests (requires KVM + agent binary)
+cargo test -p codeagent-e2e-tests --ignored --test session_lifecycle   # SL session lifecycle only
+cargo test -p codeagent-e2e-tests --ignored --test undo_roundtrip      # UR undo round-trip only
+cargo test -p codeagent-e2e-tests --ignored --test pjdfstest_subset    # PJ POSIX tests only
+cargo test -p codeagent-e2e-tests --ignored --test safeguard_flow      # SF safeguard flow only
+
+# Performance benchmarks (criterion, L6)
+cargo bench -p codeagent-interceptor                               # interceptor benchmarks (preimage, rollback, manifest)
+cargo bench -p codeagent-test-support                              # snapshot capture benchmarks
+cargo bench --workspace                                            # all benchmarks
+cargo bench --bench preimage_capture -p codeagent-interceptor      # preimage + zstd only
+cargo bench --bench rollback_restore -p codeagent-interceptor      # rollback only
+cargo bench --bench manifest_io -p codeagent-interceptor           # manifest I/O only
+cargo bench --bench snapshot_capture -p codeagent-test-support     # snapshot only
 
 # Fuzz targets (require nightly + cargo-fuzz; Linux only for libFuzzer)
 cd fuzz && cargo fuzz list                                         # list all 5 fuzz targets

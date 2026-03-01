@@ -7,6 +7,7 @@ members = [
     "crates/mcp",
     "crates/stdio",
     "crates/test-support",
+    "crates/e2e-tests",
 ]
 exclude = ["fuzz"]
 
@@ -28,3 +29,4 @@ zstd = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
