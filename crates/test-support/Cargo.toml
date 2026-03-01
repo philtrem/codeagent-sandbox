@@ -14,3 +14,11 @@ codeagent-common = { path = "../common" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xattr = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "snapshot_capture"
+harness = false

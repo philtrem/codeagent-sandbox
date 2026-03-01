@@ -150,6 +150,13 @@ crates/
       snapshot.rs                  #   TreeSnapshot, EntrySnapshot, assert_tree_eq
       workspace.rs                 #   TempWorkspace (isolated temp dir pairs)
       fixtures.rs                  #   small_tree, rename_tree, symlink_tree, deep_tree
+    benches/
+      snapshot_capture.rs          #   L6 criterion benchmark: TreeSnapshot::capture (100/1000/10000 files)
+  interceptor/                     # (benches listed below under interceptor/)
+    benches/
+      preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
+      rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
+      manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
 fuzz/                              # L5 fuzz targets (excluded from workspace; cargo-fuzz)
   Cargo.toml                      #   libfuzzer-sys + deps on control/stdio/mcp/interceptor
   fuzz_targets/
@@ -244,7 +251,8 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing).
+  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing),
+  criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–11 are complete:
@@ -418,12 +426,25 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
   - `undo_model_multi_step_rollback` (30 cases) — apply all steps, rollback all, verify initial state
   - Helper functions: `collect_files`, `collect_dirs`, `apply_op` (runtime index resolution)
 
-- **TDD Steps 13–16, 18** — not yet started (E2E requires QEMU/KVM; benchmarks)
+- **TDD Step 18 (Performance Baselines — Criterion Benchmarks)** — complete
+  - `criterion` crate added as workspace dev-dependency (v0.5, MIT/Apache-2.0)
+  - `crates/interceptor/benches/preimage_capture.rs` — preimage capture throughput +
+    isolated zstd compression (4KB, 1MB, 100MB) with `Throughput::Bytes` reporting
+  - `crates/interceptor/benches/rollback_restore.rs` — rollback restore throughput
+    (4KB, 1MB, 100MB) with `iter_batched` for per-iteration re-dirtying
+  - `crates/interceptor/benches/manifest_io.rs` — manifest write/read (filesystem I/O) +
+    serialize/deserialize (in-memory) for 10, 100, 1000 paths
+  - `crates/test-support/benches/snapshot_capture.rs` — TreeSnapshot::capture for
+    100, 1000, 10000 files with two-level directory structure
+  - Deterministic pseudo-random data (LCG) for realistic zstd compression ratios
+  - HTML reports generated in `target/criterion/`
+
+- **TDD Steps 13–16** — not yet started (E2E requires QEMU/KVM)
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (321 on Windows, 324 on Linux)
+cargo test --workspace           # run all tests (323 on Windows, 326 on Linux)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -437,6 +458,15 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+
+# Performance benchmarks (criterion, L6)
+cargo bench -p codeagent-interceptor                               # interceptor benchmarks (preimage, rollback, manifest)
+cargo bench -p codeagent-test-support                              # snapshot capture benchmarks
+cargo bench --workspace                                            # all benchmarks
+cargo bench --bench preimage_capture -p codeagent-interceptor      # preimage + zstd only
+cargo bench --bench rollback_restore -p codeagent-interceptor      # rollback only
+cargo bench --bench manifest_io -p codeagent-interceptor           # manifest I/O only
+cargo bench --bench snapshot_capture -p codeagent-test-support     # snapshot only
 
 # Fuzz targets (require nightly + cargo-fuzz; Linux only for libFuzzer)
 cd fuzz && cargo fuzz list                                         # list all 5 fuzz targets
