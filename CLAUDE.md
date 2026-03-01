@@ -513,6 +513,18 @@ Currently, the undo interceptor is tested directly via `OperationApplier` (L2), 
 VM pipeline is tested via E2E tests (L4). The L3 filesystem backend integration tests should
 be added when the backends are implemented.
 
+### Planned Upstream Test Adaptation
+The testing plan (§9) identifies five external test suites to adapt. None are implemented yet;
+all are blocked on components that don't exist. Adapt each when its target component is built.
+
+| Suite | Source | Target Component | Phase | What It Tests |
+|---|---|---|---|---|
+| **pjdfstest** | github.com/pjd/pjdfstest (~600 tests) | virtiofsd/9P mounted filesystem | MVP | POSIX filesystem edge cases via raw syscalls (unlink open files, cross-dir renames, permission semantics, atomic rename-over). Cross-compile the real pjdfstest binary into the guest image and run a curated subset against `/mnt/working` (skip tests for quotas, ACLs, chown, and other features not relevant to our backends). PJ-01..PJ-05 are shell-command smoke tests that can remain as lightweight fallbacks, but the real POSIX coverage comes from the pjdfstest binary. |
+| **virtiofsd unit tests** | gitlab.com/virtio-fs/virtiofsd | virtiofsd fork | MVP | Path resolution safety, FUSE message parsing, upstream correctness preservation. Run in fork CI as a gate. |
+| **crosvm p9 fixtures** | chromium.googlesource.com/crosvm | 9P server | Phase 3 | 9P wire protocol round-trip (known-byte test vectors for serialize/deserialize identity). |
+| **Mutagen test vectors** | github.com/mutagen-io/mutagen | 9P server (Windows) | Phase 3 | Reserved-name handling (CON, NUL, LPT1), case-collision detection, chmod persistence on Windows. |
+| **xfstests** | github.com/kdave/xfstests | Mounted filesystem (guest) | Optional/Nightly | Extended POSIX stress testing (large repos, concurrent access, filesystem corner cases). |
+
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
