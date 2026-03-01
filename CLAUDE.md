@@ -157,6 +157,18 @@ crates/
       preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
       rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
       manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
+  e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
+    src/
+      lib.rs                       #   module declarations + re-exports
+      constants.rs                 #   AGENT_BIN_ENV, timeouts (SESSION_START_TIMEOUT, etc.)
+      messages.rs                  #   STDIO API message builders (session_start, agent_execute, etc.)
+      jsonl_client.rs              #   JsonlClient (spawn agent, demux stdout responses/events)
+      mcp_client.rs                #   McpClient (Unix domain socket, JSON-RPC 2.0) [cfg(unix)]
+    tests/
+      session_lifecycle.rs         #   SL-01..SL-08 session lifecycle E2E tests (8 tests, all #[ignore])
+      undo_roundtrip.rs            #   UR-01..UR-05 undo round-trip E2E tests (5 tests, all #[ignore])
+      pjdfstest_subset.rs          #   PJ-01..PJ-05 POSIX filesystem semantics (5 tests, all #[ignore])
+      safeguard_flow.rs            #   SF-01..SF-03 safeguard E2E flow (3 tests, all #[ignore])
 fuzz/                              # L5 fuzz targets (excluded from workspace; cargo-fuzz)
   Cargo.toml                      #   libfuzzer-sys + deps on control/stdio/mcp/interceptor
   fuzz_targets/
@@ -255,7 +267,7 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
-The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–11 are complete:
+The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD steps are complete:
 
 - **TDD Step 1 (Test Oracle Infrastructure)** — complete
   - `codeagent-common`: StepId, StepType, StepInfo, CodeAgentError, Result (4 unit tests)
@@ -439,12 +451,40 @@ The project follows a TDD sequence defined in `testing-plan.md` §5. Steps 1–1
   - Deterministic pseudo-random data (LCG) for realistic zstd compression ratios
   - HTML reports generated in `target/criterion/`
 
-- **TDD Steps 13–16** — not yet started (E2E requires QEMU/KVM)
+- **TDD Step 13 (QEMU E2E: Session Lifecycle)** — complete (tests written, all `#[ignore]`)
+  - `codeagent-e2e-tests` crate: E2E test infrastructure + STDIO API test client
+  - `JsonlClient` — spawns agent binary, background stdout demux (responses keyed by
+    request_id via oneshot channels, events buffered per type with Notify)
+  - `McpClient` — Unix domain socket JSON-RPC 2.0 client (`#[cfg(unix)]`)
+  - Message builders: `session_start`, `session_stop`, `session_reset`, `session_status`,
+    `agent_execute`, `undo_rollback`, `undo_rollback_force`, `undo_history`,
+    `safeguard_configure`, `safeguard_confirm` (atomic request_id counter)
+  - `E2eError` — 7 variants: BinaryNotFound, Io, ResponseTimeout, EventTimeout,
+    ProcessExited, JsonSerialize, StdinClosed
+  - Integration tests SL-01..SL-08: invalid working dir, multiple dirs, persistent stop,
+    ephemeral stop, session reset, QEMU launch failure, control channel disconnect,
+    resource cleanup (8 tests)
+
+- **TDD Step 14 (QEMU E2E: Undo Round-Trip)** — complete (tests written, all `#[ignore]`)
+  - Integration tests UR-01..UR-05: single file write rollback, multi-file mutation rollback,
+    multi-step partial rollback, delete tree rollback, rename rollback (5 tests)
+  - `setup_session()` and `execute_and_wait()` test helpers
+  - E2E-specific `compare_opts()` with 2s mtime tolerance for VM filesystem granularity
+
+- **TDD Step 15 (QEMU E2E: pjdfstest Subset)** — complete (tests written, all `#[ignore]`)
+  - Integration tests PJ-01..PJ-05: create+unlink, rename, chmod, symlink,
+    mkdir+rmdir (5 tests)
+  - `exec_collect_output()` helper for running shell commands and asserting output
+
+- **TDD Step 16 (QEMU E2E: Safeguard Flow)** — complete (tests written, all `#[ignore]`)
+  - Integration tests SF-01..SF-03: delete threshold deny+rollback, large file overwrite
+    allow, rename-over-existing configure+confirm round-trip (3 tests)
+  - `setup_session_with_safeguards()` helper with configurable delete threshold
 
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (323 on Windows, 326 on Linux)
+cargo test --workspace           # run all tests (330 on Windows, 333 on Linux; 21 E2E ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -458,6 +498,14 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+
+# E2E tests (require QEMU/KVM; all #[ignore] by default)
+cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)
+cargo test -p codeagent-e2e-tests --ignored                            # run all E2E tests (requires KVM + agent binary)
+cargo test -p codeagent-e2e-tests --ignored --test session_lifecycle   # SL session lifecycle only
+cargo test -p codeagent-e2e-tests --ignored --test undo_roundtrip      # UR undo round-trip only
+cargo test -p codeagent-e2e-tests --ignored --test pjdfstest_subset    # PJ POSIX tests only
+cargo test -p codeagent-e2e-tests --ignored --test safeguard_flow      # SF safeguard flow only
 
 # Performance benchmarks (criterion, L6)
 cargo bench -p codeagent-interceptor                               # interceptor benchmarks (preimage, rollback, manifest)
