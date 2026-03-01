@@ -17,6 +17,13 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         vm_mode: "ephemeral".to_string(),
         mcp_socket: None,
         log_level: "info".to_string(),
+        qemu_binary: None,
+        kernel_path: None,
+        initrd_path: None,
+        rootfs_path: None,
+        memory_mb: 2048,
+        cpus: 2,
+        virtiofsd_binary: None,
     }
 }
 
@@ -374,4 +381,62 @@ fn mcp_05_session_status() {
 
     let result = orchestrator.get_session_status().unwrap();
     assert_eq!(result["state"], "active");
+}
+
+// ── AO-14..AO-15 — QEMU integration fallback tests ──
+
+/// AO-14: session.start without kernel/initrd falls back to non-VM mode.
+///
+/// When no kernel_path or initrd_path is configured (the default), the
+/// orchestrator should start a host-only session with no VM components.
+/// This preserves existing behavior for all tests above.
+#[test]
+fn ao_14_no_vm_components_falls_back_to_host_mode() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    let (event_sender, _rx) = mpsc::unbounded_channel();
+    let args = make_args(working.path(), undo.path());
+    // Verify kernel_path and initrd_path are None (no VM)
+    assert!(args.kernel_path.is_none());
+    assert!(args.initrd_path.is_none());
+
+    let orchestrator = Orchestrator::new(args, event_sender);
+    let payload = make_start_payload(&working.path().display().to_string());
+
+    let result = orchestrator.session_start(payload).unwrap();
+    assert_eq!(result["status"], "ok");
+
+    // fs.status should report "unavailable" VM since no VM components are configured
+    let fs_result = orchestrator.fs_status().unwrap();
+    assert_eq!(fs_result["backend"], "none");
+    assert_eq!(fs_result["vm_status"], "unavailable");
+
+    // Session should be fully functional for host-only operations
+    let read_result = orchestrator.fs_read(FsReadPayload {
+        path: "nonexistent.txt".to_string(),
+        directory: None,
+    });
+    assert!(read_result.is_err()); // File doesn't exist, but no crash
+}
+
+/// AO-15: fs.status returns backend info when session is active.
+///
+/// In non-VM mode (no kernel/initrd), fs.status reports "none"/"unavailable".
+/// When a VM is running, it would report the backend type and "running".
+/// This test verifies the non-VM case since we can't spawn QEMU in unit tests.
+#[test]
+fn ao_15_fs_status_reports_backend_info() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.fs_status().unwrap();
+
+    // In non-VM mode, backend is "none" and VM is unavailable
+    assert_eq!(result["backend"], "none");
+    assert_eq!(result["vm_status"], "unavailable");
+
+    // vm_pid should not be present in non-VM mode
+    assert!(result.get("vm_pid").is_none());
 }

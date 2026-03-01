@@ -158,26 +158,57 @@ crates/
       rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
       manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
-    Cargo.toml                     #   [[bin]] name = "sandbox"
+    Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
     src/
       main.rs                      #   entry point: parse CLI → Orchestrator → StdioServer
       lib.rs                       #   module declarations + re-exports
       cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
-                                   #   --mcp-socket, --log-level
-      error.rs                     #   AgentError enum (7 variants: SessionNotActive,
+                                   #   --mcp-socket, --log-level, --qemu-binary, --kernel-path,
+                                   #   --initrd-path, --rootfs-path, --memory-mb, --cpus,
+                                   #   --virtiofsd-binary
+      error.rs                     #   AgentError enum (10 variants: SessionNotActive,
                                    #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
+                                   #   QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed,
                                    #   NotImplemented, Undo, Io)
-      session.rs                   #   SessionState enum (Idle | Active), Session struct
+      session.rs                   #   SessionState enum (Idle | Active), Session struct with
+                                   #   optional VM fields (qemu_process, fs_backends,
+                                   #   in_flight_tracker, control_writer, task handles, socket_dir)
       orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
                                    #   McpHandler (7 methods), session lifecycle, undo delegation,
-                                   #   direct host fs access, safeguard confirm/configure
+                                   #   direct host fs access, safeguard confirm/configure,
+                                   #   launch_vm() for QEMU + virtiofsd + control channel setup,
+                                   #   agent_execute sends commands through control channel when VM
+                                   #   available, fs_status reports backend/VM info
       step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
       safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
       event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
-      fs_backend.rs                #   FilesystemBackend trait + NullBackend stub
-      qemu.rs                      #   QemuConfig + QemuProcess (spawn stub, always returns error)
+      control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
+                                   #   spawn_control_reader (socket reader → ControlChannelHandler),
+                                   #   serialize_host_message
+      fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
+                                   #   VirtioFsBackend [cfg(not(windows))] — spawns upstream
+                                   #   virtiofsd with --shared-dir/--socket-path/--cache=never
+      qemu.rs                      #   QemuConfig (full command-line builder with platform-specific
+                                   #   machine/accel/fs args), QemuProcess (spawn with socket
+                                   #   readiness polling, stop, pid)
     tests/
-      orchestrator.rs              #   AO-01..AO-13 + MCP-01..MCP-05 integration tests (18 tests)
+      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-05 integration tests (20 tests)
+  shim/                             # codeagent-shim — VM-side command executor binary
+    Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
+    src/
+      main.rs                      #   entry point: open /dev/virtio-ports/control, call run()
+      lib.rs                       #   Shim struct (HashMap<u64, CommandHandle>), run<R,W>()
+                                   #   main loop, message dispatch, cancel_all, reap_completed
+      error.rs                     #   ShimError enum (Io, Json, ChannelClosed, CommandNotFound,
+                                   #   MalformedMessage)
+      executor.rs                  #   spawn_command (sh -c, piped output, process groups on Unix),
+                                   #   cancel_command (SIGTERM/SIGKILL on Unix, child.kill on
+                                   #   Windows), stream_output (buffered interval-based flushing),
+                                   #   CommandHandle
+      output_buffer.rs             #   OutputBufferConfig (max_buffer_size=4096, flush_interval=50ms)
+    tests/
+      shim_integration.rs          #   SH-01..SH-08 integration tests (8 tests, SH-06 ignored on
+                                   #   Windows) using tokio::io::duplex()
   e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
     src/
       lib.rs                       #   module declarations + re-exports
@@ -292,8 +323,8 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde). **Dev-only**: proptest (model-based testing),
-  criterion (performance benchmarks, with html_reports).
+  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Dev-only**: proptest
+  (model-based testing), criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD steps are complete:
@@ -510,43 +541,81 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     allow, rename-over-existing configure+confirm round-trip (3 tests)
   - `setup_session_with_safeguards()` helper with configurable delete threshold
 
-- **Host-Side Sandbox Binary** — complete
+- **Host-Side Sandbox Binary + QEMU Integration** — complete
   - `codeagent-sandbox` crate: the CLI binary that wires all crates into a running system
   - Binary name: `sandbox` (E2E tests reference `SANDBOX_BIN` / `sandbox`)
   - `CliArgs` via clap derive: `--working-dir`, `--undo-dir`, `--vm-mode`, `--mcp-socket`,
-    `--log-level`
-  - `AgentError` enum: 7 variants (SessionNotActive, SessionAlreadyActive, InvalidWorkingDir,
-    QemuUnavailable, NotImplemented, Undo, Io)
+    `--log-level`, `--qemu-binary`, `--kernel-path`, `--initrd-path`, `--rootfs-path`,
+    `--memory-mb`, `--cpus`, `--virtiofsd-binary`
+  - `AgentError` enum: 10 variants (SessionNotActive, SessionAlreadyActive, InvalidWorkingDir,
+    QemuUnavailable, QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed, NotImplemented,
+    Undo, Io)
   - `SessionState` enum: `Idle` | `Active(Box<Session>)` with `Arc<std::sync::Mutex<_>>`
+  - `Session` struct includes optional VM fields: `qemu_process`, `fs_backends`,
+    `in_flight_tracker`, `control_writer`, `event_bridge_handle`, `control_reader_handle`,
+    `control_writer_handle`, `socket_dir`, `next_command_id`
   - `Orchestrator` implements both `RequestHandler` (15 STDIO methods) and `McpHandler`
     (7 MCP methods) via interior mutability
   - Session lifecycle: start (validates dirs, creates UndoInterceptor per dir, crash recovery,
-    version mismatch detection) → stop → reset (stop + re-start with stored payload)
+    version mismatch detection, optional VM launch) → stop (abort tasks, stop QEMU, stop
+    backends, cleanup) → reset (stop + re-start with stored payload)
+  - VM launch path: `launch_vm()` starts virtiofsd backends → spawns QEMU → connects to
+    control socket → creates `ControlChannelHandler` → spawns event bridge + control reader/writer.
+    Falls back to non-VM mode on failure with Warning event.
+  - `agent_execute`: sends exec commands through control channel when VM is running, returns
+    `QemuUnavailable` when in host-only mode
+  - `fs_status`: returns real backend/VM info when VM is running ("virtiofsd"/"running")
+    or "none"/"unavailable" in host-only mode
+  - `QemuConfig`: full command-line builder with platform-specific settings (Linux: q35/KVM,
+    macOS: virt/HVF, Windows: q35/WHPX), filesystem sharing (virtiofs on Linux/macOS,
+    9P on Windows), control channel chardev
+  - `QemuProcess`: spawn with control socket readiness polling (100ms intervals, 30s timeout),
+    stop (kill + wait), pid tracking
+  - `VirtioFsBackend` `[cfg(not(windows))]`: spawns upstream virtiofsd with
+    `--shared-dir`/`--socket-path`/`--cache=never`, binary resolution via common paths + PATH
+  - `control_bridge`: `spawn_control_writer` (mpsc → JSON Lines), `spawn_control_reader`
+    (JSON Lines → `ControlChannelHandler`), `serialize_host_message`
   - Undo operations delegate to `UndoInterceptor`: rollback, history, configure, discard
   - Filesystem operations: direct host filesystem access (no VM needed)
-  - Agent execute/prompt: returns `QemuUnavailable` error (VM not yet built)
   - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
   - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
   - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
-  - `FilesystemBackend` trait + `NullBackend` stub (extension point for virtiofsd/9P)
-  - `QemuProcess` stub: always returns `QemuUnavailable`
   - MCP `write_file`: opens synthetic API step on interceptor, writes file, closes step
   - `main.rs`: parse CLI → create Orchestrator → create Router → run StdioServer on stdin/stdout
-  - CLI unit tests (3 tests) + integration tests AO-01..AO-13 + MCP-01..MCP-05 (18 tests)
+  - CLI unit tests (5 tests) + QC-01..QC-08 QEMU config tests (8 tests) +
+    integration tests AO-01..AO-15 + MCP-01..MCP-05 (20 tests) = 33 total tests
+
+- **VM-Side Shim** — complete
+  - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
+  - Binary name: `shim` (compiled into guest initrd)
+  - Opens `/dev/virtio-ports/control` (or argv[1]), reads `HostMessage` JSON Lines,
+    dispatches commands, writes `VmMessage` JSON Lines
+  - Generic `run<R: AsyncRead, W: AsyncWrite>()` for testability with `tokio::io::duplex()`
+  - `Shim` struct: tracks running commands in `HashMap<u64, CommandHandle>`,
+    message dispatch, `reap_completed()`, `cancel_all()` on shutdown
+  - `executor`: `spawn_command()` — `sh -c <command>` with piped stdout/stderr,
+    process groups on Unix (`setpgid`), sends `StepStarted` → `Output` → `StepCompleted`
+  - `cancel_command()`: `SIGTERM` → 5s wait → `SIGKILL` on Unix (process group);
+    `child.kill()` on non-Unix; aborts output reader tasks on cancel
+  - `stream_output()`: buffered interval-based flushing (`OutputBufferConfig`:
+    max_buffer_size=4096, flush_interval=50ms)
+  - `ShimError` enum: Io, Json, ChannelClosed, CommandNotFound, MalformedMessage
+  - Integration tests SH-01..SH-08 (8 tests, SH-06 cancel ignored on Windows)
 
 ### Remaining Implementation
-All 18 TDD steps are complete and the host-side sandbox binary is built. The remaining work
-is building VM components:
+All 18 TDD steps are complete. The host-side sandbox binary, VM-side shim, and QEMU
+integration code are built. The remaining work is:
 
 1. ~~**Host-side agent binary** — complete (see above)~~
-2. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
+2. ~~**VM-side shim** — complete (see above)~~
+3. ~~**QEMU integration** — complete (see above)~~
+4. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
    requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
-   hooks in the request handlers.
-3. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
+   hooks in the request handlers. Currently `VirtioFsBackend` launches upstream (unmodified)
+   virtiofsd; the forked version with `WriteInterceptor` hooks will be a drop-in replacement.
+5. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
    calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
-4. **VM-side shim** — lightweight process running inside the guest that receives commands over
-   virtio-serial, executes them via shell, and signals step boundaries back to the host.
-5. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
+6. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
    Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
 
 **Known test gap**: There are no integration tests at the **filesystem backend level** — i.e.,
@@ -571,7 +640,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (351 on Windows, 354 on Linux; 21 E2E ignored)
+cargo test --workspace           # run all tests (~370 on Windows, ~373 on Linux; 22 E2E+shim ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -585,8 +654,10 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI tests
-cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (33 tests)
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
+cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
+cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
 
 # E2E tests (require QEMU/KVM; all #[ignore] by default)
 cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)

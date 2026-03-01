@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "process", "net", "fs"] }
 chrono = { workspace = true }
+which = { workspace = true }
 
 codeagent-common = { path = "../common" }
 codeagent-interceptor = { path = "../interceptor" }

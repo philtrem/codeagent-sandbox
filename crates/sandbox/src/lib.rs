@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod control_bridge;
 pub mod error;
 pub mod event_bridge;
 pub mod fs_backend;

@@ -1,0 +1,22 @@
+[package]
+name = "codeagent-shim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "shim"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process", "signal", "time", "fs"] }
+
+codeagent-control = { path = "../control" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util", "test-util"] }
