@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-/// Environment variable for the path to the agent binary.
-pub const AGENT_BIN_ENV: &str = "CODEAGENT_BIN";
+/// Environment variable for the path to the sandbox binary.
+pub const AGENT_BIN_ENV: &str = "SANDBOX_BIN";
 
-/// Default binary name to search for in target/ if CODEAGENT_BIN is not set.
-pub const DEFAULT_BINARY_NAME: &str = "codeagent";
+/// Default binary name to search for in target/ if SANDBOX_BIN is not set.
+pub const DEFAULT_BINARY_NAME: &str = "sandbox";
 
 /// Maximum time to wait for the agent to respond to session.start (includes VM boot).
 pub const SESSION_START_TIMEOUT: Duration = Duration::from_secs(60);

@@ -157,10 +157,31 @@ crates/
       preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
       rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
       manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
+  sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
+    Cargo.toml                     #   [[bin]] name = "sandbox"
+    src/
+      main.rs                      #   entry point: parse CLI → Orchestrator → StdioServer
+      lib.rs                       #   module declarations + re-exports
+      cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
+                                   #   --mcp-socket, --log-level
+      error.rs                     #   AgentError enum (7 variants: SessionNotActive,
+                                   #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
+                                   #   NotImplemented, Undo, Io)
+      session.rs                   #   SessionState enum (Idle | Active), Session struct
+      orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
+                                   #   McpHandler (7 methods), session lifecycle, undo delegation,
+                                   #   direct host fs access, safeguard confirm/configure
+      step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
+      safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
+      event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
+      fs_backend.rs                #   FilesystemBackend trait + NullBackend stub
+      qemu.rs                      #   QemuConfig + QemuProcess (spawn stub, always returns error)
+    tests/
+      orchestrator.rs              #   AO-01..AO-13 + MCP-01..MCP-05 integration tests (18 tests)
   e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
     src/
       lib.rs                       #   module declarations + re-exports
-      constants.rs                 #   AGENT_BIN_ENV, timeouts (SESSION_START_TIMEOUT, etc.)
+      constants.rs                 #   SANDBOX_BIN env var, DEFAULT_BINARY_NAME ("sandbox"), timeouts
       messages.rs                  #   STDIO API message builders (session_start, agent_execute, etc.)
       jsonl_client.rs              #   JsonlClient (spawn agent, demux stdout responses/events)
       mcp_client.rs                #   McpClient (Unix domain socket, JSON-RPC 2.0) [cfg(unix)]
@@ -489,13 +510,35 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     allow, rename-over-existing configure+confirm round-trip (3 tests)
   - `setup_session_with_safeguards()` helper with configurable delete threshold
 
-### Remaining Implementation
-All 18 TDD steps are complete — the test infrastructure and core logic are built and tested.
-The remaining work is wiring the components into a running system:
+- **Host-Side Sandbox Binary** — complete
+  - `codeagent-sandbox` crate: the CLI binary that wires all crates into a running system
+  - Binary name: `sandbox` (E2E tests reference `SANDBOX_BIN` / `sandbox`)
+  - `CliArgs` via clap derive: `--working-dir`, `--undo-dir`, `--vm-mode`, `--mcp-socket`,
+    `--log-level`
+  - `AgentError` enum: 7 variants (SessionNotActive, SessionAlreadyActive, InvalidWorkingDir,
+    QemuUnavailable, NotImplemented, Undo, Io)
+  - `SessionState` enum: `Idle` | `Active(Box<Session>)` with `Arc<std::sync::Mutex<_>>`
+  - `Orchestrator` implements both `RequestHandler` (15 STDIO methods) and `McpHandler`
+    (7 MCP methods) via interior mutability
+  - Session lifecycle: start (validates dirs, creates UndoInterceptor per dir, crash recovery,
+    version mismatch detection) → stop → reset (stop + re-start with stored payload)
+  - Undo operations delegate to `UndoInterceptor`: rollback, history, configure, discard
+  - Filesystem operations: direct host filesystem access (no VM needed)
+  - Agent execute/prompt: returns `QemuUnavailable` error (VM not yet built)
+  - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
+  - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
+  - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
+  - `FilesystemBackend` trait + `NullBackend` stub (extension point for virtiofsd/9P)
+  - `QemuProcess` stub: always returns `QemuUnavailable`
+  - MCP `write_file`: opens synthetic API step on interceptor, writes file, closes step
+  - `main.rs`: parse CLI → create Orchestrator → create Router → run StdioServer on stdin/stdout
+  - CLI unit tests (3 tests) + integration tests AO-01..AO-13 + MCP-01..MCP-05 (18 tests)
 
-1. **Host-side agent binary** (`codeagent` CLI) — the Rust binary that ties everything together:
-   spawns QEMU, serves the filesystem, manages the control channel, exposes the STDIO API +
-   MCP server. Does not exist yet; will be a new `crates/agent/` workspace member.
+### Remaining Implementation
+All 18 TDD steps are complete and the host-side sandbox binary is built. The remaining work
+is building VM components:
+
+1. ~~**Host-side agent binary** — complete (see above)~~
 2. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
    requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
    hooks in the request handlers.
@@ -528,7 +571,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (330 on Windows, 333 on Linux; 21 E2E ignored)
+cargo test --workspace           # run all tests (351 on Windows, 354 on Linux; 21 E2E ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -542,6 +585,8 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI tests
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only
 
 # E2E tests (require QEMU/KVM; all #[ignore] by default)
 cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)

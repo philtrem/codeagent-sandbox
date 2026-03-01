@@ -1,0 +1,28 @@
+[package]
+name = "codeagent-sandbox"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sandbox"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "process", "net", "fs"] }
+chrono = { workspace = true }
+
+codeagent-common = { path = "../common" }
+codeagent-interceptor = { path = "../interceptor" }
+codeagent-control = { path = "../control" }
+codeagent-stdio = { path = "../stdio" }
+codeagent-mcp = { path = "../mcp" }
+
+[dev-dependencies]
+codeagent-test-support = { path = "../test-support" }
+tempfile = { workspace = true }
