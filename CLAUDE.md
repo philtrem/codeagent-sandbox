@@ -157,10 +157,31 @@ crates/
       preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
       rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
       manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
+  sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
+    Cargo.toml                     #   [[bin]] name = "sandbox"
+    src/
+      main.rs                      #   entry point: parse CLI → Orchestrator → StdioServer
+      lib.rs                       #   module declarations + re-exports
+      cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
+                                   #   --mcp-socket, --log-level
+      error.rs                     #   AgentError enum (7 variants: SessionNotActive,
+                                   #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
+                                   #   NotImplemented, Undo, Io)
+      session.rs                   #   SessionState enum (Idle | Active), Session struct
+      orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
+                                   #   McpHandler (7 methods), session lifecycle, undo delegation,
+                                   #   direct host fs access, safeguard confirm/configure
+      step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
+      safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
+      event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
+      fs_backend.rs                #   FilesystemBackend trait + NullBackend stub
+      qemu.rs                      #   QemuConfig + QemuProcess (spawn stub, always returns error)
+    tests/
+      orchestrator.rs              #   AO-01..AO-13 + MCP-01..MCP-05 integration tests (18 tests)
   e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
     src/
       lib.rs                       #   module declarations + re-exports
-      constants.rs                 #   AGENT_BIN_ENV, timeouts (SESSION_START_TIMEOUT, etc.)
+      constants.rs                 #   SANDBOX_BIN env var, DEFAULT_BINARY_NAME ("sandbox"), timeouts
       messages.rs                  #   STDIO API message builders (session_start, agent_execute, etc.)
       jsonl_client.rs              #   JsonlClient (spawn agent, demux stdout responses/events)
       mcp_client.rs                #   McpClient (Unix domain socket, JSON-RPC 2.0) [cfg(unix)]
@@ -235,6 +256,14 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   field: `read_write` (default) or `read_only`. Enforced at both mount level (virtiofsd/9P
   flags) and interceptor level (write rejection). `read_only` directories have no undo
   tracking — no `WriteInterceptor` instance, no preimage capture. See project-plan §4.10.
+- **Two-channel architecture**: The system has two separate communication channels between
+  host and VM. The **filesystem channel** (virtiofsd on Linux/macOS, 9P on Windows) carries
+  actual POSIX syscalls transparently — the VM kernel mounts a filesystem backed by the host,
+  and the host-side filesystem backend calls `WriteInterceptor` methods to capture preimages.
+  The **control channel** (virtio-serial, JSON Lines) carries only command orchestration —
+  "exec this shell command", step boundary signals, terminal output. The control channel never
+  sees filesystem operations. The agent correlates the two: all filesystem writes between
+  `step_started(N)` and `step_completed(N)` belong to undo step N.
 - **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
   `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
@@ -481,10 +510,68 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     allow, rename-over-existing configure+confirm round-trip (3 tests)
   - `setup_session_with_safeguards()` helper with configurable delete threshold
 
+- **Host-Side Sandbox Binary** — complete
+  - `codeagent-sandbox` crate: the CLI binary that wires all crates into a running system
+  - Binary name: `sandbox` (E2E tests reference `SANDBOX_BIN` / `sandbox`)
+  - `CliArgs` via clap derive: `--working-dir`, `--undo-dir`, `--vm-mode`, `--mcp-socket`,
+    `--log-level`
+  - `AgentError` enum: 7 variants (SessionNotActive, SessionAlreadyActive, InvalidWorkingDir,
+    QemuUnavailable, NotImplemented, Undo, Io)
+  - `SessionState` enum: `Idle` | `Active(Box<Session>)` with `Arc<std::sync::Mutex<_>>`
+  - `Orchestrator` implements both `RequestHandler` (15 STDIO methods) and `McpHandler`
+    (7 MCP methods) via interior mutability
+  - Session lifecycle: start (validates dirs, creates UndoInterceptor per dir, crash recovery,
+    version mismatch detection) → stop → reset (stop + re-start with stored payload)
+  - Undo operations delegate to `UndoInterceptor`: rollback, history, configure, discard
+  - Filesystem operations: direct host filesystem access (no VM needed)
+  - Agent execute/prompt: returns `QemuUnavailable` error (VM not yet built)
+  - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
+  - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
+  - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
+  - `FilesystemBackend` trait + `NullBackend` stub (extension point for virtiofsd/9P)
+  - `QemuProcess` stub: always returns `QemuUnavailable`
+  - MCP `write_file`: opens synthetic API step on interceptor, writes file, closes step
+  - `main.rs`: parse CLI → create Orchestrator → create Router → run StdioServer on stdin/stdout
+  - CLI unit tests (3 tests) + integration tests AO-01..AO-13 + MCP-01..MCP-05 (18 tests)
+
+### Remaining Implementation
+All 18 TDD steps are complete and the host-side sandbox binary is built. The remaining work
+is building VM components:
+
+1. ~~**Host-side agent binary** — complete (see above)~~
+2. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
+   requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
+   hooks in the request handlers.
+3. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
+   calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
+4. **VM-side shim** — lightweight process running inside the guest that receives commands over
+   virtio-serial, executes them via shell, and signals step boundaries back to the host.
+5. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
+   Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
+
+**Known test gap**: There are no integration tests at the **filesystem backend level** — i.e.,
+tests that verify the virtiofsd fork or 9P server correctly translates POSIX syscalls into
+`WriteInterceptor` method calls (e.g., that `rename(2)` calls `pre_rename` then `post_rename`).
+Currently, the undo interceptor is tested directly via `OperationApplier` (L2), and the full
+VM pipeline is tested via E2E tests (L4). The L3 filesystem backend integration tests should
+be added when the backends are implemented.
+
+### Planned Upstream Test Adaptation
+The testing plan (§9) identifies five external test suites to adapt. None are implemented yet;
+all are blocked on components that don't exist. Adapt each when its target component is built.
+
+| Suite | Source | Target Component | Phase | What It Tests |
+|---|---|---|---|---|
+| **pjdfstest** | github.com/pjd/pjdfstest (~600 tests) | virtiofsd/9P mounted filesystem | MVP | POSIX filesystem edge cases via raw syscalls (unlink open files, cross-dir renames, permission semantics, atomic rename-over). Cross-compile the real pjdfstest binary into the guest image and run a curated subset against `/mnt/working` (skip tests for quotas, ACLs, chown, and other features not relevant to our backends). PJ-01..PJ-05 are shell-command smoke tests that can remain as lightweight fallbacks, but the real POSIX coverage comes from the pjdfstest binary. Additionally, use pjdfstest's write operations as an undo log stress test: snapshot → run pjdfstest suite → rollback → `assert_tree_eq`. This verifies the undo log correctly captures every filesystem operation pjdfstest exercises, complementing the fine-grained UR-01..UR-05 tests. |
+| **virtiofsd unit tests** | gitlab.com/virtio-fs/virtiofsd | virtiofsd fork | MVP | Path resolution safety, FUSE message parsing, upstream correctness preservation. Run in fork CI as a gate. |
+| **crosvm p9 fixtures** | chromium.googlesource.com/crosvm | 9P server | Phase 3 | 9P wire protocol round-trip (known-byte test vectors for serialize/deserialize identity). |
+| **Mutagen test vectors** | github.com/mutagen-io/mutagen | 9P server (Windows) | Phase 3 | Reserved-name handling (CON, NUL, LPT1), case-collision detection, chmod persistence on Windows. |
+| **xfstests** | github.com/kdave/xfstests | Mounted filesystem (guest) | Optional/Nightly | Extended POSIX stress testing (large repos, concurrent access, filesystem corner cases). |
+
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (330 on Windows, 333 on Linux; 21 E2E ignored)
+cargo test --workspace           # run all tests (351 on Windows, 354 on Linux; 21 E2E ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -498,6 +585,8 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI tests
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only
 
 # E2E tests (require QEMU/KVM; all #[ignore] by default)
 cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)
