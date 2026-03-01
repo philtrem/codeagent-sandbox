@@ -235,6 +235,14 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   field: `read_write` (default) or `read_only`. Enforced at both mount level (virtiofsd/9P
   flags) and interceptor level (write rejection). `read_only` directories have no undo
   tracking — no `WriteInterceptor` instance, no preimage capture. See project-plan §4.10.
+- **Two-channel architecture**: The system has two separate communication channels between
+  host and VM. The **filesystem channel** (virtiofsd on Linux/macOS, 9P on Windows) carries
+  actual POSIX syscalls transparently — the VM kernel mounts a filesystem backed by the host,
+  and the host-side filesystem backend calls `WriteInterceptor` methods to capture preimages.
+  The **control channel** (virtio-serial, JSON Lines) carries only command orchestration —
+  "exec this shell command", step boundary signals, terminal output. The control channel never
+  sees filesystem operations. The agent correlates the two: all filesystem writes between
+  `step_started(N)` and `step_completed(N)` belong to undo step N.
 - **Control channel protocol**: JSON Lines over virtio-serial. Host→VM messages: `exec`,
   `cancel`, `rollback_notify`. VM→host messages: `step_started`, `output`, `step_completed`.
   Messages are serde-tagged (`#[serde(tag = "type")]`). Max message size: 1 MB (rejected before
@@ -480,6 +488,30 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - Integration tests SF-01..SF-03: delete threshold deny+rollback, large file overwrite
     allow, rename-over-existing configure+confirm round-trip (3 tests)
   - `setup_session_with_safeguards()` helper with configurable delete threshold
+
+### Remaining Implementation
+All 18 TDD steps are complete — the test infrastructure and core logic are built and tested.
+The remaining work is wiring the components into a running system:
+
+1. **Host-side agent binary** (`codeagent` CLI) — the Rust binary that ties everything together:
+   spawns QEMU, serves the filesystem, manages the control channel, exposes the STDIO API +
+   MCP server. Does not exist yet; will be a new `crates/agent/` workspace member.
+2. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
+   requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
+   hooks in the request handlers.
+3. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
+   calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
+4. **VM-side shim** — lightweight process running inside the guest that receives commands over
+   virtio-serial, executes them via shell, and signals step boundaries back to the host.
+5. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
+   Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
+
+**Known test gap**: There are no integration tests at the **filesystem backend level** — i.e.,
+tests that verify the virtiofsd fork or 9P server correctly translates POSIX syscalls into
+`WriteInterceptor` method calls (e.g., that `rename(2)` calls `pre_rename` then `post_rename`).
+Currently, the undo interceptor is tested directly via `OperationApplier` (L2), and the full
+VM pipeline is tested via E2E tests (L4). The L3 filesystem backend integration tests should
+be added when the backends are implemented.
 
 ### Build & Test Commands
 ```sh
