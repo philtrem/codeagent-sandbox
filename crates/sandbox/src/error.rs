@@ -14,6 +14,15 @@ pub enum AgentError {
     #[error("VM not available: QEMU and guest image are not yet built")]
     QemuUnavailable,
 
+    #[error("QEMU spawn failed: {reason}")]
+    QemuSpawnFailed { reason: String },
+
+    #[error("control channel connection failed: {reason}")]
+    ControlChannelFailed { reason: String },
+
+    #[error("virtiofsd failed: {reason}")]
+    VirtioFsFailed { reason: String },
+
     #[error("not implemented: {feature}")]
     NotImplemented { feature: String },
 

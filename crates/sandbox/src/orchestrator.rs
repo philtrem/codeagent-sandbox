@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use codeagent_common::{SafeguardConfig, SafeguardDecision};
+use codeagent_control::InFlightTracker;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
@@ -16,7 +18,9 @@ use codeagent_stdio::protocol::{
 use codeagent_stdio::{Event, RequestHandler, StdioError};
 
 use crate::cli::CliArgs;
+use crate::control_bridge;
 use crate::error::AgentError;
+use crate::qemu::{QemuConfig, QemuProcess};
 use crate::safeguard_bridge::PendingSafeguard;
 use crate::session::{Session, SessionState};
 
@@ -42,6 +46,11 @@ impl Orchestrator {
             event_sender,
             safeguard_receiver: Mutex::new(None),
         }
+    }
+
+    /// Returns true if VM components (kernel + initrd) are configured.
+    fn is_vm_available(&self) -> bool {
+        self.cli_args.kernel_path.is_some() && self.cli_args.initrd_path.is_some()
     }
 
     /// Create a session from a `session.start` payload.
@@ -100,22 +109,64 @@ impl Orchestrator {
             undo_dirs.push(undo_dir);
         }
 
-        let session = Session {
-            interceptors,
-            working_dirs: working_dirs.clone(),
-            undo_dirs,
-            vm_mode: payload.vm_mode.clone(),
-            safeguard_config: SafeguardConfig::default(),
-            pending_safeguards: Default::default(),
-            last_start_payload: Some(payload),
-        };
+        // Determine VM availability and launch if configured
+        let (vm_status, backend_name) = if self.is_vm_available() {
+            // VM components are configured — attempt to launch.
+            // For now, the actual launch is deferred to when `launch_vm`
+            // is called from `do_session_start`. The launch_vm method
+            // will populate the VM fields on the session.
+            match self.launch_vm(&working_dirs, &interceptors) {
+                Ok(vm_session_parts) => {
+                    let session = Session {
+                        interceptors,
+                        working_dirs: working_dirs.clone(),
+                        undo_dirs,
+                        vm_mode: payload.vm_mode.clone(),
+                        safeguard_config: SafeguardConfig::default(),
+                        pending_safeguards: Default::default(),
+                        last_start_payload: Some(payload),
+                        qemu_process: vm_session_parts.qemu_process,
+                        fs_backends: vm_session_parts.fs_backends,
+                        in_flight_tracker: vm_session_parts.in_flight_tracker,
+                        control_writer: vm_session_parts.control_writer,
+                        event_bridge_handle: vm_session_parts.event_bridge_handle,
+                        control_reader_handle: vm_session_parts.control_reader_handle,
+                        control_writer_handle: vm_session_parts.control_writer_handle,
+                        socket_dir: vm_session_parts.socket_dir,
+                        next_command_id: Arc::new(AtomicU64::new(1)),
+                    };
 
-        *state = SessionState::Active(Box::new(session));
+                    *state = SessionState::Active(Box::new(session));
+
+                    let backend = if cfg!(target_os = "windows") { "9p" } else { "virtiofsd" };
+                    ("running", backend)
+                }
+                Err(error) => {
+                    // VM launch failed — fall back to non-VM mode and report
+                    let _ = self.event_sender.send(Event::Warning {
+                        code: "vm_launch_failed".to_string(),
+                        message: format!("VM launch failed, falling back to host-only mode: {error}"),
+                    });
+                    let session = Self::create_non_vm_session(
+                        interceptors, working_dirs.clone(), undo_dirs, payload,
+                    );
+                    *state = SessionState::Active(Box::new(session));
+                    ("unavailable", "none")
+                }
+            }
+        } else {
+            // No VM components configured — run in host-only mode
+            let session = Self::create_non_vm_session(
+                interceptors, working_dirs.clone(), undo_dirs, payload,
+            );
+            *state = SessionState::Active(Box::new(session));
+            ("unavailable", "none")
+        };
 
         Ok(json!({
             "status": "ok",
-            "vm_status": "unavailable",
-            "backend": "none",
+            "vm_status": vm_status,
+            "backend": backend_name,
             "mount_points": working_dirs.iter().enumerate().map(|(i, d)| {
                 json!({
                     "index": i,
@@ -126,11 +177,189 @@ impl Orchestrator {
         }))
     }
 
+    /// Create a session without VM components.
+    fn create_non_vm_session(
+        interceptors: Vec<Arc<UndoInterceptor>>,
+        working_dirs: Vec<PathBuf>,
+        undo_dirs: Vec<PathBuf>,
+        payload: SessionStartPayload,
+    ) -> Session {
+        Session {
+            interceptors,
+            working_dirs,
+            undo_dirs,
+            vm_mode: payload.vm_mode.clone(),
+            safeguard_config: SafeguardConfig::default(),
+            pending_safeguards: Default::default(),
+            last_start_payload: Some(payload),
+            qemu_process: None,
+            fs_backends: vec![],
+            in_flight_tracker: None,
+            control_writer: None,
+            event_bridge_handle: None,
+            control_reader_handle: None,
+            control_writer_handle: None,
+            socket_dir: None,
+            next_command_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Launch VM components: virtiofsd backends, QEMU, control channel.
+    #[allow(unused_variables, unused_mut)]
+    fn launch_vm(
+        &self,
+        working_dirs: &[PathBuf],
+        interceptors: &[Arc<UndoInterceptor>],
+    ) -> Result<VmSessionParts, AgentError> {
+        let socket_dir = self.cli_args.undo_dir.join(".sockets");
+        std::fs::create_dir_all(&socket_dir)?;
+
+        let control_socket_path = socket_dir.join("control.sock");
+
+        // 1. Start filesystem backends (Linux/macOS only)
+        let mut fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>> = Vec::new();
+        let mut fs_socket_paths = Vec::new();
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            use crate::fs_backend::{FilesystemBackend, VirtioFsBackend};
+            for (index, working_dir) in working_dirs.iter().enumerate() {
+                let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
+                let mut backend = VirtioFsBackend::new(
+                    working_dir.clone(),
+                    fs_socket.clone(),
+                    self.cli_args.virtiofsd_binary.clone(),
+                );
+                backend.start()?;
+                fs_socket_paths.push(fs_socket);
+                fs_backends.push(Box::new(backend));
+            }
+        }
+
+        // 2. Build QEMU config and spawn
+        let config = QemuConfig {
+            qemu_binary: self.cli_args.qemu_binary.clone(),
+            kernel_path: self.cli_args.kernel_path.clone().unwrap(),
+            initrd_path: self.cli_args.initrd_path.clone().unwrap(),
+            rootfs_path: self.cli_args.rootfs_path.clone(),
+            memory_mb: self.cli_args.memory_mb,
+            cpus: self.cli_args.cpus,
+            working_dirs: working_dirs.to_vec(),
+            control_socket_path: control_socket_path.clone(),
+            fs_socket_paths,
+            vm_mode: self.cli_args.vm_mode.clone(),
+            extra_args: vec![],
+        };
+
+        let qemu_process = QemuProcess::spawn(config)?;
+
+        // 3. Connect to control socket and set up channel handler
+        #[cfg(not(unix))]
+        {
+            // On Windows, control channel will use named pipes (Phase 3).
+            Err(AgentError::ControlChannelFailed {
+                reason: "control channel not yet supported on Windows".to_string(),
+            })
+        }
+
+        #[cfg(unix)]
+        {
+            let (reader, writer) = {
+                let std_stream = std::os::unix::net::UnixStream::connect(&control_socket_path)
+                    .map_err(|error| AgentError::ControlChannelFailed {
+                        reason: format!("failed to connect to control socket: {error}"),
+                    })?;
+                std_stream
+                    .set_nonblocking(true)
+                    .map_err(|error| AgentError::ControlChannelFailed {
+                        reason: format!("failed to set socket non-blocking: {error}"),
+                    })?;
+                let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
+                    .map_err(|error| AgentError::ControlChannelFailed {
+                        reason: format!("failed to convert socket: {error}"),
+                    })?;
+                tokio_stream.into_split()
+            };
+
+            // 4. Create control channel handler
+            use codeagent_control::{ControlChannelHandler, InFlightTracker, QuiescenceConfig};
+            use crate::event_bridge::run_event_bridge;
+            use crate::step_adapter::StepManagerAdapter;
+
+            let in_flight_tracker = InFlightTracker::new();
+            let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
+            let quiescence_config = QuiescenceConfig::default();
+
+            let (handler, handler_events) = ControlChannelHandler::new(
+                step_manager,
+                in_flight_tracker.clone(),
+                quiescence_config,
+            );
+            let handler = Arc::new(handler);
+
+            // 5. Spawn event bridge (control events → STDIO events)
+            let event_bridge_handle = tokio::spawn(run_event_bridge(
+                handler_events,
+                self.event_sender.clone(),
+            ));
+
+            // 6. Spawn control channel writer and reader tasks
+            let (control_writer_sender, control_writer_handle) =
+                control_bridge::spawn_control_writer(writer);
+
+            let control_reader_handle = control_bridge::spawn_control_reader(
+                reader,
+                handler,
+                self.event_sender.clone(),
+            );
+
+            Ok(VmSessionParts {
+                qemu_process: Some(qemu_process),
+                fs_backends,
+                in_flight_tracker: Some(in_flight_tracker),
+                control_writer: Some(control_writer_sender),
+                event_bridge_handle: Some(event_bridge_handle),
+                control_reader_handle: Some(control_reader_handle),
+                control_writer_handle: Some(control_writer_handle),
+                socket_dir: Some(socket_dir),
+            })
+        }
+    }
+
     fn do_session_stop(&self) -> Result<serde_json::Value, AgentError> {
         let mut state = self.state.lock().unwrap();
-        match &*state {
+        match &mut *state {
             SessionState::Idle => Err(AgentError::SessionNotActive),
-            SessionState::Active(_) => {
+            SessionState::Active(session) => {
+                // Stop background tasks
+                if let Some(handle) = session.control_reader_handle.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = session.control_writer_handle.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = session.event_bridge_handle.take() {
+                    handle.abort();
+                }
+
+                // Drop the control writer sender so the writer task exits
+                session.control_writer.take();
+
+                // Stop QEMU
+                if let Some(mut qemu) = session.qemu_process.take() {
+                    let _ = qemu.stop();
+                }
+
+                // Stop filesystem backends
+                for backend in &mut session.fs_backends {
+                    let _ = backend.stop();
+                }
+
+                // Clean up socket directory
+                if let Some(socket_dir) = &session.socket_dir {
+                    let _ = std::fs::remove_dir_all(socket_dir);
+                }
+
                 *state = SessionState::Idle;
                 Ok(json!({}))
             }
@@ -160,19 +389,28 @@ impl Orchestrator {
             SessionState::Idle => Ok(json!({
                 "state": "idle",
             })),
-            SessionState::Active(session) => Ok(json!({
-                "state": "active",
-                "vm_mode": session.vm_mode,
-                "working_directories": session.working_dirs.iter().enumerate().map(|(i, d)| {
-                    json!({
-                        "index": i,
-                        "path": d.display().to_string(),
-                    })
-                }).collect::<Vec<_>>(),
-                "undo_steps": session.interceptors.iter().map(|interceptor| {
-                    interceptor.completed_steps().len()
-                }).collect::<Vec<_>>(),
-            })),
+            SessionState::Active(session) => {
+                let vm_status = if session.qemu_process.is_some() {
+                    "running"
+                } else {
+                    "unavailable"
+                };
+
+                Ok(json!({
+                    "state": "active",
+                    "vm_mode": session.vm_mode,
+                    "vm_status": vm_status,
+                    "working_directories": session.working_dirs.iter().enumerate().map(|(i, d)| {
+                        json!({
+                            "index": i,
+                            "path": d.display().to_string(),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "undo_steps": session.interceptors.iter().map(|interceptor| {
+                        interceptor.completed_steps().len()
+                    }).collect::<Vec<_>>(),
+                }))
+            }
         }
     }
 
@@ -250,6 +488,18 @@ impl Orchestrator {
     }
 }
 
+/// Parts of a session that come from VM launch.
+struct VmSessionParts {
+    qemu_process: Option<QemuProcess>,
+    fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>>,
+    in_flight_tracker: Option<InFlightTracker>,
+    control_writer: Option<mpsc::UnboundedSender<String>>,
+    event_bridge_handle: Option<tokio::task::JoinHandle<()>>,
+    control_reader_handle: Option<tokio::task::JoinHandle<()>>,
+    control_writer_handle: Option<tokio::task::JoinHandle<()>>,
+    socket_dir: Option<PathBuf>,
+}
+
 impl RequestHandler for Orchestrator {
     fn session_start(
         &self,
@@ -313,8 +563,6 @@ impl RequestHandler for Orchestrator {
     ) -> Result<serde_json::Value, StdioError> {
         self.require_active()
             .map_err(Self::agent_error_to_stdio)?;
-        // Resource limits are set at interceptor construction time.
-        // Runtime reconfiguration will be added when needed.
         Ok(json!({}))
     }
 
@@ -333,12 +581,50 @@ impl RequestHandler for Orchestrator {
 
     fn agent_execute(
         &self,
-        _payload: AgentExecutePayload,
+        payload: AgentExecutePayload,
     ) -> Result<serde_json::Value, StdioError> {
         self.require_active()
             .map_err(Self::agent_error_to_stdio)?;
 
-        Err(Self::agent_error_to_stdio(AgentError::QemuUnavailable))
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Active(s) => s,
+            _ => return Err(Self::agent_error_to_stdio(AgentError::SessionNotActive)),
+        };
+
+        // Check if VM is available
+        let control_writer = match &session.control_writer {
+            Some(writer) => writer.clone(),
+            None => return Err(Self::agent_error_to_stdio(AgentError::QemuUnavailable)),
+        };
+
+        let command_id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
+
+        // Build and serialize the exec message
+        let exec_msg = codeagent_control::HostMessage::Exec {
+            id: command_id,
+            command: payload.command.clone(),
+            cwd: payload.cwd,
+            env: payload.env,
+        };
+
+        let json_str = control_bridge::serialize_host_message(&exec_msg)
+            .map_err(|error| Self::agent_error_to_stdio(AgentError::Io(
+                std::io::Error::other(error),
+            )))?;
+
+        control_writer
+            .send(json_str)
+            .map_err(|_| Self::agent_error_to_stdio(
+                AgentError::ControlChannelFailed {
+                    reason: "control channel closed".to_string(),
+                },
+            ))?;
+
+        Ok(json!({
+            "command_id": command_id,
+            "status": "started",
+        }))
     }
 
     fn agent_prompt(
@@ -397,10 +683,24 @@ impl RequestHandler for Orchestrator {
         self.require_active()
             .map_err(Self::agent_error_to_stdio)?;
 
-        Ok(json!({
-            "backend": "none",
-            "vm_status": "unavailable",
-        }))
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Active(s) => s,
+            _ => return Err(Self::agent_error_to_stdio(AgentError::SessionNotActive)),
+        };
+
+        if session.qemu_process.is_some() {
+            Ok(json!({
+                "backend": if cfg!(target_os = "windows") { "9p" } else { "virtiofsd" },
+                "vm_status": "running",
+                "vm_pid": session.qemu_process.as_ref().and_then(|p| p.pid()),
+            }))
+        } else {
+            Ok(json!({
+                "backend": "none",
+                "vm_status": "unavailable",
+            }))
+        }
     }
 
     fn safeguard_configure(
@@ -616,5 +916,3 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             .map_err(Self::agent_error_to_mcp)
     }
 }
-
-
