@@ -423,6 +423,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeagent-p9"
+version = "0.1.0"
+dependencies = [
+ "codeagent-common",
+ "codeagent-control",
+ "codeagent-interceptor",
+ "codeagent-test-support",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codeagent-sandbox"
 version = "0.1.0"
 dependencies = [
