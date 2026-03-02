@@ -7,8 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use codeagent_mcp::protocol::{
-    ExecuteCommandArgs, GetUndoHistoryArgs, JsonRpcNotification, ListDirectoryArgs, ReadFileArgs,
-    UndoArgs, WriteFileArgs,
+    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    JsonRpcNotification, ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
 
@@ -35,8 +35,20 @@ impl McpHandler for StubMcpHandler {
         Ok(json!({ "bytes_written": 0 }))
     }
 
+    fn edit_file(&self, args: EditFileArgs) -> Result<Value, McpError> {
+        Ok(json!(format!("The file {} has been updated successfully.", args.path)))
+    }
+
     fn list_directory(&self, _args: ListDirectoryArgs) -> Result<Value, McpError> {
         Ok(json!({ "entries": [] }))
+    }
+
+    fn glob(&self, _args: GlobArgs) -> Result<Value, McpError> {
+        Ok(json!(""))
+    }
+
+    fn grep(&self, _args: GrepArgs) -> Result<Value, McpError> {
+        Ok(json!(""))
     }
 
     fn undo(&self, _args: UndoArgs) -> Result<Value, McpError> {
@@ -268,7 +280,7 @@ async fn mc01_tools_list_returns_seven_tools() {
 
     let resp = harness.send_request(2, "tools/list", json!({})).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 10);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"execute_command"));
@@ -522,8 +534,50 @@ impl McpHandler for UndoMcpHandler {
         Ok(json!({ "bytes_written": args.content.len(), "step_id": step_id }))
     }
 
+    fn edit_file(&self, args: EditFileArgs) -> Result<Value, McpError> {
+        let step_id = self.next_step_id.fetch_add(1, Ordering::SeqCst);
+        let full_path = self.root_dir.join(&args.path);
+
+        let content = std::fs::read_to_string(&full_path).map_err(to_internal)?;
+        let match_count = content.matches(&args.old_string).count();
+        if match_count == 0 {
+            return Err(McpError::InvalidParams {
+                message: "old_string not found in file".to_string(),
+            });
+        }
+        if match_count > 1 && !args.replace_all {
+            return Err(McpError::InvalidParams {
+                message: format!(
+                    "old_string is not unique in the file (found {} occurrences).",
+                    match_count
+                ),
+            });
+        }
+
+        let new_content = if args.replace_all {
+            content.replace(&args.old_string, &args.new_string)
+        } else {
+            content.replacen(&args.old_string, &args.new_string, 1)
+        };
+
+        self.interceptor.open_step(step_id).map_err(to_internal)?;
+        self.interceptor.pre_write(&full_path).map_err(to_internal)?;
+        std::fs::write(&full_path, &new_content).map_err(to_internal)?;
+        self.interceptor.close_step(step_id).map_err(to_internal)?;
+
+        Ok(json!(format!("The file {} has been updated successfully.", args.path)))
+    }
+
     fn list_directory(&self, _args: ListDirectoryArgs) -> Result<Value, McpError> {
         Ok(json!({ "entries": [] }))
+    }
+
+    fn glob(&self, _args: GlobArgs) -> Result<Value, McpError> {
+        Ok(json!(""))
+    }
+
+    fn grep(&self, _args: GrepArgs) -> Result<Value, McpError> {
+        Ok(json!(""))
     }
 
     fn undo(&self, args: UndoArgs) -> Result<Value, McpError> {

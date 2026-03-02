@@ -12,6 +12,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] }
+glob = { workspace = true }
+regex = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 codeagent-interceptor = { path = "../interceptor" }

@@ -15,7 +15,7 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         working_dir: working_dir.to_path_buf(),
         undo_dir: undo_dir.to_path_buf(),
         vm_mode: "ephemeral".to_string(),
-        mcp_socket: None,
+        protocol: "stdio".to_string(),
         log_level: "info".to_string(),
         qemu_binary: None,
         kernel_path: None,
@@ -311,7 +311,10 @@ fn ao_13_agent_execute_unavailable() {
 // -----------------------------------------------------------------------
 
 use codeagent_mcp::McpHandler;
-use codeagent_mcp::protocol::{GetUndoHistoryArgs, ListDirectoryArgs, ReadFileArgs, UndoArgs};
+use codeagent_mcp::protocol::{
+    EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs, ReadFileArgs,
+    UndoArgs,
+};
 
 #[test]
 fn mcp_01_read_file() {
@@ -381,6 +384,204 @@ fn mcp_05_session_status() {
 
     let result = orchestrator.get_session_status().unwrap();
     assert_eq!(result["state"], "active");
+}
+
+#[test]
+fn mcp_06_edit_file() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("hello.txt"), "hello world").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator
+        .edit_file(EditFileArgs {
+            path: "hello.txt".to_string(),
+            old_string: "world".to_string(),
+            new_string: "rust".to_string(),
+            replace_all: false,
+        })
+        .unwrap();
+    assert!(result.as_str().unwrap().contains("updated successfully"));
+
+    let content = std::fs::read_to_string(working.path().join("hello.txt")).unwrap();
+    assert_eq!(content, "hello rust");
+}
+
+#[test]
+fn mcp_07_edit_file_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("data.txt"), "original content").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    orchestrator
+        .edit_file(EditFileArgs {
+            path: "data.txt".to_string(),
+            old_string: "original".to_string(),
+            new_string: "modified".to_string(),
+            replace_all: false,
+        })
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("data.txt")).unwrap(),
+        "modified content"
+    );
+
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("data.txt")).unwrap(),
+        "original content"
+    );
+}
+
+#[test]
+fn mcp_08_edit_file_not_found() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("test.txt"), "hello world").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.edit_file(EditFileArgs {
+        path: "test.txt".to_string(),
+        old_string: "missing".to_string(),
+        new_string: "replacement".to_string(),
+        replace_all: false,
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn mcp_09_edit_file_not_unique() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("test.txt"), "abc abc abc").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.edit_file(EditFileArgs {
+        path: "test.txt".to_string(),
+        old_string: "abc".to_string(),
+        new_string: "xyz".to_string(),
+        replace_all: false,
+    });
+    assert!(result.is_err());
+
+    // But replace_all should work
+    let result = orchestrator.edit_file(EditFileArgs {
+        path: "test.txt".to_string(),
+        old_string: "abc".to_string(),
+        new_string: "xyz".to_string(),
+        replace_all: true,
+    });
+    assert!(result.is_ok());
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("test.txt")).unwrap(),
+        "xyz xyz xyz"
+    );
+}
+
+#[test]
+fn mcp_10_glob() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::create_dir_all(working.path().join("src")).unwrap();
+    std::fs::write(working.path().join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(working.path().join("src/lib.rs"), "").unwrap();
+    std::fs::write(working.path().join("readme.md"), "").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator
+        .glob(GlobArgs {
+            pattern: "**/*.rs".to_string(),
+            path: None,
+        })
+        .unwrap();
+    let output = result.as_str().unwrap();
+    assert!(output.contains("src/main.rs"));
+    assert!(output.contains("src/lib.rs"));
+    assert!(!output.contains("readme.md"));
+}
+
+#[test]
+fn mcp_11_grep_files_with_matches() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("a.txt"), "hello world\nfoo bar").unwrap();
+    std::fs::write(working.path().join("b.txt"), "goodbye world").unwrap();
+    std::fs::write(working.path().join("c.txt"), "no match here").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator
+        .grep(GrepArgs {
+            pattern: "world".to_string(),
+            path: None,
+            include: None,
+            output_mode: "files_with_matches".to_string(),
+            context_lines: None,
+            case_insensitive: false,
+        })
+        .unwrap();
+    let output = result.as_str().unwrap();
+    assert!(output.contains("a.txt"));
+    assert!(output.contains("b.txt"));
+    assert!(!output.contains("c.txt"));
+}
+
+#[test]
+fn mcp_12_grep_content_mode() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("test.rs"), "line1\nfn main() {}\nline3").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator
+        .grep(GrepArgs {
+            pattern: "main".to_string(),
+            path: None,
+            include: None,
+            output_mode: "content".to_string(),
+            context_lines: None,
+            case_insensitive: false,
+        })
+        .unwrap();
+    let output = result.as_str().unwrap();
+    assert!(output.contains("test.rs"));
+    assert!(output.contains("2:fn main() {}"));
+}
+
+#[test]
+fn mcp_13_grep_count_mode() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("test.txt"), "foo\nfoo bar\nbaz foo").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator
+        .grep(GrepArgs {
+            pattern: "foo".to_string(),
+            path: None,
+            include: None,
+            output_mode: "count".to_string(),
+            context_lines: None,
+            case_insensitive: false,
+        })
+        .unwrap();
+    let output = result.as_str().unwrap();
+    assert!(output.contains("test.txt:3"));
 }
 
 // ── AO-14..AO-15 — QEMU integration fallback tests ──
