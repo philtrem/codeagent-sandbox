@@ -2,7 +2,7 @@ mod commands;
 mod config;
 mod paths;
 
-use commands::{claude, config as config_cmd, system, vm};
+use commands::{claude, config as config_cmd, system, undo, vm};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             // Config commands
             config_cmd::read_config,
@@ -30,6 +31,11 @@ pub fn run() {
             // System commands
             system::get_platform,
             system::resolve_binary,
+            system::validate_directory,
+            // Undo commands
+            undo::read_undo_history,
+            // VM MCP passthrough
+            vm::send_mcp_request,
         ])
         .manage(vm::VmState::default())
         .run(tauri::generate_context!())

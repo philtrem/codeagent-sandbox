@@ -53,9 +53,12 @@ under MIT OR Apache-2.0 dual license.
 Design documents:
 - `project-plan.md` — full architecture (WriteInterceptor trait, undo log, STDIO API, MCP server, VM)
 - `testing-plan.md` — 6-layer test pyramid (L1–L6), test matrix UI-01..UI-24, spec decisions
+- `tauri-app-plan.md` — desktop app design (tabs, config schema, VM lifecycle, Claude integration)
+- `desktop-impl-plan.md` — desktop app implementation plan (Phases 1-4, current state, next steps)
 
 ### Workspace Structure
 Rust workspace at repo root: `resolver = "3"`, `edition = "2024"`, `rust-version = "1.85"`.
+`desktop/src-tauri` is excluded from the workspace (`Cargo.toml` `exclude` list).
 
 ```
 Cargo.toml                         # workspace root
@@ -341,6 +344,70 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
     mcp_jsonrpc/                   #   9 seeds
     undo_manifest/                 #   7 seeds
     path_normalize/                #   10 seeds
+desktop/                           # Tauri v2 desktop app (NOT a workspace member)
+  package.json                     #   React + Tauri frontend deps (react 19, zustand, lucide-react,
+                                   #   @tauri-apps/plugin-updater)
+  vite.config.ts                   #   Vite + Tailwind CSS 4 + React plugins
+  tsconfig.json                    #   TypeScript config (strict, ESNext)
+  index.html                       #   HTML entry point (favicon.svg)
+  public/
+    favicon.svg                    #   App icon (blue hexagon with grid motif)
+  src/                              # React frontend
+    main.tsx                       #   React entry point
+    App.tsx                        #   root component (renders Layout + ToastContainer)
+    index.css                      #   Tailwind + CSS variable dark theme
+    vite-env.d.ts                  #   Vite type declarations
+    lib/
+      types.ts                     #   TypeScript types mirroring Rust SandboxConfig, VmStatus,
+                                   #   ClaudeConfigInfo, McpServerEntry, UndoStepDetail,
+                                   #   BarrierDetail, UndoHistoryData, defaultConfig()
+    hooks/
+      useSandboxConfig.ts          #   Zustand store: config load/save with 500ms debounced auto-save,
+                                   #   toast on save errors
+      useVmStatus.ts               #   Zustand store: VM start/stop/poll (2s interval)
+      useToastStore.ts             #   Zustand store: global toast notifications (success/warning/
+                                   #   error/info variants, auto-dismiss)
+      useUndoHistory.ts            #   Zustand store: undo history fetch/rollback, 5s polling
+    components/
+      Layout.tsx                   #   Sidebar nav (4 tabs: Settings, Monitor, Plug, History) + content
+      Toast.tsx                    #   Global toast container (multi-variant, stacked, fixed bottom-right)
+      tabs/
+        SandboxConfig.tsx          #   Tab 1: collapsible sections (Working Dir, Resource Limits,
+                                   #   Safeguards, Advanced) with DirPicker (validates via backend),
+                                   #   NumberInput (range display), Toggle, Select
+        VmManager.tsx              #   Tab 2: status panel, Start/Stop/Restart, memory/CPU sliders,
+                                   #   file pickers for QEMU/kernel/initrd, auto-start + persist toggles
+        ClaudeIntegration.tsx      #   Tab 3: Claude Desktop + Code panels side-by-side, MCP server
+                                   #   detection/toggle/preview/copy, CLI command generation
+        UndoHistory.tsx            #   Tab 4: undo step timeline (newest first), step detail expansion,
+                                   #   barrier indicators, rollback with confirmation dialog + force option
+  src-tauri/                        # Tauri Rust backend (standalone Cargo.toml)
+    Cargo.toml                     #   deps: tauri 2, tauri-plugin-{dialog,shell,process,updater},
+                                   #   serde, serde_json, toml, dirs, which
+    build.rs                       #   tauri_build::build()
+    tauri.conf.json                #   window 1024x768, identifier com.codeagent.desktop, bundle config,
+                                   #   updater plugin config, NSIS/macOS/deb/AppImage installer settings
+    capabilities/
+      default.json                 #   core:default, dialog:default, shell:default, process:default,
+                                   #   updater:default
+    icons/                         #   placeholder icons (32x32, 128x128, 128x128@2x, .ico, .icns)
+    src/
+      main.rs                      #   entry point (calls lib::run)
+      lib.rs                       #   plugin registration (incl. updater) + invoke_handler with all cmds
+      config.rs                    #   SandboxConfig (9 sections: sandbox, vm, undo, safeguards,
+                                   #   symlinks, external_modifications, gitignore, claude_desktop,
+                                   #   claude_code) — serde Serialize/Deserialize + Default
+      paths.rs                     #   config_dir(), config_file_path(), pid_file_path() — platform paths
+      commands/
+        mod.rs                     #   re-exports: claude, config, system, undo, vm
+        config.rs                  #   read_config, write_config, get_config_path (TOML)
+        system.rs                  #   get_platform, resolve_binary, validate_directory
+        vm.rs                      #   VmState (separate Mutex for process/stdin/stdout), VmStatus,
+                                   #   start_vm (spawn + extract I/O handles), stop_vm (kill + cleanup),
+                                   #   get_vm_status (try_wait), send_mcp_request (JSON-RPC passthrough)
+        undo.rs                    #   read_undo_history (scans steps/ manifests + barriers.json)
+        claude.rs                  #   ClaudeConfigInfo, McpServerEntry, detect/write/remove for
+                                   #   Claude Desktop + Code configs, generate_claude_code_cli_command
 ```
 
 ### Key Conventions
@@ -811,6 +878,36 @@ integration code are built. The remaining work is:
 They verify that POSIX syscalls arriving via FUSE trigger the correct `WriteInterceptor`
 method calls. Will become runnable when QEMU/KVM infrastructure is available in CI.
 
+- **Desktop App (Phases 1-4)** — complete
+  - Tauri v2 + React 19 + TypeScript + Tailwind CSS 4 + Zustand stack in `desktop/`
+  - Standalone `desktop/src-tauri/Cargo.toml` (excluded from workspace, not a member)
+  - **Rust backend** (8 files in `src-tauri/src/`):
+    - `SandboxConfig` struct (9 sections) with TOML serialization, platform-specific paths
+    - Config TOML read/write/get_path commands
+    - VM lifecycle: `start_vm` (spawns sandbox binary as child process, PID file),
+      `stop_vm` (kill + cleanup), `get_vm_status` (try_wait polling),
+      `send_mcp_request` (JSON-RPC passthrough to sandbox stdin/stdout)
+    - `VmState` with separate `Mutex` fields for process, stdin, and stdout handles
+    - Claude Desktop/Code config detection, merge-write, removal, CLI command generation
+    - System: `get_platform`, `resolve_binary`, `validate_directory`
+    - Undo: `read_undo_history` (reads step manifests + barriers from disk)
+  - **React frontend** (14 files in `src/`):
+    - Tab 1 (Sandbox Config): collapsible sections with directory pickers (with validation),
+      number inputs (with range display), toggles, dropdowns. 500ms debounced auto-save.
+    - Tab 2 (VM Manager): status panel with indicator dot, Start/Stop/Restart controls,
+      memory/CPU sliders, file pickers, auto-start and persist-VM toggles. 2s polling.
+    - Tab 3 (Claude Integration): Desktop + Code panels side-by-side. MCP server
+      detection/toggle/preview/copy, CLI command generation.
+    - Tab 4 (Undo History): timeline view of undo steps (newest first), step detail
+      expansion, barrier indicators, rollback with confirmation dialog (force option).
+      5s polling when VM is running.
+    - Global toast notification system (success/warning/error/info variants, auto-dismiss,
+      used across all tabs). Zustand store + ToastContainer component.
+  - **Phase 4 additions**:
+    - `tauri-plugin-updater` with placeholder endpoint in `tauri.conf.json`
+    - Installer configuration: NSIS (Windows), macOS min version, deb/AppImage (Linux)
+    - SVG favicon, updater capability permission
+
 ### Planned Upstream Test Adaptation
 The testing plan (§9) identifies five external test suites to adapt. None are implemented yet;
 all are blocked on components that don't exist. Adapt each when its target component is built.
@@ -880,4 +977,11 @@ cd fuzz && cargo fuzz run path_normalize -- -max_total_time=30
 cargo xtask build-guest                         # build guest image for host architecture
 cargo xtask build-guest --arch aarch64          # cross-build for aarch64
 cargo xtask build-guest --no-cache              # rebuild without Docker cache
+
+# Desktop app (Tauri v2, separate from workspace)
+cd desktop && npm install                                              # install frontend deps
+cd desktop/src-tauri && cargo check                                    # type-check Rust backend
+cd desktop && npx tsc --noEmit                                         # type-check TypeScript frontend
+cd desktop && npm run tauri dev                                        # run desktop app in dev mode
+cd desktop && npm run tauri build                                      # build production installer
 ```

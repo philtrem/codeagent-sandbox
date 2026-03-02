@@ -6,6 +6,7 @@ import {
   Save,
   AlertCircle,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 
@@ -46,6 +47,18 @@ function DirPicker({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const [invalid, setInvalid] = useState(false);
+
+  useEffect(() => {
+    if (!value) {
+      setInvalid(false);
+      return;
+    }
+    invoke<boolean>("validate_directory", { path: value }).then((valid) => {
+      setInvalid(!valid);
+    });
+  }, [value]);
+
   const pickDir = async () => {
     const selected = await open({ directory: true, multiple: false });
     if (selected) onChange(selected as string);
@@ -57,13 +70,25 @@ function DirPicker({
         {label}
       </label>
       <div className="flex gap-2">
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm"
-          placeholder="Select a directory..."
-        />
+        <div className="relative min-w-0 flex-1">
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className={`w-full rounded border px-3 py-1.5 text-sm bg-[var(--color-bg)] ${
+              invalid
+                ? "border-[var(--color-error)]"
+                : "border-[var(--color-border)]"
+            }`}
+            placeholder="Select a directory..."
+          />
+          {invalid && (
+            <AlertCircle
+              size={14}
+              className="absolute top-1/2 right-2 -translate-y-1/2 text-[var(--color-error)]"
+            />
+          )}
+        </div>
         <button
           onClick={pickDir}
           className="flex items-center gap-1 rounded border border-[var(--color-border)] px-3 py-1.5 text-sm hover:bg-[var(--color-bg-tertiary)]"
@@ -72,6 +97,11 @@ function DirPicker({
           Browse
         </button>
       </div>
+      {invalid && (
+        <p className="mt-1 text-xs text-[var(--color-error)]">
+          Directory does not exist
+        </p>
+      )}
     </div>
   );
 }
@@ -91,6 +121,9 @@ function NumberInput({
   max?: number;
   suffix?: string;
 }) {
+  const outOfRange =
+    (min !== undefined && value < min) || (max !== undefined && value > max);
+
   return (
     <div>
       <label className="mb-1 block text-xs text-[var(--color-text-secondary)]">
@@ -103,11 +136,20 @@ function NumberInput({
           onChange={(e) => onChange(Number(e.target.value))}
           min={min}
           max={max}
-          className="w-32 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm"
+          className={`w-32 rounded border px-3 py-1.5 text-sm bg-[var(--color-bg)] ${
+            outOfRange
+              ? "border-[var(--color-warning)]"
+              : "border-[var(--color-border)]"
+          }`}
         />
         {suffix && (
           <span className="text-xs text-[var(--color-text-secondary)]">
             {suffix}
+          </span>
+        )}
+        {outOfRange && (
+          <span className="text-xs text-[var(--color-warning)]">
+            Range: {min ?? "..."}–{max ?? "..."}
           </span>
         )}
       </div>

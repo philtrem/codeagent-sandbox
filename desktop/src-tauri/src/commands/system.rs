@@ -10,6 +10,12 @@ pub fn get_platform() -> String {
     }
 }
 
+/// Check whether the given path is an existing directory.
+#[tauri::command]
+pub fn validate_directory(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
+
 /// Resolve a binary name to its full path via the system PATH.
 #[tauri::command]
 pub fn resolve_binary(name: String) -> Result<Option<String>, String> {

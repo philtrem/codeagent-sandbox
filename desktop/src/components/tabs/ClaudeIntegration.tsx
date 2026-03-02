@@ -4,25 +4,11 @@ import {
   Copy,
   Check,
   RefreshCw,
-  AlertTriangle,
   Terminal,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
+import { useToastStore } from "../../hooks/useToastStore";
 import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
-
-function Toast({ message, onClose }: { message: string; onClose: () => void }) {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 4000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
-
-  return (
-    <div className="fixed right-4 bottom-4 flex items-center gap-2 rounded-lg border border-[var(--color-warning)] bg-[var(--color-bg-secondary)] px-4 py-3 text-sm shadow-lg">
-      <AlertTriangle size={16} className="text-[var(--color-warning)]" />
-      {message}
-    </div>
-  );
-}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -86,6 +72,7 @@ function ClaudeDesktopPanel({
   onRestart: () => void;
 }) {
   const { config, updateSection } = useSandboxConfig();
+  const addToast = useToastStore((s) => s.addToast);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
 
@@ -128,8 +115,8 @@ function ClaudeDesktopPanel({
       }
       onRestart();
       detect();
-    } catch (_) {
-      // Error handling deferred
+    } catch (e) {
+      addToast("error", `Failed to update Claude Desktop config: ${e}`);
     }
   };
 
@@ -221,6 +208,7 @@ function ClaudeCodePanel({
   onRestart: () => void;
 }) {
   const { config, updateSection } = useSandboxConfig();
+  const addToast = useToastStore((s) => s.addToast);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
   const [cliCommand, setCliCommand] = useState("");
@@ -275,8 +263,8 @@ function ClaudeCodePanel({
       }
       onRestart();
       detect();
-    } catch (_) {
-      // Error handling deferred
+    } catch (e) {
+      addToast("error", `Failed to update Claude Code config: ${e}`);
     }
   };
 
@@ -395,10 +383,10 @@ function ClaudeCodePanel({
 }
 
 export default function ClaudeIntegration() {
-  const [toast, setToast] = useState<string | null>(null);
+  const addToast = useToastStore((s) => s.addToast);
 
   const handleRestart = () => {
-    setToast("Restart Claude Desktop / Claude Code for changes to take effect.");
+    addToast("warning", "Restart Claude Desktop / Claude Code for changes to take effect.");
   };
 
   return (
@@ -409,8 +397,6 @@ export default function ClaudeIntegration() {
         <ClaudeDesktopPanel onRestart={handleRestart} />
         <ClaudeCodePanel onRestart={handleRestart} />
       </div>
-
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
   );
 }

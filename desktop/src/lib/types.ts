@@ -85,6 +85,33 @@ export interface McpServerEntry {
   args: string[];
 }
 
+export interface ManifestEntryDetail {
+  path: string;
+  existed_before: boolean;
+  file_type: string;
+}
+
+export interface UndoStepDetail {
+  step_id: number;
+  timestamp: string;
+  command: string | null;
+  file_count: number;
+  files: ManifestEntryDetail[];
+  unprotected: boolean;
+}
+
+export interface BarrierDetail {
+  barrier_id: number;
+  after_step_id: number;
+  timestamp: string;
+  affected_paths: string[];
+}
+
+export interface UndoHistoryData {
+  steps: UndoStepDetail[];
+  barriers: BarrierDetail[];
+}
+
 /** Default config matching Rust defaults. */
 export function defaultConfig(): SandboxConfig {
   return {

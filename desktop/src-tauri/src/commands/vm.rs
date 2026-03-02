@@ -1,9 +1,10 @@
 use crate::config::SandboxConfig;
 use crate::paths;
 use serde::Serialize;
+use std::io::{BufRead, BufReader, Write};
+use std::process::Child;
 use std::sync::Mutex;
 use tauri::State;
-use tokio::process::Child;
 
 /// VM status reported to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -13,15 +14,19 @@ pub struct VmStatus {
     pub error: Option<String>,
 }
 
-/// Shared state holding the sandbox child process handle.
+/// Shared state holding the sandbox child process and its I/O handles.
 pub struct VmState {
     pub process: Mutex<Option<Child>>,
+    pub stdin: Mutex<Option<std::process::ChildStdin>>,
+    pub stdout: Mutex<Option<BufReader<std::process::ChildStdout>>>,
 }
 
 impl Default for VmState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
+            stdin: Mutex::new(None),
+            stdout: Mutex::new(None),
         }
     }
 }
@@ -104,7 +109,7 @@ fn find_sandbox_binary() -> Result<String, String> {
 
 /// Start the sandbox VM as a child process.
 #[tauri::command]
-pub async fn start_vm(
+pub fn start_vm(
     config: SandboxConfig,
     state: State<'_, VmState>,
 ) -> Result<VmStatus, String> {
@@ -117,7 +122,7 @@ pub async fn start_vm(
     let binary = find_sandbox_binary()?;
     let args = build_sandbox_args(&config);
 
-    let child = tokio::process::Command::new(&binary)
+    let mut child = std::process::Command::new(&binary)
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -127,29 +132,47 @@ pub async fn start_vm(
 
     let pid = child.id();
 
+    // Extract stdin/stdout before storing the Child
+    let child_stdin = child.stdin.take();
+    let child_stdout = child.stdout.take().map(BufReader::new);
+
     // Write PID file for persistence
     if let Some(pid_path) = paths::pid_file_path() {
         if let Some(parent) = pid_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Some(pid) = pid {
-            let _ = std::fs::write(&pid_path, pid.to_string());
-        }
+        let _ = std::fs::write(&pid_path, pid.to_string());
     }
 
     *process_guard = Some(child);
+    drop(process_guard);
+
+    // Store I/O handles separately
+    if let Ok(mut guard) = state.stdin.lock() {
+        *guard = child_stdin;
+    }
+    if let Ok(mut guard) = state.stdout.lock() {
+        *guard = child_stdout;
+    }
 
     Ok(VmStatus {
         state: "running".into(),
-        pid,
+        pid: Some(pid),
         error: None,
     })
 }
 
 /// Stop the sandbox VM.
 #[tauri::command]
-pub async fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
-    // Take the child out of the mutex so we can drop the guard before awaiting.
+pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
+    // Clear I/O handles first
+    if let Ok(mut guard) = state.stdin.lock() {
+        guard.take();
+    }
+    if let Ok(mut guard) = state.stdout.lock() {
+        guard.take();
+    }
+
     let child = {
         let mut guard = state.process.lock().map_err(|e| e.to_string())?;
         guard.take()
@@ -157,7 +180,8 @@ pub async fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
 
     match child {
         Some(mut child) => {
-            let _ = child.kill().await;
+            let _ = child.kill();
+            let _ = child.wait();
 
             if let Some(pid_path) = paths::pid_file_path() {
                 let _ = std::fs::remove_file(&pid_path);
@@ -192,6 +216,15 @@ pub fn get_vm_status(state: State<'_, VmState>) -> Result<VmStatus, String> {
                 };
 
                 guard.take();
+
+                // Also clear I/O handles on process exit
+                if let Ok(mut stdin_guard) = state.stdin.lock() {
+                    stdin_guard.take();
+                }
+                if let Ok(mut stdout_guard) = state.stdout.lock() {
+                    stdout_guard.take();
+                }
+
                 if let Some(pid_path) = paths::pid_file_path() {
                     let _ = std::fs::remove_file(&pid_path);
                 }
@@ -204,7 +237,7 @@ pub fn get_vm_status(state: State<'_, VmState>) -> Result<VmStatus, String> {
             }
             Ok(None) => Ok(VmStatus {
                 state: "running".into(),
-                pid: child.id(),
+                pid: Some(child.id()),
                 error: None,
             }),
             Err(e) => Ok(VmStatus {
@@ -219,4 +252,45 @@ pub fn get_vm_status(state: State<'_, VmState>) -> Result<VmStatus, String> {
             error: None,
         }),
     }
+}
+
+/// Send a JSON-RPC line to the sandbox stdin and read one response line from stdout.
+#[tauri::command]
+pub fn send_mcp_request(
+    request_json: String,
+    state: State<'_, VmState>,
+) -> Result<String, String> {
+    let mut stdin_guard = state.stdin.lock().map_err(|e| e.to_string())?;
+    let stdin = stdin_guard
+        .as_mut()
+        .ok_or_else(|| "Sandbox process is not running".to_string())?;
+
+    // Write the JSON-RPC line
+    stdin
+        .write_all(request_json.as_bytes())
+        .map_err(|e| format!("Failed to write to sandbox stdin: {e}"))?;
+    stdin
+        .write_all(b"\n")
+        .map_err(|e| format!("Failed to write newline: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("Failed to flush stdin: {e}"))?;
+    drop(stdin_guard);
+
+    // Read one response line from stdout
+    let mut stdout_guard = state.stdout.lock().map_err(|e| e.to_string())?;
+    let stdout = stdout_guard
+        .as_mut()
+        .ok_or_else(|| "Sandbox process stdout unavailable".to_string())?;
+
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read from sandbox stdout: {e}"))?;
+
+    if line.is_empty() {
+        return Err("Sandbox process closed stdout".into());
+    }
+
+    Ok(line.trim().to_string())
 }

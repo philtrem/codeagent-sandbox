@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { type SandboxConfig, defaultConfig } from "../lib/types";
+import { useToastStore } from "./useToastStore";
 
 interface ConfigState {
   config: SandboxConfig;
@@ -70,6 +71,7 @@ function debouncedSave(
       set({ saving: false, error: null });
     } catch (e) {
       set({ saving: false, error: String(e) });
+      useToastStore.getState().addToast("error", `Failed to save config: ${e}`);
     }
   }, 500);
 }

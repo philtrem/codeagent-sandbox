@@ -20,6 +20,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://releases.codeagent.dev/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": ""
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
@@ -29,6 +37,23 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "section": "utils"
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   }
 }

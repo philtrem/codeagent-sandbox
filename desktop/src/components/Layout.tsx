@@ -1,13 +1,15 @@
 import { useState } from "react";
-import { Settings, Monitor, Plug } from "lucide-react";
+import { Settings, Monitor, Plug, History } from "lucide-react";
 import SandboxConfig from "./tabs/SandboxConfig";
 import VmManager from "./tabs/VmManager";
 import ClaudeIntegration from "./tabs/ClaudeIntegration";
+import UndoHistory from "./tabs/UndoHistory";
 
 const tabs = [
   { id: "config", label: "Configuration", icon: Settings },
   { id: "vm", label: "VM Manager", icon: Monitor },
   { id: "claude", label: "Claude Integration", icon: Plug },
+  { id: "history", label: "Undo History", icon: History },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -44,6 +46,7 @@ export default function Layout() {
         {activeTab === "config" && <SandboxConfig />}
         {activeTab === "vm" && <VmManager />}
         {activeTab === "claude" && <ClaudeIntegration />}
+        {activeTab === "history" && <UndoHistory />}
       </main>
     </div>
   );
