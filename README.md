@@ -42,13 +42,16 @@ cargo xtask build-guest --arch aarch64     # cross-build for aarch64
 
 ### Desktop app
 
-The optional Tauri v2 desktop app lives in `desktop/` (not a workspace member).
+The optional Tauri v2 desktop app lives in `desktop/` (not a workspace member). The installer bundles the `sandbox` binary as a sidecar.
 
 ```sh
 cd desktop && npm install
+npm run build-sidecar   # build sandbox binary + copy to src-tauri/binaries/
 npm run tauri dev       # development
-npm run tauri build     # production installer
+npm run tauri build     # production installer (includes sandbox)
 ```
+
+`build-sidecar` builds the sandbox binary in release mode and copies it to `src-tauri/binaries/` with the target triple suffix that Tauri expects. Run it before `tauri dev` or `tauri build`.
 
 ## Usage
 
