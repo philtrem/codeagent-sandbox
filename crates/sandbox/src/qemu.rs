@@ -200,7 +200,12 @@ impl QemuConfig {
             "-initrd".into(),
             self.initrd_path.as_os_str().to_owned(),
         ]);
-        args.extend(["-append".into(), "console=hvc0 root=/dev/vda".into()]);
+        let append = if self.rootfs_path.is_some() {
+            "console=hvc0 root=/dev/vda"
+        } else {
+            "console=hvc0"
+        };
+        args.extend(["-append".into(), append.into()]);
 
         if let Some(rootfs) = &self.rootfs_path {
             args.extend([
@@ -482,6 +487,38 @@ mod tests {
             a.contains("file=/boot/rootfs.img") && a.contains("format=raw")
         });
         assert!(has_drive, "missing rootfs drive arg: {args:?}");
+    }
+
+    /// QC-09: append line does not include root= when rootfs_path is None.
+    #[test]
+    fn qc_09_no_root_without_rootfs() {
+        let config = test_config(); // rootfs_path: None
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let append_idx = args.iter().position(|a| a == "-append").unwrap();
+        let append_val = &args[append_idx + 1];
+        assert!(
+            !append_val.contains("root="),
+            "append should not contain root= without rootfs: {append_val}"
+        );
+        assert!(append_val.contains("console=hvc0"));
+    }
+
+    /// QC-10: append line includes root=/dev/vda when rootfs_path is set.
+    #[test]
+    fn qc_10_root_with_rootfs() {
+        let mut config = test_config();
+        config.rootfs_path = Some(PathBuf::from("/boot/rootfs.img"));
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let append_idx = args.iter().position(|a| a == "-append").unwrap();
+        let append_val = &args[append_idx + 1];
+        assert!(
+            append_val.contains("root=/dev/vda"),
+            "append should contain root=/dev/vda with rootfs: {append_val}"
+        );
     }
 
     /// QC-08: extra_args are appended to the command line.
