@@ -445,6 +445,7 @@ dependencies = [
  "codeagent-control",
  "codeagent-interceptor",
  "codeagent-mcp",
+ "codeagent-p9",
  "codeagent-stdio",
  "codeagent-test-support",
  "codeagent-virtiofs-backend",

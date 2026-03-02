@@ -220,7 +220,7 @@ impl Orchestrator {
         // the control channel handler for quiescence detection.
         let in_flight_tracker = InFlightTracker::new();
 
-        // 1. Start filesystem backends (Linux/macOS only)
+        // 1. Start filesystem backends
         let mut fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>> = Vec::new();
         let mut fs_socket_paths = Vec::new();
 
@@ -230,6 +230,23 @@ impl Orchestrator {
             for (index, working_dir) in working_dirs.iter().enumerate() {
                 let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
                 let mut backend = InterceptedBackend::new(
+                    working_dir.clone(),
+                    fs_socket.clone(),
+                    interceptors[index].clone(),
+                    in_flight_tracker.clone(),
+                );
+                backend.start()?;
+                fs_socket_paths.push(fs_socket);
+                fs_backends.push(Box::new(backend));
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use crate::fs_backend::{FilesystemBackend, P9Backend};
+            for (index, working_dir) in working_dirs.iter().enumerate() {
+                let fs_socket = socket_dir.join(format!("p9fs{index}.addr"));
+                let mut backend = P9Backend::new(
                     working_dir.clone(),
                     fs_socket.clone(),
                     interceptors[index].clone(),

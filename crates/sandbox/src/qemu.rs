@@ -126,10 +126,17 @@ impl QemuConfig {
     }
 
     /// Filesystem sharing devices (virtiofs on Linux/macOS, 9P on Windows).
+    ///
+    /// On Linux/macOS: uses vhost-user-fs-pci with a socket chardev for
+    /// each working directory (connects to virtiofsd).
+    ///
+    /// On Windows: uses virtio-serial with a socket chardev for each
+    /// working directory (connects to the host P9Server). The guest mounts
+    /// via `mount -t 9p -o trans=fd,rfdno=FD,wfdno=FD`.
     fn add_filesystem_args(&self, args: &mut Vec<OsString>) {
-        for (index, _socket_path) in self.fs_socket_paths.iter().enumerate() {
+        for (index, socket_path) in self.fs_socket_paths.iter().enumerate() {
             let chardev_id = format!("vfs{index}");
-            let tag = if index == 0 {
+            let _tag = if index == 0 {
                 "working".to_string()
             } else {
                 format!("working{index}")
@@ -143,20 +150,24 @@ impl QemuConfig {
                 ]);
                 args.extend([
                     "-device".into(),
-                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={tag}").into(),
+                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={_tag}").into(),
                 ]);
             }
 
             #[cfg(target_os = "windows")]
             {
-                let working_dir = &self.working_dirs[index];
+                // Read the TCP address from the socket_path file written by
+                // P9Backend::start(). Connect QEMU via a TCP chardev.
+                let addr = std::fs::read_to_string(socket_path).unwrap_or_default();
                 args.extend([
-                    "-virtfs".into(),
-                    format!(
-                        "local,path={},mount_tag={tag},security_model=none,id={chardev_id}",
-                        working_dir.display()
-                    )
-                    .into(),
+                    "-chardev".into(),
+                    format!("socket,id={chardev_id},host={addr},server=off").into(),
+                ]);
+                // The virtconsole device exposes the chardev as a virtio-serial
+                // port named "p9fs{index}" in the guest.
+                args.extend([
+                    "-device".into(),
+                    format!("virtconsole,chardev={chardev_id},name=p9fs{index}").into(),
                 ]);
             }
         }
