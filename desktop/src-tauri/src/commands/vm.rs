@@ -84,10 +84,24 @@ fn build_sandbox_args(config: &SandboxConfig) -> Vec<String> {
 }
 
 /// Resolve the sandbox binary path.
+///
+/// Search order: Tauri sidecar (triple-suffixed) next to executable,
+/// plain name next to executable, then PATH.
 fn find_sandbox_binary() -> Result<String, String> {
-    // 1. Check next to the current executable (bundled)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // Tauri sidecar binary (target triple suffix added by bundler)
+            let sidecar_name = if cfg!(windows) {
+                format!("sandbox-{}.exe", env!("TARGET_TRIPLE"))
+            } else {
+                format!("sandbox-{}", env!("TARGET_TRIPLE"))
+            };
+            let candidate = dir.join(&sidecar_name);
+            if candidate.exists() {
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
+
+            // Plain name (dev mode or manual placement)
             let candidate = dir.join(if cfg!(windows) {
                 "sandbox.exe"
             } else {
@@ -99,7 +113,6 @@ fn find_sandbox_binary() -> Result<String, String> {
         }
     }
 
-    // 2. Check PATH
     if let Ok(path) = which::which("sandbox") {
         return Ok(path.to_string_lossy().into_owned());
     }

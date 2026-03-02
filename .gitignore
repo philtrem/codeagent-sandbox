@@ -422,5 +422,8 @@ FodyWeavers.xsd
 /fuzz/target/
 /xtask/target/
 
+# Tauri sidecar binaries (built by scripts/copy-sidecar.sh)
+/desktop/src-tauri/binaries/
+
 # Claude Code
 /.claude/
