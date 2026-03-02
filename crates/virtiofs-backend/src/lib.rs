@@ -1,10 +1,10 @@
 pub mod inode_map;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod error;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod intercepted_fs;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub mod daemon;

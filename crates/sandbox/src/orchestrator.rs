@@ -224,7 +224,7 @@ impl Orchestrator {
         let mut fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>> = Vec::new();
         let mut fs_socket_paths = Vec::new();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             use crate::fs_backend::{FilesystemBackend, InterceptedBackend};
             for (index, working_dir) in working_dirs.iter().enumerate() {
@@ -234,22 +234,6 @@ impl Orchestrator {
                     fs_socket.clone(),
                     interceptors[index].clone(),
                     in_flight_tracker.clone(),
-                );
-                backend.start()?;
-                fs_socket_paths.push(fs_socket);
-                fs_backends.push(Box::new(backend));
-            }
-        }
-
-        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
-        {
-            use crate::fs_backend::{FilesystemBackend, VirtioFsBackend};
-            for (index, working_dir) in working_dirs.iter().enumerate() {
-                let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
-                let mut backend = VirtioFsBackend::new(
-                    working_dir.clone(),
-                    fs_socket.clone(),
-                    self.cli_args.virtiofsd_binary.clone(),
                 );
                 backend.start()?;
                 fs_socket_paths.push(fs_socket);

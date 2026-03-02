@@ -124,12 +124,12 @@ impl Drop for VirtioFsBackend {
 ///
 /// Wraps `InterceptedVirtioFsBackend` from the virtiofs-backend crate,
 /// adapting its error type to `AgentError` for use in the Orchestrator.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub struct InterceptedBackend {
     inner: codeagent_virtiofs_backend::daemon::InterceptedVirtioFsBackend,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl InterceptedBackend {
     pub fn new(
         shared_dir: PathBuf,
@@ -148,7 +148,7 @@ impl InterceptedBackend {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl FilesystemBackend for InterceptedBackend {
     fn start(&mut self) -> Result<(), AgentError> {
         self.inner.start().map_err(|error| AgentError::VirtioFsFailed {
@@ -167,7 +167,7 @@ impl FilesystemBackend for InterceptedBackend {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for InterceptedBackend {
     fn drop(&mut self) {
         let _ = self.stop();
