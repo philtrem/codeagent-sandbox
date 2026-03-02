@@ -186,8 +186,10 @@ crates/
                                    #   spawn_control_reader (socket reader → ControlChannelHandler),
                                    #   serialize_host_message
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
-                                   #   VirtioFsBackend [cfg(not(windows))] — spawns upstream
-                                   #   virtiofsd with --shared-dir/--socket-path/--cache=never
+                                   #   VirtioFsBackend [cfg(not(windows))] — spawns external
+                                   #   virtiofsd process (no interception),
+                                   #   InterceptedBackend [cfg(unix)] — wraps virtiofs-backend
+                                   #   crate's InterceptedVirtioFsBackend as FilesystemBackend
       qemu.rs                      #   QemuConfig (full command-line builder with platform-specific
                                    #   machine/accel/fs args), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
@@ -209,6 +211,57 @@ crates/
     tests/
       shim_integration.rs          #   SH-01..SH-08 integration tests (8 tests, SH-06 ignored on
                                    #   Windows) using tokio::io::duplex()
+  virtiofs-backend/                 # codeagent-virtiofs-backend — intercepted virtiofs filesystem backend
+    Cargo.toml                     #   depends on virtiofsd (Unix only via cfg(unix)), codeagent-interceptor,
+                                   #   codeagent-control
+    src/
+      lib.rs                       #   module declarations (inode_map always; error, intercepted_fs, daemon
+                                   #   behind #[cfg(unix)])
+      inode_map.rs                 #   InodePathMap: inode→host path mapping (RwLock<HashMap<u64, PathBuf>>),
+                                   #   FUSE_ROOT_ID, insert/get/resolve/remove/rename/rename_subtree
+      error.rs                     #   VirtioFsBackendError enum (Io, Interceptor, Daemon) [Unix only]
+      intercepted_fs.rs            #   InterceptedFs: wraps PassthroughFs, implements FileSystem trait (44
+                                   #   methods), WriteInterceptor pre/post hooks on 16 mutating methods,
+                                   #   InFlightGuard drop guard, inode_map tracking [Unix only]
+      daemon.rs                    #   InterceptedVirtioFsBackend: in-process vhost-user daemon, start/stop/
+                                   #   is_running, spawns daemon on background thread [Unix only]
+    tests/
+      filesystem_backend.rs        #   FB-01..FB-16 L3 integration tests (16 tests, all #[ignore],
+                                   #   Linux only) — POSIX syscalls → WriteInterceptor method verification
+  vmm-sys-util-fork/                # vmm-sys-util — fork with macOS support (excluded from
+                                   #   workspace; compiled via [patch.crates-io] on Unix)
+    Cargo.toml                     #   platform-gated deps, libc + bitflags always
+    src/                           #   macOS impls for FallocateMode, TempDir/TempFile,
+                                   #   terminal, timer_fd (kqueue), signal, errno;
+                                   #   epoll/syslog/ioctl gated on Linux
+  virtiofsd-fork/                   # virtiofsd — fork of virtiofsd 1.13.3 with macOS compat layer
+                                   #   (excluded from workspace members; compiled only when depended on
+                                   #   via [patch.crates-io])
+    Cargo.toml                     #   platform-gated deps: vhost/vm-memory under cfg(unix),
+                                   #   capng/seccomp under cfg(linux)
+    src/
+      lib.rs                       #   compat + cross-platform modules; sandbox/seccomp/idmap/limits
+                                   #   gated behind #[cfg(target_os = "linux")]
+      compat/                      #   Platform compatibility layer (7 sub-modules)
+        mod.rs                     #   re-exports all compat sub-modules
+        fd_ops.rs                  #   O_PATH_OR_RDONLY, O_DIRECT, fd_to_path, open_proc_self_fd,
+                                   #   reopen_fd, open_path_fd (Linux: /proc/self/fd, macOS: fcntl)
+        rename_ops.rs              #   RENAME_* constants, safe_renameat2 (Linux: SYS_renameat2,
+                                   #   macOS: renameatx_np with flag translation)
+        stat_ops.rs                #   StatExt, statx (Linux: SYS_statx, macOS: fstatat)
+        credentials.rs             #   seteffuid/gid, setsupgroup, ScopedCaps (Linux: capng,
+                                   #   macOS: seteuid/no-op caps)
+        io_ops.rs                  #   writev_at/readv_at (Linux: pwritev2, macOS: pwritev)
+        os_facts.rs                #   OsFacts (Linux: probe openat2, macOS: always false)
+        types.rs                   #   stat64, off64_t, ino64_t type aliases; lseek64, fstatat64,
+                                   #   fallocate64 cross-platform wrappers
+      oslib.rs                     #   delegates to compat for IO/credentials/OsFacts; gates
+                                   #   mount/umount/filehandle on Linux
+      passthrough/                 #   PassthroughFs with O_PATH→O_PATH_OR_RDONLY,
+                                   #   copy_file_range/syncfs platform-gated
+      read_dir.rs                  #   platform split: Linux getdents64, macOS getdirentries
+      server.rs                    #   FUSE server using compat RENAME_* constants
+      util.rs                      #   linux_only module for pidfd_open/sfork/capabilities
   e2e-tests/                       # codeagent-e2e-tests — L4 QEMU E2E test infrastructure
     src/
       lib.rs                       #   module declarations + re-exports
@@ -241,9 +294,10 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
 - **Cross-platform path handling**: All internal path strings (preimage metadata, manifest keys,
   touched-paths sets, path hashes) use forward slashes. Convert with `.replace('\\', "/")`.
   The `preimage::path_hash()` function normalizes before hashing.
-- **Platform-conditional compilation**: `#[cfg(unix)]` for real mode bits and symlinks,
-  `#[cfg(windows)]` for synthetic mode (0o755/0o644) and `symlink_file`, `#[cfg(target_os = "linux")]`
-  reserved for xattrs.
+- **Platform-conditional compilation**: `#[cfg(unix)]` for real mode bits, symlinks, and the
+  virtiofs backend (virtiofs-backend + InterceptedBackend in sandbox). `#[cfg(windows)]` for
+  synthetic mode (0o755/0o644) and `symlink_file`. `#[cfg(target_os = "linux")]` reserved for
+  xattrs, seccomp, and Linux-specific virtiofsd modules (sandbox, idmap, limits).
 - **First-touch semantics**: `UndoInterceptor` captures a preimage only on the first mutating
   touch of a path within a step. The `touched_paths: HashSet<String>` guards against duplicates.
 - **Rollback is pop**: Rolling back removes steps from history (not reversible). Two-pass algorithm:
@@ -321,10 +375,20 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   `write_file`, `list_directory`. Error codes use JSON-RPC 2.0 standard codes (-327xx)
   plus application-specific codes (-320xx). MCP and STDIO share the same undo log and
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
+- **virtiofsd-fork compat module**: The `crates/virtiofsd-fork/src/compat/` module provides a
+  centralized platform abstraction layer for porting virtiofsd from Linux to macOS. Key patterns:
+  `O_PATH_OR_RDONLY` (Linux: `O_PATH`, macOS: `O_RDONLY`), `O_DIRECT` (0 on macOS), 64-bit type
+  aliases (`stat64`, `off64_t`, `ino64_t`), `RENAME_*` flag constants, and cross-platform wrappers
+  for `lseek64`/`fstatat64`/`fallocate64`. Platform-specific syscalls (`copy_file_range`, `syncfs`,
+  `getdents64`) have macOS equivalents or `ENOSYS` fallbacks. The fork is excluded from workspace
+  members (Unix-only) but available via `[patch.crates-io]` — only compiled when a Unix dependency
+  chain requires it.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Dev-only**: proptest
-  (model-based testing), criterion (performance benchmarks, with html_reports).
+  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Unix-only** (virtiofs
+  backend): virtiofsd (Apache-2.0/BSD-3, via local fork), vhost-user-backend, vhost, vm-memory,
+  log; vmm-sys-util (via local fork with macOS support). **Dev-only**: proptest (model-based
+  testing), criterion (performance benchmarks, with html_reports).
 
 ### Implementation Status
 The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD steps are complete:
@@ -602,6 +666,28 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `ShimError` enum: Io, Json, ChannelClosed, CommandNotFound, MalformedMessage
   - Integration tests SH-01..SH-08 (8 tests, SH-06 cancel ignored on Windows)
 
+- **macOS virtiofs portability (Phase 2)** — complete
+  - Vendored `vmm-sys-util` fork (`crates/vmm-sys-util-fork/`): added macOS implementations
+    for `FallocateMode`, `TempDir`/`TempFile`, terminal utilities, timer fd (kqueue-based),
+    signal handling, and errno utilities. Gates Linux-only modules (epoll, syslog, ioctl)
+    behind `#[cfg(target_os = "linux")]`.
+  - Vendored `virtiofsd` fork (`crates/virtiofsd-fork/`): forked virtiofsd 1.13.3 with
+    comprehensive macOS compatibility layer in `src/compat/` (7 sub-modules). Key adaptations:
+    - `fd_ops.rs`: `O_PATH` → `O_PATH_OR_RDONLY`, `/proc/self/fd` → `fcntl(F_GETPATH)`,
+      `O_DIRECT` → 0 on macOS
+    - `rename_ops.rs`: `SYS_renameat2` → `renameatx_np` with flag translation
+    - `stat_ops.rs`: `SYS_statx` → `fstatat` with field mapping
+    - `credentials.rs`: `capng` → `seteuid/setegid` (macOS has no capabilities)
+    - `io_ops.rs`: `pwritev2/preadv2` → `pwritev/preadv`
+    - `types.rs`: 64-bit type aliases (`stat64`/`off64_t`/`ino64_t`) + wrapper functions
+    - `read_dir.rs`: `SYS_getdents64` → `getdirentries` (complete platform split)
+    - `passthrough/mod.rs`: `copy_file_range` → ENOSYS, `syncfs` → `F_FULLFSYNC`,
+      `fchownat(AT_EMPTY_PATH)` → `fchown`
+  - Widened cfg guards: `#[cfg(target_os = "linux")]` → `#[cfg(unix)]` in virtiofs-backend
+    crate (Cargo.toml deps + module gates), sandbox crate (Cargo.toml dep + fs_backend.rs +
+    orchestrator.rs), enabling `InterceptedBackend` on macOS with full WriteInterceptor hooks
+  - Both forks excluded from workspace members (Unix-only) but available via `[patch.crates-io]`
+
 ### Remaining Implementation
 All 18 TDD steps are complete. The host-side sandbox binary, VM-side shim, and QEMU
 integration code are built. The remaining work is:
@@ -609,21 +695,26 @@ integration code are built. The remaining work is:
 1. ~~**Host-side agent binary** — complete (see above)~~
 2. ~~**VM-side shim** — complete (see above)~~
 3. ~~**QEMU integration** — complete (see above)~~
-4. **virtiofsd fork** (Linux/macOS, Phase 1) — the filesystem backend that translates FUSE/virtiofs
-   requests into `WriteInterceptor` method calls. Will fork upstream virtiofsd and add interception
-   hooks in the request handlers. Currently `VirtioFsBackend` launches upstream (unmodified)
-   virtiofsd; the forked version with `WriteInterceptor` hooks will be a drop-in replacement.
+4. ~~**virtiofsd intercepted backend** (Unix, Phases 1+2) — complete. The `codeagent-virtiofs-backend`
+   crate wraps the virtiofsd fork as a library dependency. `InterceptedFs` implements virtiofsd's
+   `FileSystem` trait (44 methods), intercepting 16 mutating methods with `WriteInterceptor`
+   pre/post hooks and `InFlightTracker` for quiescence detection. `InterceptedVirtioFsBackend`
+   runs the daemon in-process on a background thread. Integrated into the Orchestrator via
+   `InterceptedBackend` adapter in `fs_backend.rs`. Works on both Linux and macOS via the
+   virtiofsd fork's compat layer.~~
 5. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
    calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
 6. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
    Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
+7. ~~**macOS virtiofs support** (Phase 2) — complete. Vendored vmm-sys-util and virtiofsd forks
+   with macOS compat layers. `InterceptedBackend` now works on all Unix platforms (Linux + macOS).
+   The virtiofsd fork's `src/compat/` module handles all Linux→macOS API translations
+   (`O_PATH`, `/proc/self/fd`, `statx`, `renameat2`, `getdents64`, etc.).~~
 
-**Known test gap**: There are no integration tests at the **filesystem backend level** — i.e.,
-tests that verify the virtiofsd fork or 9P server correctly translates POSIX syscalls into
-`WriteInterceptor` method calls (e.g., that `rename(2)` calls `pre_rename` then `post_rename`).
-Currently, the undo interceptor is tested directly via `OperationApplier` (L2), and the full
-VM pipeline is tested via E2E tests (L4). The L3 filesystem backend integration tests should
-be added when the backends are implemented.
+**L3 filesystem backend tests**: FB-01..FB-16 are written in
+`crates/virtiofs-backend/tests/filesystem_backend.rs` (Linux only, all `#[ignore]`).
+They verify that POSIX syscalls arriving via FUSE trigger the correct `WriteInterceptor`
+method calls. Will become runnable when QEMU/KVM infrastructure is available in CI.
 
 ### Planned Upstream Test Adaptation
 The testing plan (§9) identifies five external test suites to adapt. None are implemented yet;
@@ -640,7 +731,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~370 on Windows, ~373 on Linux; 22 E2E+shim ignored)
+cargo test --workspace           # run all tests (~386 on Windows, ~389 on Linux; 22 E2E+shim + 16 FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -658,6 +749,8 @@ cargo test -p codeagent-sandbox                                        # sandbox
 cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
+cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)
+cargo test -p codeagent-virtiofs-backend --test filesystem_backend --ignored # FB L3 integration tests (Linux, requires FUSE)
 
 # E2E tests (require QEMU/KVM; all #[ignore] by default)
 cargo test -p codeagent-e2e-tests                                      # compile-check only (all tests ignored)

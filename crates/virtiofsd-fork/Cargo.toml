@@ -1,0 +1,44 @@
+[package]
+name = "virtiofsd"
+version = "1.13.3"
+edition = "2018"
+license = "Apache-2.0 AND BSD-3-Clause"
+description = "Fork of virtiofsd with macOS support via compat layer"
+repository = "https://gitlab.com/virtio-fs/virtiofsd"
+
+[features]
+default = []
+seccomp = ["dep:libseccomp-sys"]
+xen = [
+    "vhost-user-backend/xen",
+    "vhost/xen",
+    "vm-memory/xen",
+]
+
+[lib]
+name = "virtiofsd"
+path = "src/lib.rs"
+
+[dependencies]
+bitflags = "1.2"
+btree-range-map = "0.7"
+futures = { version = "0.3", features = ["thread-pool"] }
+libc = "0.2.177"
+log = "0.4"
+postcard = { version = "1.0", features = ["use-std"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+vhost = "0.13.0"
+vhost-user-backend = "0.17.0"
+virtio-bindings = "0.2.1"
+virtio-queue = "0.14.0"
+vm-memory = { version = "0.16.0", features = ["backend-mmap", "backend-atomic"] }
+vmm-sys-util = "0.12.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+capng = "0.2.2"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.8.4"
+libseccomp-sys = { version = "0.2", optional = true }
+syslog = "6.1"
