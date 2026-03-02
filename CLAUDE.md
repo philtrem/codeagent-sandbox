@@ -125,17 +125,18 @@ crates/
       protocol.rs                  #   JsonRpcRequest, JsonRpcResponse, JsonRpcNotification,
                                    #   ToolDefinition, ToolCallResult, ToolCallParams,
                                    #   tool arg structs (ExecuteCommandArgs, ReadFileArgs,
-                                   #   WriteFileArgs, ListDirectoryArgs, UndoArgs, etc.)
+                                   #   WriteFileArgs, EditFileArgs, GlobArgs, GrepArgs,
+                                   #   ListDirectoryArgs, UndoArgs, etc.)
       parser.rs                    #   parse_jsonrpc() with 1MB size limit, extract_id(),
                                    #   extract_missing_field()
       path_validation.rs           #   validate_path() — logical .. resolution + containment
-      router.rs                    #   McpHandler trait (7 methods), tool_definitions(),
+      router.rs                    #   McpHandler trait (10 methods), tool_definitions(),
                                    #   McpRouter (initialize/tools_list/tools_call dispatch,
                                    #   path validation for fs tools)
       server.rs                    #   McpServer async loop (tokio::select! for requests +
                                    #   notifications, generic over AsyncRead/AsyncWrite)
     tests/
-      mcp_server.rs                #   MC-01..MC-08 contract tests (27 tests)
+      mcp_server.rs                #   MC-01..MC-08 contract tests (30 tests)
   stdio/                           # codeagent-stdio — STDIO API (JSON Lines over stdin/stdout)
     src/
       lib.rs                       #   module declarations + re-exports
@@ -209,10 +210,10 @@ crates/
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
     Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
     src/
-      main.rs                      #   entry point: parse CLI → Orchestrator → StdioServer
+      main.rs                      #   entry point: parse CLI → branch on --protocol (stdio|mcp)
       lib.rs                       #   module declarations + re-exports
       cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
-                                   #   --mcp-socket, --log-level, --qemu-binary, --kernel-path,
+                                   #   --protocol, --log-level, --qemu-binary, --kernel-path,
                                    #   --initrd-path, --rootfs-path, --memory-mb, --cpus,
                                    #   --virtiofsd-binary
       error.rs                     #   AgentError enum (10 variants: SessionNotActive,
@@ -223,7 +224,7 @@ crates/
                                    #   optional VM fields (qemu_process, fs_backends,
                                    #   in_flight_tracker, control_writer, task handles, socket_dir)
       orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
-                                   #   McpHandler (7 methods), session lifecycle, undo delegation,
+                                   #   McpHandler (10 methods), session lifecycle, undo delegation,
                                    #   direct host fs access, safeguard confirm/configure,
                                    #   launch_vm() for QEMU + virtiofsd + control channel setup,
                                    #   agent_execute sends commands through control channel when VM
@@ -246,7 +247,7 @@ crates/
                                    #   virtconsole for 9P transport), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
     tests/
-      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-05 integration tests (20 tests)
+      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (28 tests)
   shim/                             # codeagent-shim — VM-side command executor binary
     Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
     src/
@@ -422,10 +423,11 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   access — rejects traversal and absolute paths outside root.
 - **MCP server protocol**: JSON-RPC 2.0 over a local socket (Unix domain socket on
   Linux/macOS, named pipe on Windows). MCP lifecycle: `initialize` → `initialized` →
-  `tools/list` → `tools/call`. 7 tools: `execute_command`, `read_file`, `write_file`,
-  `list_directory`, `undo`, `get_undo_history`, `get_session_status`. `write_file`
-  creates a synthetic "API step" for undo. Path containment validated for `read_file`,
-  `write_file`, `list_directory`. Error codes use JSON-RPC 2.0 standard codes (-327xx)
+  `tools/list` → `tools/call`. 10 tools: `execute_command`, `read_file`, `write_file`,
+  `edit_file`, `list_directory`, `glob`, `grep`, `undo`, `get_undo_history`,
+  `get_session_status`. `write_file` and `edit_file` create synthetic "API steps" for undo.
+  Path containment validated for `read_file`, `write_file`, `edit_file`, `list_directory`,
+  `glob` (optional path), `grep` (optional path). Error codes use JSON-RPC 2.0 standard codes (-327xx)
   plus application-specific codes (-320xx). MCP and STDIO share the same undo log and
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
 - **virtiofsd-fork compat module**: The `crates/virtiofsd-fork/src/compat/` module provides a
@@ -573,7 +575,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - Unit tests: 31 (protocol, parser, path_validation). Contract tests: 37 (SA-01..SA-12 + edge cases)
 
 - **TDD Step 11 (MCP Server Contract Tests)** — complete
-  - `codeagent-mcp` crate: MCP server with JSON-RPC 2.0 protocol, 7 tools,
+  - `codeagent-mcp` crate: MCP server with JSON-RPC 2.0 protocol, 10 tools,
     path validation, async server loop, notification forwarding
   - `McpError` — 9 variants: ParseError, InvalidRequest, MethodNotFound, InvalidParams,
     MissingField, PathOutsideRoot, InternalError, OversizedMessage, Io
@@ -581,17 +583,18 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `JsonRpcRequest`, `JsonRpcResponse`, `JsonRpcNotification` — wire types
   - `ToolDefinition`, `ToolCallResult`, `ToolCallParams` — MCP tool protocol types
   - Tool argument structs: `ExecuteCommandArgs`, `ReadFileArgs`, `WriteFileArgs`,
-    `ListDirectoryArgs`, `UndoArgs`, `GetUndoHistoryArgs`
+    `EditFileArgs`, `GlobArgs`, `GrepArgs`, `ListDirectoryArgs`, `UndoArgs`,
+    `GetUndoHistoryArgs`
   - `parse_jsonrpc()` — JSONL parsing with 1MB size limit, version validation
   - `validate_path()` — logical `..` resolution + containment (same algorithm as STDIO)
-  - `McpHandler` trait — 7 methods for the 7 MCP tools
+  - `McpHandler` trait — 10 methods for the 10 MCP tools
   - `McpRouter` — dispatches `initialize`, `tools/list`, `tools/call`, validates paths
-    for `read_file`/`write_file`/`list_directory`
+    for `read_file`/`write_file`/`edit_file`/`list_directory`/`glob`/`grep`
   - `McpServer` — async loop with `tokio::select!` for request/notification multiplexing
   - `McpTestHarness` — in-process test server via `tokio::io::duplex`
   - `UndoMcpHandler` (test-only) — wraps real `UndoInterceptor` for MC-03/MC-04
   - Unit tests: 30 (error, protocol, parser, path_validation).
-    Contract tests: 27 (MC-01..MC-08 + edge cases)
+    Contract tests: 30 (MC-01..MC-08 + edge cases)
 
 - **TDD Step 12 (Fuzz Targets — Initial)** — complete
   - `fuzz/` directory with `cargo-fuzz` infrastructure (excluded from workspace)
@@ -661,9 +664,11 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
 - **Host-Side Sandbox Binary + QEMU Integration** — complete
   - `codeagent-sandbox` crate: the CLI binary that wires all crates into a running system
   - Binary name: `sandbox` (E2E tests reference `SANDBOX_BIN` / `sandbox`)
-  - `CliArgs` via clap derive: `--working-dir`, `--undo-dir`, `--vm-mode`, `--mcp-socket`,
-    `--log-level`, `--qemu-binary`, `--kernel-path`, `--initrd-path`, `--rootfs-path`,
-    `--memory-mb`, `--cpus`, `--virtiofsd-binary`
+  - `CliArgs` via clap derive: `--working-dir`, `--undo-dir`, `--vm-mode`, `--protocol`
+    (stdio|mcp, default stdio), `--log-level`, `--qemu-binary`, `--kernel-path`,
+    `--initrd-path`, `--rootfs-path`, `--memory-mb`, `--cpus`, `--virtiofsd-binary`
+  - `--protocol mcp` mode: auto-starts session from CLI args, runs `McpRouter` + `McpServer`
+    on stdin/stdout for Claude Code Desktop integration
   - `AgentError` enum: 10 variants (SessionNotActive, SessionAlreadyActive, InvalidWorkingDir,
     QemuUnavailable, QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed, NotImplemented,
     Undo, Io)
@@ -672,7 +677,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     `in_flight_tracker`, `control_writer`, `event_bridge_handle`, `control_reader_handle`,
     `control_writer_handle`, `socket_dir`, `next_command_id`
   - `Orchestrator` implements both `RequestHandler` (15 STDIO methods) and `McpHandler`
-    (7 MCP methods) via interior mutability
+    (10 MCP methods) via interior mutability
   - Session lifecycle: start (validates dirs, creates UndoInterceptor per dir, crash recovery,
     version mismatch detection, optional VM launch) → stop (abort tasks, stop QEMU, stop
     backends, cleanup) → reset (stop + re-start with stored payload)
@@ -697,10 +702,12 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
   - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
   - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
-  - MCP `write_file`: opens synthetic API step on interceptor, writes file, closes step
-  - `main.rs`: parse CLI → create Orchestrator → create Router → run StdioServer on stdin/stdout
+  - MCP `write_file`/`edit_file`: opens synthetic API step on interceptor, writes file, closes step
+  - MCP `glob`: pattern matching via `glob` crate, results sorted by mtime (newest first)
+  - MCP `grep`: regex search via `regex` + `walkdir` crates, 3 output modes (files_with_matches, content, count)
+  - `main.rs`: `--protocol stdio` (default) runs StdioServer; `--protocol mcp` runs McpServer on stdin/stdout
   - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
-    integration tests AO-01..AO-15 + MCP-01..MCP-05 (20 tests) = 35 total tests
+    integration tests AO-01..AO-15 + MCP-01..MCP-13 (28 tests) = 43 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -837,8 +844,8 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (35 tests)
-cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (43 tests)
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (28 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
 cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)

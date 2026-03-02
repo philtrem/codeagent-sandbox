@@ -166,6 +166,44 @@ fn default_undo_count() -> u32 {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GetUndoHistoryArgs {}
 
+/// Arguments for the `edit_file` tool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EditFileArgs {
+    pub path: String,
+    pub old_string: String,
+    pub new_string: String,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// Arguments for the `glob` tool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GlobArgs {
+    pub pattern: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Arguments for the `grep` tool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrepArgs {
+    pub pattern: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub include: Option<String>,
+    #[serde(default = "default_output_mode")]
+    pub output_mode: String,
+    #[serde(default)]
+    pub context_lines: Option<usize>,
+    #[serde(default)]
+    pub case_insensitive: bool,
+}
+
+fn default_output_mode() -> String {
+    "files_with_matches".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

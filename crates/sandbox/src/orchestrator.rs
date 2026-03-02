@@ -507,6 +507,16 @@ impl Orchestrator {
             message: err.to_string(),
         }
     }
+
+    fn next_api_step_id(&self) -> Result<i64, McpError> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            SessionState::Active(session) => {
+                Ok((session.interceptors[0].completed_steps().len() as i64) + 1_000_000)
+            }
+            _ => Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
+        }
+    }
 }
 
 /// Parts of a session that come from VM launch.
@@ -778,8 +788,8 @@ impl RequestHandler for Orchestrator {
 // ---------------------------------------------------------------------------
 
 use codeagent_mcp::protocol::{
-    ExecuteCommandArgs, GetUndoHistoryArgs, ListDirectoryArgs, ReadFileArgs, UndoArgs,
-    WriteFileArgs,
+    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
 impl codeagent_mcp::McpHandler for Orchestrator {
@@ -819,18 +829,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let target = working_dir.join(&args.path);
 
         // Open a synthetic API step for undo tracking
-        let step_id = {
-            let state = self.state.lock().unwrap();
-            match &*state {
-                SessionState::Active(session) => {
-                    // Use a large positive step ID for API steps to avoid
-                    // collision with control channel step IDs (which start
-                    // at 1) and ambient step IDs (which are negative).
-                    (session.interceptors[0].completed_steps().len() as i64) + 1_000_000
-                }
-                _ => return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
-            }
-        };
+        let step_id = self.next_api_step_id()?;
 
         interceptor
             .open_step(step_id)
@@ -898,6 +897,224 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             .collect();
 
         Ok(json!({ "entries": entries }))
+    }
+
+    fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError> {
+        let interceptor = self
+            .resolve_interceptor(None)
+            .map_err(Self::agent_error_to_mcp)?;
+
+        let working_dir = self
+            .primary_working_dir()
+            .map_err(Self::agent_error_to_mcp)?;
+
+        let target = working_dir.join(&args.path);
+
+        let content = std::fs::read_to_string(&target).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
+
+        // Validate that old_string exists and is unique (unless replace_all)
+        let match_count = content.matches(&args.old_string).count();
+        if match_count == 0 {
+            return Err(McpError::InvalidParams {
+                message: "old_string not found in file".to_string(),
+            });
+        }
+        if match_count > 1 && !args.replace_all {
+            return Err(McpError::InvalidParams {
+                message: format!(
+                    "old_string is not unique in the file (found {} occurrences). \
+                     Provide more context or use replace_all.",
+                    match_count
+                ),
+            });
+        }
+
+        let new_content = if args.replace_all {
+            content.replace(&args.old_string, &args.new_string)
+        } else {
+            content.replacen(&args.old_string, &args.new_string, 1)
+        };
+
+        // Open a synthetic API step for undo tracking
+        let step_id = self.next_api_step_id()?;
+
+        interceptor
+            .open_step(step_id)
+            .map_err(|e| McpError::InternalError {
+                message: e.to_string(),
+            })?;
+
+        let _ = interceptor.pre_write(&target);
+
+        std::fs::write(&target, &new_content).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
+
+        interceptor
+            .close_step(step_id)
+            .map_err(|e| McpError::InternalError {
+                message: e.to_string(),
+            })?;
+
+        Ok(json!(format!("The file {} has been updated successfully.", args.path)))
+    }
+
+    fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError> {
+        let working_dir = self
+            .primary_working_dir()
+            .map_err(Self::agent_error_to_mcp)?;
+
+        let search_dir = match &args.path {
+            Some(p) => working_dir.join(p),
+            None => working_dir.clone(),
+        };
+
+        let pattern_str = search_dir
+            .join(&args.pattern)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let mut entries: Vec<(String, std::time::SystemTime)> =
+            glob::glob(&pattern_str)
+                .map_err(|e| McpError::InvalidParams {
+                    message: format!("Invalid glob pattern: {e}"),
+                })?
+                .filter_map(|entry| entry.ok())
+                .filter_map(|path| {
+                    let mtime = path.metadata().ok()?.modified().ok()?;
+                    let relative = path
+                        .strip_prefix(&working_dir)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    Some((relative, mtime))
+                })
+                .collect();
+
+        // Sort by modification time, newest first
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let result: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
+        Ok(json!(result.join("\n")))
+    }
+
+    fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {
+        let working_dir = self
+            .primary_working_dir()
+            .map_err(Self::agent_error_to_mcp)?;
+
+        let search_path = match &args.path {
+            Some(p) => working_dir.join(p),
+            None => working_dir.clone(),
+        };
+
+        let regex = regex::RegexBuilder::new(&args.pattern)
+            .case_insensitive(args.case_insensitive)
+            .build()
+            .map_err(|e| McpError::InvalidParams {
+                message: format!("Invalid regex pattern: {e}"),
+            })?;
+
+        let include_glob = args
+            .include
+            .as_ref()
+            .map(|p| glob::Pattern::new(p))
+            .transpose()
+            .map_err(|e| McpError::InvalidParams {
+                message: format!("Invalid include pattern: {e}"),
+            })?;
+
+        let context = args.context_lines.unwrap_or(0);
+        let mut output = String::new();
+
+        // Collect files to search
+        let files: Vec<std::path::PathBuf> = if search_path.is_file() {
+            vec![search_path.clone()]
+        } else {
+            walkdir::WalkDir::new(&search_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    if let Some(ref pat) = include_glob {
+                        pat.matches(
+                            &e.path()
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy(),
+                        )
+                    } else {
+                        true
+                    }
+                })
+                .map(|e| e.into_path())
+                .collect()
+        };
+
+        for file_path in &files {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(_) => continue, // skip binary/unreadable files
+            };
+
+            let lines: Vec<&str> = content.lines().collect();
+            let matching_lines: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| regex.is_match(line))
+                .map(|(i, _)| i)
+                .collect();
+
+            if matching_lines.is_empty() {
+                continue;
+            }
+
+            let relative = file_path
+                .strip_prefix(&working_dir)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            match args.output_mode.as_str() {
+                "files_with_matches" => {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&relative);
+                }
+                "count" => {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&format!("{}:{}", relative, matching_lines.len()));
+                }
+                _ => {
+                    if !output.is_empty() {
+                        output.push_str("\n\n");
+                    }
+                    output.push_str(&relative);
+
+                    // Build set of lines to show (matches + context)
+                    let mut visible: std::collections::BTreeSet<usize> =
+                        std::collections::BTreeSet::new();
+                    for &line_idx in &matching_lines {
+                        let start = line_idx.saturating_sub(context);
+                        let end = (line_idx + context + 1).min(lines.len());
+                        for i in start..end {
+                            visible.insert(i);
+                        }
+                    }
+
+                    for &i in &visible {
+                        output.push_str(&format!("\n{}:{}", i + 1, lines[i]));
+                    }
+                }
+            }
+        }
+
+        Ok(json!(output))
     }
 
     fn undo(&self, args: UndoArgs) -> Result<serde_json::Value, McpError> {
