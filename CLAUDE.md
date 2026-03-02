@@ -59,6 +59,13 @@ Rust workspace at repo root: `resolver = "3"`, `edition = "2024"`, `rust-version
 
 ```
 Cargo.toml                         # workspace root
+.cargo/config.toml                  # [alias] xtask = "run --manifest-path xtask/Cargo.toml --"
+xtask/                              # Development task runner (NOT a workspace member)
+  Cargo.toml                       #   standalone crate, depends on clap
+  src/main.rs                      #   CLI dispatch: build-guest subcommand
+guest/                              # Guest VM image build files
+  Dockerfile                       #   multi-stage: compile shim (musl), assemble initramfs
+  init.sh                          #   /init script for guest VM boot (mount + start shim)
 crates/
   common/                          # codeagent-common — shared types and errors
     src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
@@ -692,8 +699,8 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
   - MCP `write_file`: opens synthetic API step on interceptor, writes file, closes step
   - `main.rs`: parse CLI → create Orchestrator → create Router → run StdioServer on stdin/stdout
-  - CLI unit tests (5 tests) + QC-01..QC-08 QEMU config tests (8 tests) +
-    integration tests AO-01..AO-15 + MCP-01..MCP-05 (20 tests) = 33 total tests
+  - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
+    integration tests AO-01..AO-15 + MCP-01..MCP-05 (20 tests) = 35 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -781,8 +788,12 @@ integration code are built. The remaining work is:
    Integrated into the Orchestrator via `P9Backend` adapter in `fs_backend.rs`. QEMU connects
    via virtio-serial chardev + virtconsole (TCP on Windows). 166 tests (61 wire + 47 server
    operations + 8 Windows normalization + 50 unit).~~
-6. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
-   Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
+6. ~~**Guest image build** (`cargo xtask build-guest`) — complete. Docker multi-stage build
+   (Rust Alpine builder + Alpine assembler) produces vmlinuz (Alpine linux-virt kernel) +
+   initrd.img (busybox-static + shim binary + virtio kernel modules + init script). The init
+   script auto-detects virtiofs (Unix hosts) or 9P-over-serial (Windows hosts) and mounts
+   working directories before starting the shim. Xtask crate at `xtask/` (standalone, not a
+   workspace member) provides the CLI. Requires Docker with BuildKit.~~
 7. ~~**macOS virtiofs support** (Phase 2) — complete. Vendored vmm-sys-util and virtiofsd forks
    with macOS compat layers. `InterceptedBackend` now works on all Unix platforms (Linux + macOS).
    The virtiofsd fork's `src/compat/` module handles all Linux→macOS API translations
@@ -808,7 +819,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~552 on Windows, ~555 on Linux; 22 E2E+shim + 16 FB ignored)
+cargo test --workspace           # run all tests (~554 on Windows, ~557 on Linux; 22 E2E+shim + 16 FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -826,7 +837,7 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (33 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (35 tests)
 cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
@@ -857,4 +868,9 @@ cd fuzz && cargo fuzz run stdio_json -- -max_total_time=30
 cd fuzz && cargo fuzz run mcp_jsonrpc -- -max_total_time=30
 cd fuzz && cargo fuzz run undo_manifest -- -max_total_time=30
 cd fuzz && cargo fuzz run path_normalize -- -max_total_time=30
+
+# Guest image build (requires Docker with BuildKit)
+cargo xtask build-guest                         # build guest image for host architecture
+cargo xtask build-guest --arch aarch64          # cross-build for aarch64
+cargo xtask build-guest --no-cache              # rebuild without Docker cache
 ```

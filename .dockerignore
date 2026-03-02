@@ -1,0 +1,17 @@
+# Exclude build artifacts and large directories from Docker build context
+target/
+.git/
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Guest build output (avoid including previous builds)
+target/guest/
