@@ -17,9 +17,9 @@ pub struct CliArgs {
     #[arg(long, default_value = "ephemeral")]
     pub vm_mode: String,
 
-    /// Path for the MCP server socket. If omitted, no MCP server is started.
-    #[arg(long)]
-    pub mcp_socket: Option<PathBuf>,
+    /// Protocol for the stdin/stdout API: "stdio" (JSON Lines) or "mcp" (JSON-RPC 2.0).
+    #[arg(long, default_value = "stdio")]
+    pub protocol: String,
 
     /// Logging level for stderr structured logs.
     #[arg(long, default_value = "info")]
@@ -71,7 +71,7 @@ mod tests {
         assert_eq!(args.working_dir, PathBuf::from("/tmp/work"));
         assert_eq!(args.undo_dir, PathBuf::from("/tmp/undo"));
         assert_eq!(args.vm_mode, "ephemeral");
-        assert!(args.mcp_socket.is_none());
+        assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
     }
 
@@ -85,17 +85,14 @@ mod tests {
             "/tmp/undo",
             "--vm-mode",
             "persistent",
-            "--mcp-socket",
-            "/tmp/mcp.sock",
+            "--protocol",
+            "mcp",
             "--log-level",
             "debug",
         ])
         .unwrap();
         assert_eq!(args.vm_mode, "persistent");
-        assert_eq!(
-            args.mcp_socket,
-            Some(PathBuf::from("/tmp/mcp.sock"))
-        );
+        assert_eq!(args.protocol, "mcp");
         assert_eq!(args.log_level, "debug");
     }
 
