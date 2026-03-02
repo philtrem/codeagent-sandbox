@@ -157,6 +157,48 @@ crates/
       preimage_capture.rs          #   L6 criterion benchmarks: capture_preimage + zstd_compress (4KB/1MB/100MB)
       rollback_restore.rs          #   L6 criterion benchmark: rollback_step (4KB/1MB/100MB)
       manifest_io.rs               #   L6 criterion benchmarks: manifest write/read/serialize/deserialize (10/100/1000 paths)
+  p9/                               # codeagent-p9 — 9P2000.L server (Windows filesystem backend)
+    Cargo.toml                     #   depends on tokio, thiserror, codeagent-interceptor, codeagent-control
+    src/
+      lib.rs                       #   module declarations + re-exports
+      error.rs                     #   P9Error enum (Io, Protocol, Fid, NotFound, etc.),
+                                   #   error_to_errno (io::ErrorKind → Linux errno)
+      wire.rs                      #   WireReader/WireWriter — LE binary primitives (u8/u16/u32/u64/
+                                   #   string/qid/data), MAX_MESSAGE_SIZE (16MB)
+      messages.rs                  #   23 T/R message struct pairs, type constants (TVERSION=100..),
+                                   #   Rlerror, NOTAG, ToWire/decode for all message types
+      qid.rs                       #   Qid struct (qtype, version, path), QidType constants
+      fid.rs                       #   FidTable (HashMap<u32, FidState>), FidState (path, qid,
+                                   #   open_handle, open_flags, dir_offset), insert/get/remove/
+                                   #   resolve_child/update_path
+      server.rs                    #   P9Server: async dispatch loop over AsyncRead/AsyncWrite,
+                                   #   with_interceptor(), with_in_flight(), InFlightGuard,
+                                   #   validate_name() for reserved/case-collision checks,
+                                   #   dispatches 22 message types to operation handlers
+      operations/
+        mod.rs                     #   re-exports
+        session.rs                 #   handle_version, handle_auth, handle_attach, handle_clunk,
+                                   #   handle_remove, handle_flush, qid_from_path (FNV-1a hash)
+        walk.rs                    #   handle_walk (path traversal + containment), is_contained(),
+                                   #   logical_contains(), resolve_logical()
+        file.rs                    #   handle_lopen, handle_lcreate, handle_read, handle_write,
+                                   #   handle_fsync, open_with_flags (Linux O_* → Rust OpenOptions)
+        dir.rs                     #   handle_readdir (qid+offset+type+name packing), handle_mkdir,
+                                   #   handle_unlinkat, handle_renameat, handle_statfs
+        attr.rs                    #   handle_getattr, handle_setattr, FileAttributes struct
+        link.rs                    #   handle_symlink (platform-specific), handle_readlink,
+                                   #   handle_link
+      platform/
+        mod.rs                     #   get_file_attributes(), is_reserved_name(), check_case_collision()
+                                   #   (no-ops on non-Windows)
+        unix.rs                    #   Real POSIX attrs via MetadataExt
+        windows.rs                 #   POSIX attr synthesis (dirs=0o40755, files=0o100644/0o100755),
+                                   #   RESERVED_NAMES, is_reserved_name(), check_case_collision(),
+                                   #   is_executable_extension()
+    tests/
+      wire_protocol.rs             #   P9-01..P9-05 wire format round-trip tests (61 tests)
+      server_operations.rs         #   SO/WK/RO/WR/LK/RB integration tests (47 tests)
+      windows_normalization.rs     #   WN-01..WN-07 Windows normalization tests (8 tests, most cfg(windows))
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
     Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
     src/
@@ -189,9 +231,12 @@ crates/
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns external
                                    #   virtiofsd process (no interception),
                                    #   InterceptedBackend [cfg(unix)] — wraps virtiofs-backend
-                                   #   crate's InterceptedVirtioFsBackend as FilesystemBackend
+                                   #   crate's InterceptedVirtioFsBackend as FilesystemBackend,
+                                   #   P9Backend [cfg(windows)] — spawns P9Server on tokio task
+                                   #   with WriteInterceptor + InFlightTracker
       qemu.rs                      #   QemuConfig (full command-line builder with platform-specific
-                                   #   machine/accel/fs args), QemuProcess (spawn with socket
+                                   #   machine/accel/fs args; Windows uses virtio-serial chardev +
+                                   #   virtconsole for 9P transport), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
     tests/
       orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-05 integration tests (20 tests)
@@ -296,7 +341,8 @@ fuzz/                              # L5 fuzz targets (excluded from workspace; c
   The `preimage::path_hash()` function normalizes before hashing.
 - **Platform-conditional compilation**: `#[cfg(unix)]` for real mode bits, symlinks, and the
   virtiofs backend (virtiofs-backend + InterceptedBackend in sandbox). `#[cfg(windows)]` for
-  synthetic mode (0o755/0o644) and `symlink_file`. `#[cfg(target_os = "linux")]` reserved for
+  synthetic mode (0o755/0o644), `symlink_file`, P9Backend, reserved name checks, and case
+  collision detection. `#[cfg(target_os = "linux")]` reserved for
   xattrs, seccomp, and Linux-specific virtiofsd modules (sandbox, idmap, limits).
 - **First-touch semantics**: `UndoInterceptor` captures a preimage only on the first mutating
   touch of a path within a step. The `touched_paths: HashSet<String>` guards against duplicates.
@@ -688,6 +734,31 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     orchestrator.rs), enabling `InterceptedBackend` on macOS with full WriteInterceptor hooks
   - Both forks excluded from workspace members (Unix-only) but available via `[patch.crates-io]`
 
+- **9P2000.L Server (Windows Phase 3)** — complete
+  - `codeagent-p9` crate: full 9P2000.L protocol implementation from scratch
+  - Wire format: `WireReader`/`WireWriter` for LE binary primitives, 23 T/R message struct
+    pairs with encode/decode, max 16MB message size enforcement
+  - `FidTable`: `HashMap<u32, FidState>` mapping client handles to server state (host path,
+    qid, open file handle, open flags, dir offset)
+  - `P9Server`: transport-agnostic async dispatch loop over `AsyncRead + AsyncWrite`,
+    builder pattern (`with_interceptor()`, `with_in_flight()`), dispatches 22 message types
+  - Operations: session (version/auth/attach/clunk/remove/flush), walk (path traversal +
+    containment via logical `..` resolution), file (lopen/lcreate/read/write/fsync),
+    dir (readdir/mkdir/unlinkat/renameat/statfs), attr (getattr/setattr), link
+    (symlink/readlink/link), mknod (returns EPERM)
+  - WriteInterceptor integration: pre/post hooks on all mutating operations (lcreate, write,
+    fsync, mkdir, unlinkat, renameat, setattr, symlink, link, remove), `InFlightGuard` drop
+    guard for operation tracking
+  - Platform abstraction: real POSIX attrs on Unix (`MetadataExt`), synthesized attrs on
+    Windows (dirs=0o40755, regular files=0o100644, executables=0o100755)
+  - Windows normalization: reserved name rejection (CON, NUL, PRN, AUX, COM0-9, LPT0-9),
+    case collision detection for create/mkdir/rename operations
+  - Error mapping: `io::ErrorKind` → Linux errno with platform-specific raw OS error fallbacks
+  - Sandbox integration: `P9Backend` [cfg(windows)] in `fs_backend.rs` spawns P9Server on
+    tokio task, QEMU connects via virtio-serial chardev + virtconsole (TCP on Windows)
+  - 166 tests: 61 wire protocol + 50 unit (fid table, qid, error) + 47 server operations
+    (SO/WK/RO/WR/LK/RB) + 8 Windows normalization (WN-01..WN-07)
+
 ### Remaining Implementation
 All 18 TDD steps are complete. The host-side sandbox binary, VM-side shim, and QEMU
 integration code are built. The remaining work is:
@@ -702,8 +773,14 @@ integration code are built. The remaining work is:
    runs the daemon in-process on a background thread. Integrated into the Orchestrator via
    `InterceptedBackend` adapter in `fs_backend.rs`. Works on both Linux and macOS via the
    virtiofsd fork's compat layer.~~
-5. **9P server** (Windows, Phase 3) — the Windows filesystem backend implementing 9P2000.L protocol,
-   calling into `WriteInterceptor`. Will likely build on the crosvm `p9` crate.
+5. ~~**9P server** (Windows, Phase 3) — complete. The `codeagent-p9` crate implements the
+   9P2000.L protocol from scratch (not based on crosvm). Transport-agnostic async server over
+   `AsyncRead + AsyncWrite`. Supports all 22 message types. `WriteInterceptor` pre/post hooks
+   on all mutating operations with `InFlightTracker` drop guard. Windows-specific: reserved
+   name rejection (CON, NUL, etc.), case collision detection, POSIX attribute synthesis.
+   Integrated into the Orchestrator via `P9Backend` adapter in `fs_backend.rs`. QEMU connects
+   via virtio-serial chardev + virtconsole (TCP on Windows). 166 tests (61 wire + 47 server
+   operations + 8 Windows normalization + 50 unit).~~
 6. **Guest image build** (`cargo xtask build-guest`) — builds vmlinuz + initrd for the runtime VM.
    Includes the shim binary, a minimal userspace, and mount configuration for virtiofs/9P.
 7. ~~**macOS virtiofs support** (Phase 2) — complete. Vendored vmm-sys-util and virtiofsd forks
@@ -731,7 +808,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~386 on Windows, ~389 on Linux; 22 E2E+shim + 16 FB ignored)
+cargo test --workspace           # run all tests (~552 on Windows, ~555 on Linux; 22 E2E+shim + 16 FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -745,6 +822,10 @@ cargo test -p codeagent-control --test control_channel_integration # CC integrat
 cargo test -p codeagent-stdio --test stdio_api                     # SA contract tests only
 cargo test -p codeagent-mcp --test mcp_server                      # MC contract tests only
 cargo test -p codeagent-interceptor --test proptest_model           # model-based property tests only
+cargo test -p codeagent-p9                                                 # p9 server tests (166 tests; WN tests on Windows only)
+cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
+cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
+cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
 cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (33 tests)
 cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (20 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
