@@ -69,7 +69,38 @@ pub fn io_error_to_errno(error: &std::io::Error) -> u32 {
         std::io::ErrorKind::PermissionDenied => errno::EACCES,
         std::io::ErrorKind::AlreadyExists => errno::EEXIST,
         std::io::ErrorKind::InvalidInput => errno::EINVAL,
-        _ => errno::EIO,
+        std::io::ErrorKind::DirectoryNotEmpty => errno::ENOTEMPTY,
+        std::io::ErrorKind::IsADirectory => errno::EISDIR,
+        std::io::ErrorKind::NotADirectory => errno::ENOTDIR,
+        std::io::ErrorKind::StorageFull => errno::ENOSPC,
+        std::io::ErrorKind::InvalidFilename => errno::EINVAL,
+        _ => {
+            // Check raw OS error codes for cases not covered by ErrorKind.
+            if let Some(raw) = error.raw_os_error() {
+                #[cfg(windows)]
+                {
+                    // Windows ERROR_DIR_NOT_EMPTY = 145
+                    if raw == 145 {
+                        return errno::ENOTEMPTY;
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    // On Unix, raw OS errors map directly to errno values.
+                    // Translate common ones that ErrorKind doesn't cover.
+                    match raw as u32 {
+                        v if v == errno::ENOTEMPTY => return errno::ENOTEMPTY,
+                        v if v == errno::EISDIR => return errno::EISDIR,
+                        v if v == errno::ENOTDIR => return errno::ENOTDIR,
+                        v if v == errno::ENOSPC => return errno::ENOSPC,
+                        v if v == errno::ENAMETOOLONG => return errno::ENAMETOOLONG,
+                        _ => {}
+                    }
+                }
+                let _ = raw; // Suppress unused variable warning.
+            }
+            errno::EIO
+        }
     }
 }
 
