@@ -1,5 +1,5 @@
 {
-  "productName": "Code Agent Desktop",
+  "productName": "Code Agent Sandbox",
   "version": "0.1.0",
   "identifier": "com.codeagent.desktop",
   "build": {
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Code Agent Desktop",
+        "title": "Code Agent Sandbox",
         "width": 1024,
         "height": 768,
         "resizable": true,
