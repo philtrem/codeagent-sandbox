@@ -422,7 +422,15 @@ impl QemuProcess {
             })?;
 
         #[cfg(target_os = "windows")]
-        let _job = create_kill_on_close_job(&child);
+        let _job = {
+            let job = create_kill_on_close_job(&child);
+            if job.is_some() {
+                eprintln!("[sandbox] QEMU PID {} assigned to kill-on-close job object", child.id());
+            } else {
+                eprintln!("[sandbox] WARNING: failed to create kill-on-close job object for QEMU PID {}", child.id());
+            }
+            job
+        };
 
         let mut process = Self {
             config,

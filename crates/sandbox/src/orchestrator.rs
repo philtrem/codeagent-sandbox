@@ -189,6 +189,7 @@ impl Orchestrator {
                         fs_backends: vm_session_parts.fs_backends,
                         in_flight_tracker: vm_session_parts.in_flight_tracker,
                         control_writer: vm_session_parts.control_writer,
+                        control_handler: vm_session_parts.control_handler,
                         event_bridge_handle: vm_session_parts.event_bridge_handle,
                         control_reader_handle: vm_session_parts.control_reader_handle,
                         control_writer_handle: vm_session_parts.control_writer_handle,
@@ -271,6 +272,7 @@ impl Orchestrator {
             fs_backends: vec![],
             in_flight_tracker: None,
             control_writer: None,
+            control_handler: None,
             event_bridge_handle: None,
             control_reader_handle: None,
             control_writer_handle: None,
@@ -468,7 +470,7 @@ impl Orchestrator {
 
         let control_reader_handle = control_bridge::spawn_control_reader(
             reader,
-            handler,
+            handler.clone(),
             self.event_sender.clone(),
         );
 
@@ -477,6 +479,7 @@ impl Orchestrator {
             fs_backends,
             in_flight_tracker: Some(in_flight_tracker),
             control_writer: Some(control_writer_sender),
+            control_handler: Some(handler),
             event_bridge_handle: Some(event_bridge_handle),
             control_reader_handle: Some(control_reader_handle),
             control_writer_handle: Some(control_writer_handle),
@@ -662,6 +665,7 @@ struct VmSessionParts {
     fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>>,
     in_flight_tracker: Option<InFlightTracker>,
     control_writer: Option<mpsc::UnboundedSender<String>>,
+    control_handler: Option<Arc<codeagent_control::ControlChannelHandler<crate::step_adapter::StepManagerAdapter>>>,
     event_bridge_handle: Option<tokio::task::JoinHandle<()>>,
     control_reader_handle: Option<tokio::task::JoinHandle<()>>,
     control_writer_handle: Option<tokio::task::JoinHandle<()>>,
@@ -940,7 +944,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
 
-        let (control_writer, command_id) = {
+        let (control_writer, control_handler, command_id) = {
             let state = self.state.lock().unwrap();
             let session = match &*state {
                 SessionState::Active(s) => s,
@@ -952,21 +956,34 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 None => return Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable)),
             };
 
+            let handler = match &session.control_handler {
+                Some(handler) => handler.clone(),
+                None => return Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable)),
+            };
+
             let id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
-            (writer, id)
+            (writer, handler, id)
         };
 
         // Register with the waiter before sending so early events are captured
         self.command_waiter.register(command_id);
 
-        let exec_msg = codeagent_control::HostMessage::Exec {
-            id: command_id,
-            command: args.command.clone(),
-            cwd: args.cwd,
-            env: args.env,
-        };
+        // Register the command with the control channel handler's state machine
+        // (so it expects the StepStarted response from the VM) and get the
+        // serializable HostMessage back. Uses block_in_place because send_exec
+        // is async (may close an ambient step).
+        let host_msg = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                control_handler.send_exec(
+                    command_id,
+                    args.command.clone(),
+                    args.env,
+                    args.cwd,
+                ),
+            )
+        });
 
-        let json_str = control_bridge::serialize_host_message(&exec_msg)
+        let json_str = control_bridge::serialize_host_message(&host_msg)
             .map_err(|error| McpError::InternalError {
                 message: format!("failed to serialize exec message: {error}"),
             })?;
@@ -977,7 +994,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: "control channel closed".to_string(),
             })?;
 
-        // Block until the command completes or times out (120s)
+        // Block until the command completes or times out
         let timeout = std::time::Duration::from_secs(
             args.timeout.unwrap_or(120) as u64,
         );

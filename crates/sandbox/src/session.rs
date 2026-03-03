@@ -9,10 +9,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use codeagent_common::SafeguardDecision;
-use codeagent_control::InFlightTracker;
+use codeagent_control::{ControlChannelHandler, InFlightTracker};
 
 use crate::fs_backend::FilesystemBackend;
 use crate::qemu::QemuProcess;
+use crate::step_adapter::StepManagerAdapter;
 
 /// Lifecycle state of the sandbox session.
 pub enum SessionState {
@@ -58,6 +59,9 @@ pub struct Session {
 
     /// Sender for enqueuing host messages to the control channel writer task.
     pub control_writer: Option<mpsc::UnboundedSender<String>>,
+
+    /// Control channel handler for registering outgoing commands.
+    pub control_handler: Option<Arc<ControlChannelHandler<StepManagerAdapter>>>,
 
     /// Background task for the event bridge (control events → STDIO events).
     pub event_bridge_handle: Option<JoinHandle<()>>,
