@@ -37,8 +37,10 @@ function buildMcpEntry(
 ): McpServerEntry {
   const args: string[] = [];
 
-  if (config.sandbox.working_dir) {
-    args.push("--working-dir", config.sandbox.working_dir);
+  for (const dir of config.sandbox.working_dirs) {
+    if (dir) {
+      args.push("--working-dir", dir);
+    }
   }
   if (config.sandbox.undo_dir) {
     args.push("--undo-dir", config.sandbox.undo_dir);

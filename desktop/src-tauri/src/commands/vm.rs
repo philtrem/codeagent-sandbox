@@ -61,9 +61,11 @@ fn resolve_guest_images(app: &AppHandle, config: &SandboxConfig) -> (String, Str
 fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &str) -> Vec<String> {
     let mut args = Vec::new();
 
-    if !config.sandbox.working_dir.is_empty() {
-        args.push("--working-dir".into());
-        args.push(config.sandbox.working_dir.clone());
+    for dir in &config.sandbox.working_dirs {
+        if !dir.is_empty() {
+            args.push("--working-dir".into());
+            args.push(dir.clone());
+        }
     }
     if !config.sandbox.undo_dir.is_empty() {
         args.push("--undo-dir".into());

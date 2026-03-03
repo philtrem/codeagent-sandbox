@@ -32,6 +32,7 @@ pub fn run() {
             system::get_platform,
             system::resolve_binary,
             system::validate_directory,
+            system::validate_paths_overlap,
             // Undo commands
             undo::read_undo_history,
             // VM MCP passthrough

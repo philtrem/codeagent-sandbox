@@ -12,7 +12,7 @@ export interface SandboxConfig {
 }
 
 export interface SandboxSection {
-  working_dir: string;
+  working_dirs: string[];
   undo_dir: string;
   vm_mode: string;
   protocol: string;
@@ -38,6 +38,7 @@ export interface UndoSection {
 }
 
 export interface SafeguardSection {
+  enabled: boolean;
   delete_threshold: number;
   overwrite_file_size_kb: number;
   rename_over_existing: boolean;
@@ -116,7 +117,7 @@ export interface UndoHistoryData {
 export function defaultConfig(): SandboxConfig {
   return {
     sandbox: {
-      working_dir: "",
+      working_dirs: [""],
       undo_dir: "",
       vm_mode: "ephemeral",
       protocol: "mcp",
@@ -139,6 +140,7 @@ export function defaultConfig(): SandboxConfig {
       max_single_step_size_mb: 50,
     },
     safeguards: {
+      enabled: true,
       delete_threshold: 10,
       overwrite_file_size_kb: 1024,
       rename_over_existing: true,
@@ -146,7 +148,7 @@ export function defaultConfig(): SandboxConfig {
     },
     symlinks: { policy: "ignore" },
     external_modifications: { policy: "barrier" },
-    gitignore: { enabled: false },
+    gitignore: { enabled: true },
     claude_desktop: { enabled: false, server_name: "codeagent-sandbox" },
     claude_code: {
       enabled: false,

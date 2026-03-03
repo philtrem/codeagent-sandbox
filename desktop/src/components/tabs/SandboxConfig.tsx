@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
   Save,
   AlertCircle,
+  Plus,
+  X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -218,6 +220,116 @@ function Select({
   );
 }
 
+function WorkingDirSection({
+  workingDirs,
+  undoDir,
+  vmMode,
+  onWorkingDirsChange,
+  onUndoDirChange,
+  onVmModeChange,
+}: {
+  workingDirs: string[];
+  undoDir: string;
+  vmMode: string;
+  onWorkingDirsChange: (dirs: string[]) => void;
+  onUndoDirChange: (v: string) => void;
+  onVmModeChange: (v: string) => void;
+}) {
+  const [overlapError, setOverlapError] = useState<string | null>(null);
+
+  const checkOverlap = useCallback(
+    async (dirs: string[], undo: string) => {
+      const nonEmpty = dirs.filter((d) => d.length > 0);
+      if (nonEmpty.length === 0 || !undo) {
+        setOverlapError(null);
+        return;
+      }
+      const result = await invoke<string | null>("validate_paths_overlap", {
+        workingDirs: nonEmpty,
+        undoDir: undo,
+      });
+      setOverlapError(result);
+    },
+    []
+  );
+
+  useEffect(() => {
+    checkOverlap(workingDirs, undoDir);
+  }, [workingDirs, undoDir, checkOverlap]);
+
+  const updateDir = (index: number, value: string) => {
+    const updated = [...workingDirs];
+    updated[index] = value;
+    onWorkingDirsChange(updated);
+  };
+
+  const addDir = () => {
+    onWorkingDirsChange([...workingDirs, ""]);
+  };
+
+  const removeDir = (index: number) => {
+    if (workingDirs.length <= 1) return;
+    const updated = workingDirs.filter((_, i) => i !== index);
+    onWorkingDirsChange(updated);
+  };
+
+  return (
+    <Section title="Working Directory">
+      {workingDirs.map((dir, index) => (
+        <div key={index} className="flex items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <DirPicker
+              label={
+                workingDirs.length === 1
+                  ? "Working Directory"
+                  : `Working Directory ${index + 1}`
+              }
+              value={dir}
+              onChange={(v) => updateDir(index, v)}
+            />
+          </div>
+          {workingDirs.length > 1 && (
+            <button
+              onClick={() => removeDir(index)}
+              className="mb-0.5 rounded border border-[var(--color-border)] p-1.5 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-error)]"
+              title="Remove directory"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      ))}
+      <button
+        onClick={addDir}
+        className="flex items-center gap-1 text-xs text-[var(--color-accent)] hover:underline"
+      >
+        <Plus size={12} /> Add working directory
+      </button>
+
+      <DirPicker
+        label="Undo Directory"
+        value={undoDir}
+        onChange={onUndoDirChange}
+      />
+      {overlapError && (
+        <p className="flex items-center gap-1 text-xs text-[var(--color-error)]">
+          <AlertCircle size={12} /> {overlapError}
+        </p>
+      )}
+
+      <Select
+        label="VM Mode"
+        value={vmMode}
+        onChange={onVmModeChange}
+        options={[
+          { value: "ephemeral", label: "Ephemeral" },
+          { value: "persistent", label: "Persistent" },
+        ]}
+      />
+    </Section>
+  );
+}
+
 export default function SandboxConfig() {
   const { config, loaded, saving, error, configPath, load, updateSection } =
     useSandboxConfig();
@@ -259,27 +371,16 @@ export default function SandboxConfig() {
         </div>
       </div>
 
-      <Section title="Working Directory">
-        <DirPicker
-          label="Working Directory"
-          value={config.sandbox.working_dir}
-          onChange={(v) => updateSection("sandbox", { working_dir: v })}
-        />
-        <DirPicker
-          label="Undo Directory"
-          value={config.sandbox.undo_dir}
-          onChange={(v) => updateSection("sandbox", { undo_dir: v })}
-        />
-        <Select
-          label="VM Mode"
-          value={config.sandbox.vm_mode}
-          onChange={(v) => updateSection("sandbox", { vm_mode: v })}
-          options={[
-            { value: "ephemeral", label: "Ephemeral" },
-            { value: "persistent", label: "Persistent" },
-          ]}
-        />
-      </Section>
+      <WorkingDirSection
+        workingDirs={config.sandbox.working_dirs}
+        undoDir={config.sandbox.undo_dir}
+        vmMode={config.sandbox.vm_mode}
+        onWorkingDirsChange={(dirs) =>
+          updateSection("sandbox", { working_dirs: dirs })
+        }
+        onUndoDirChange={(v) => updateSection("sandbox", { undo_dir: v })}
+        onVmModeChange={(v) => updateSection("sandbox", { vm_mode: v })}
+      />
 
       <Section title="Resource Limits">
         <NumberInput
@@ -304,37 +405,48 @@ export default function SandboxConfig() {
       </Section>
 
       <Section title="Safeguards">
-        <NumberInput
-          label="Delete Threshold (0 = disabled)"
-          value={config.safeguards.delete_threshold}
-          onChange={(v) =>
-            updateSection("safeguards", { delete_threshold: v })
-          }
-          suffix="files"
-        />
-        <NumberInput
-          label="Overwrite File Size Threshold (0 = disabled)"
-          value={config.safeguards.overwrite_file_size_kb}
-          onChange={(v) =>
-            updateSection("safeguards", { overwrite_file_size_kb: v })
-          }
-          suffix="KB"
-        />
         <Toggle
-          label="Rename Over Existing"
-          checked={config.safeguards.rename_over_existing}
+          label="Enable Safeguards"
+          checked={config.safeguards.enabled}
           onChange={(v) =>
-            updateSection("safeguards", { rename_over_existing: v })
+            updateSection("safeguards", { enabled: v })
           }
         />
-        <NumberInput
-          label="Safeguard Timeout"
-          value={config.safeguards.timeout_seconds}
-          onChange={(v) =>
-            updateSection("safeguards", { timeout_seconds: v })
-          }
-          suffix="seconds"
-        />
+        {config.safeguards.enabled && (
+          <>
+            <NumberInput
+              label="Delete Threshold (0 = disabled)"
+              value={config.safeguards.delete_threshold}
+              onChange={(v) =>
+                updateSection("safeguards", { delete_threshold: v })
+              }
+              suffix="files"
+            />
+            <NumberInput
+              label="Overwrite File Size Threshold (0 = disabled)"
+              value={config.safeguards.overwrite_file_size_kb}
+              onChange={(v) =>
+                updateSection("safeguards", { overwrite_file_size_kb: v })
+              }
+              suffix="KB"
+            />
+            <Toggle
+              label="Rename Over Existing"
+              checked={config.safeguards.rename_over_existing}
+              onChange={(v) =>
+                updateSection("safeguards", { rename_over_existing: v })
+              }
+            />
+            <NumberInput
+              label="Safeguard Timeout"
+              value={config.safeguards.timeout_seconds}
+              onChange={(v) =>
+                updateSection("safeguards", { timeout_seconds: v })
+              }
+              suffix="seconds"
+            />
+          </>
+        )}
       </Section>
 
       <Section title="Advanced" defaultOpen={false}>

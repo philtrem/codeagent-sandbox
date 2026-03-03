@@ -34,7 +34,7 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxSection {
-    pub working_dir: String,
+    pub working_dirs: Vec<String>,
     pub undo_dir: String,
     pub vm_mode: String,
     pub protocol: String,
@@ -44,7 +44,7 @@ pub struct SandboxSection {
 impl Default for SandboxSection {
     fn default() -> Self {
         Self {
-            working_dir: String::new(),
+            working_dirs: vec![],
             undo_dir: String::new(),
             vm_mode: "ephemeral".into(),
             protocol: "mcp".into(),
@@ -104,6 +104,7 @@ impl Default for UndoSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafeguardSection {
+    pub enabled: bool,
     pub delete_threshold: u32,
     pub overwrite_file_size_kb: u32,
     pub rename_over_existing: bool,
@@ -113,6 +114,7 @@ pub struct SafeguardSection {
 impl Default for SafeguardSection {
     fn default() -> Self {
         Self {
+            enabled: true,
             delete_threshold: 10,
             overwrite_file_size_kb: 1024,
             rename_over_existing: true,
@@ -157,7 +159,7 @@ pub struct GitignoreSection {
 
 impl Default for GitignoreSection {
     fn default() -> Self {
-        Self { enabled: false }
+        Self { enabled: true }
     }
 }
 
