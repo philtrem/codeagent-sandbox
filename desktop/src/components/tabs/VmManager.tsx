@@ -137,11 +137,13 @@ export default function VmManager() {
   const { status, start, stop } = useVmStore();
   const { config, loaded, updateSection } = useSandboxConfig();
   const [platform, setPlatform] = useState<string>("");
+  const [cpuCount, setCpuCount] = useState<number>(16);
 
   useVmPolling();
 
   useEffect(() => {
     invoke<string>("get_platform").then(setPlatform);
+    invoke<number>("get_cpu_count").then(setCpuCount);
   }, []);
 
   const handleStart = () => start(config);
@@ -258,7 +260,7 @@ export default function VmManager() {
           value={config.vm.cpus}
           onChange={(v) => updateSection("vm", { cpus: v })}
           min={1}
-          max={16}
+          max={cpuCount}
           step={1}
         />
         <FilePicker

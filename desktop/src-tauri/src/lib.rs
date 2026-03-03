@@ -30,6 +30,8 @@ pub fn run() {
             claude::generate_claude_code_cli_command,
             // System commands
             system::get_platform,
+            system::get_cpu_count,
+            system::get_default_undo_dir,
             system::resolve_binary,
             system::validate_directory,
             system::validate_paths_overlap,

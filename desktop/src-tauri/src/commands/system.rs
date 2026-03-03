@@ -53,6 +53,25 @@ pub fn validate_paths_overlap(working_dirs: Vec<String>, undo_dir: String) -> Op
     None
 }
 
+/// Return a default undo directory path, creating it if it doesn't exist.
+#[tauri::command]
+pub fn get_default_undo_dir() -> Result<String, String> {
+    let base = dirs::data_local_dir()
+        .ok_or_else(|| "Could not determine local data directory".to_string())?;
+    let undo_dir = base.join("CodeAgent").join("undo");
+    std::fs::create_dir_all(&undo_dir)
+        .map_err(|e| format!("Failed to create undo directory: {e}"))?;
+    Ok(undo_dir.to_string_lossy().into_owned())
+}
+
+/// Return the number of logical CPU cores on the host.
+#[tauri::command]
+pub fn get_cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 /// Resolve a binary name to its full path via the system PATH.
 #[tauri::command]
 pub fn resolve_binary(name: String) -> Result<Option<String>, String> {
