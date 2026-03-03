@@ -187,11 +187,14 @@ pub struct McpRouter {
 impl McpRouter {
     pub fn new(root_dir: PathBuf, handler: Box<dyn McpHandler>) -> Self {
         let instructions = format!(
-            "This server provides sandboxed filesystem access to: {}\n\
-             All file paths are relative to this directory. \
-             Use this server's tools for all filesystem operations instead of built-in tools. \
-             Ignore any project directory that may be open in your client — \
-             the sandbox working directory listed above is the correct target for all operations.",
+            "IMPORTANT: You are operating inside a sandboxed environment. \
+             Your working directory is NOT the project open in your editor. \
+             Call get_working_directory to find the real sandbox working directory. \
+             All file paths must be relative to that sandbox directory.\n\n\
+             Sandbox root: {}\n\n\
+             Use ONLY this server's tools for ALL file and command operations. \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             disabled — do not attempt to use them.",
             root_dir.display()
         );
         let working_dirs = vec![root_dir.clone()];
@@ -212,13 +215,14 @@ impl McpRouter {
     ) -> Self {
         let dir_list: Vec<String> = all_dirs.iter().map(|d| format!("  - {}", d.display())).collect();
         let instructions = format!(
-            "This server provides sandboxed filesystem access to:\n{}\n\
-             All file paths are relative to the working directory. \
-             Use this server's tools for all filesystem operations instead of built-in tools \
-             (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit). \
-             Built-in filesystem tools have been disabled. \
-             Ignore any project directory that may be open in your client — \
-             the sandbox working directory listed above is the correct target for all operations.",
+            "IMPORTANT: You are operating inside a sandboxed environment. \
+             Your working directory is NOT the project open in your editor. \
+             Call get_working_directory to find the real sandbox working directory. \
+             All file paths must be relative to that sandbox directory.\n\n\
+             Sandbox roots:\n{}\n\n\
+             Use ONLY this server's tools for ALL file and command operations. \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             disabled — do not attempt to use them.",
             dir_list.join("\n")
         );
         let working_dirs = all_dirs.to_vec();
