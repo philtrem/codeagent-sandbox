@@ -328,6 +328,74 @@ fn common_qemu_paths(binary_name: &str) -> Vec<PathBuf> {
 pub struct QemuProcess {
     config: QemuConfig,
     child: Child,
+    /// On Windows, a job object that kills QEMU when the sandbox exits.
+    /// Kept alive for the lifetime of QemuProcess; closing it kills the job.
+    #[cfg(target_os = "windows")]
+    _job: Option<OwnedHandle>,
+}
+
+/// Wrapper for a Windows HANDLE that closes it on drop.
+#[cfg(target_os = "windows")]
+struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for OwnedHandle {}
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Assign a child process to a Windows job object with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. This ensures QEMU is killed
+/// if the sandbox process exits (even if killed abruptly).
+#[cfg(target_os = "windows")]
+fn create_kill_on_close_job(child: &Child) -> Option<OwnedHandle> {
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::*;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+
+    unsafe {
+        let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok == 0 {
+            CloseHandle(job);
+            return None;
+        }
+
+        let process_handle = OpenProcess(PROCESS_ALL_ACCESS, 0, child.id());
+        if process_handle.is_null() {
+            CloseHandle(job);
+            return None;
+        }
+
+        let assigned = AssignProcessToJobObject(job, process_handle);
+        CloseHandle(process_handle);
+
+        if assigned == 0 {
+            CloseHandle(job);
+            return None;
+        }
+
+        Some(OwnedHandle(job))
+    }
 }
 
 impl QemuProcess {
@@ -353,7 +421,15 @@ impl QemuProcess {
                 ),
             })?;
 
-        let mut process = Self { config, child };
+        #[cfg(target_os = "windows")]
+        let _job = create_kill_on_close_job(&child);
+
+        let mut process = Self {
+            config,
+            child,
+            #[cfg(target_os = "windows")]
+            _job,
+        };
 
         process.wait_for_ready()?;
 
