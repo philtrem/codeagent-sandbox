@@ -222,7 +222,7 @@ impl QemuConfig {
         }
     }
 
-    /// Resolve the QEMU binary path from the override or PATH.
+    /// Resolve the QEMU binary path from the override, PATH, or common install locations.
     fn resolve_qemu_binary(&self) -> Result<PathBuf, AgentError> {
         if let Some(path) = &self.qemu_binary {
             return Ok(path.clone());
@@ -230,7 +230,19 @@ impl QemuConfig {
 
         let default_name = default_qemu_binary_name();
 
-        which::which(default_name).map_err(|_| AgentError::QemuUnavailable)
+        // Try PATH first
+        if let Ok(path) = which::which(default_name) {
+            return Ok(path);
+        }
+
+        // Check common installation paths
+        for candidate in common_qemu_paths(default_name) {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+
+        Err(AgentError::QemuUnavailable)
     }
 }
 
@@ -244,6 +256,34 @@ fn default_qemu_binary_name() -> &'static str {
     {
         "qemu-system-x86_64"
     }
+}
+
+/// Returns common QEMU installation paths to check when PATH lookup fails.
+fn common_qemu_paths(binary_name: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        paths.push(PathBuf::from(format!("C:\\Program Files\\qemu\\{binary_name}.exe")));
+        paths.push(PathBuf::from(format!("C:\\Program Files (x86)\\qemu\\{binary_name}.exe")));
+        if let Ok(scoop) = std::env::var("SCOOP") {
+            paths.push(PathBuf::from(format!("{scoop}\\shims\\{binary_name}.exe")));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(PathBuf::from(format!("/opt/homebrew/bin/{binary_name}")));
+        paths.push(PathBuf::from(format!("/usr/local/bin/{binary_name}")));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        paths.push(PathBuf::from(format!("/usr/bin/{binary_name}")));
+        paths.push(PathBuf::from(format!("/usr/local/bin/{binary_name}")));
+    }
+
+    paths
 }
 
 /// Handle to a running QEMU process.

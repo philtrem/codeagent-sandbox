@@ -31,26 +31,62 @@ impl Default for VmState {
     }
 }
 
-/// Resolve guest image paths: prefer user config, fall back to bundled resources.
+/// Check that a guest image file exists and is non-empty (0-byte files are invalid).
+fn is_valid_guest_image(path: &std::path::Path) -> bool {
+    path.exists() && std::fs::metadata(path).map_or(false, |m| m.len() > 0)
+}
+
+/// Resolve guest image paths: prefer user config, fall back to bundled resources,
+/// then development paths.
 fn resolve_guest_images(app: &AppHandle, config: &SandboxConfig) -> (String, String) {
     let mut kernel = config.vm.kernel_path.clone();
     let mut initrd = config.vm.initrd_path.clone();
 
-    if kernel.is_empty() || initrd.is_empty() {
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            let guest_dir = resource_dir.join("guest");
-            if kernel.is_empty() {
-                let bundled = guest_dir.join("vmlinuz");
-                if bundled.exists() {
-                    kernel = bundled.to_string_lossy().into_owned();
-                }
+    // Skip user-configured paths if the files don't actually exist or are empty
+    if !kernel.is_empty() && !is_valid_guest_image(std::path::Path::new(&kernel)) {
+        kernel.clear();
+    }
+    if !initrd.is_empty() && !is_valid_guest_image(std::path::Path::new(&initrd)) {
+        initrd.clear();
+    }
+
+    // Collect candidate directories to search for guest images
+    let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. Bundled resources (production installs)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidate_dirs.push(resource_dir.join("guest"));
+    }
+
+    // 2. Development fallbacks relative to the executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            // Installed app: guest/ next to the executable
+            candidate_dirs.push(exe_dir.join("guest"));
+
+            // Dev mode: exe is in target/debug/, guest images in target/guest/x86_64/
+            if let Some(target_dir) = exe_dir.parent() {
+                let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+                candidate_dirs.push(target_dir.join("guest").join(arch));
             }
-            if initrd.is_empty() {
-                let bundled = guest_dir.join("initrd.img");
-                if bundled.exists() {
-                    initrd = bundled.to_string_lossy().into_owned();
-                }
+        }
+    }
+
+    for dir in &candidate_dirs {
+        if kernel.is_empty() {
+            let bundled = dir.join("vmlinuz");
+            if is_valid_guest_image(&bundled) {
+                kernel = bundled.to_string_lossy().into_owned();
             }
+        }
+        if initrd.is_empty() {
+            let bundled = dir.join("initrd.img");
+            if is_valid_guest_image(&bundled) {
+                initrd = bundled.to_string_lossy().into_owned();
+            }
+        }
+        if !kernel.is_empty() && !initrd.is_empty() {
+            break;
         }
     }
 
