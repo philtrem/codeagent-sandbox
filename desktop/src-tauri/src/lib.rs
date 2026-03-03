@@ -45,7 +45,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                claude::cleanup_all_tool_restrictions();
+                claude::unregister_mcp_server();
             }
         });
 }

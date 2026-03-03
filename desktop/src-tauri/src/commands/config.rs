@@ -2,6 +2,20 @@ use crate::config::SandboxConfig;
 use crate::paths;
 use std::fs;
 
+/// Read the config, returning defaults on any failure. For internal use.
+pub fn read_config_internal() -> SandboxConfig {
+    let Some(path) = paths::config_file_path() else {
+        return SandboxConfig::default();
+    };
+    if !path.exists() {
+        return SandboxConfig::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| toml::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
 /// Read the sandbox configuration from `codeagent.toml`.
 /// Returns defaults if the file does not exist.
 #[tauri::command]

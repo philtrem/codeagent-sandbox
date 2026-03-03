@@ -196,11 +196,75 @@ pub fn remove_claude_code_denied_tools(tools: Vec<String>) -> Result<(), String>
     write_json_file(&path, &value)
 }
 
-// --- Cleanup helper (non-command, called from stop_vm and exit handler) ---
+// --- Denied tools list ---
 
-/// Remove all tool restrictions from both Claude Desktop and Claude Code configs.
-pub fn cleanup_all_tool_restrictions() {
-    // Claude Desktop: remove disallowedTools
+const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit"];
+
+// --- Lifecycle helpers (called from start_vm, stop_vm, and exit handler) ---
+
+/// Build the MCP server entry args from config (mirrors the frontend's buildMcpEntry).
+fn build_mcp_args(config: &crate::config::SandboxConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    for dir in &config.sandbox.working_dirs {
+        if !dir.is_empty() {
+            args.push("--working-dir".into());
+            args.push(dir.clone());
+        }
+    }
+    if !config.sandbox.undo_dir.is_empty() {
+        args.push("--undo-dir".into());
+        args.push(config.sandbox.undo_dir.clone());
+    }
+    args.push("--protocol".into());
+    args.push("mcp".into());
+    args.push("--memory-mb".into());
+    args.push(config.vm.memory_mb.to_string());
+    args.push("--cpus".into());
+    args.push(config.vm.cpus.to_string());
+    args
+}
+
+/// Register the MCP server in Claude Code config and set denied tools.
+/// Called from `start_vm` when Claude Code integration is enabled.
+pub fn register_mcp_server(config: &crate::config::SandboxConfig, binary_path: &str) {
+    if !config.claude_code.enabled {
+        return;
+    }
+
+    let entry = McpServerEntry {
+        server_name: config.claude_code.server_name.clone(),
+        command: binary_path.into(),
+        args: build_mcp_args(config),
+    };
+
+    if let Ok(path) = resolve_claude_code_path(&config.claude_code.scope) {
+        let mut value = read_json_file(&path);
+        merge_mcp_entry(&mut value, &entry);
+        let _ = write_json_file(&path, &value);
+    }
+
+    if config.claude_code.disable_builtin_tools {
+        let tools: Vec<String> = DENIED_TOOLS.iter().map(|s| (*s).into()).collect();
+        let _ = set_claude_code_denied_tools(tools);
+    }
+}
+
+/// Unregister the MCP server from Claude Code config and restore built-in tools.
+/// Called from `stop_vm` and the app exit handler.
+pub fn unregister_mcp_server() {
+    // Read our config to get server_name and scope
+    let config = super::config::read_config_internal();
+
+    // Remove MCP server entry from Claude Code config
+    if let Ok(path) = resolve_claude_code_path(&config.claude_code.scope) {
+        if path.exists() {
+            let mut value = read_json_file(&path);
+            remove_mcp_entry(&mut value, &config.claude_code.server_name);
+            let _ = write_json_file(&path, &value);
+        }
+    }
+
+    // Claude Desktop: remove disallowedTools (legacy cleanup)
     if let Some(path) = claude_desktop_config_path() {
         if path.exists() {
             let mut value = read_json_file(&path);
@@ -213,9 +277,6 @@ pub fn cleanup_all_tool_restrictions() {
     }
 
     // Claude Code: remove our deny entries from settings.json
-    let tools_to_remove = vec![
-        "Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit",
-    ];
     if let Some(path) = claude_code_settings_path() {
         if path.exists() {
             let mut value = read_json_file(&path);
@@ -226,7 +287,7 @@ pub fn cleanup_all_tool_restrictions() {
                 let before_len = arr.len();
                 arr.retain(|v| {
                     v.as_str()
-                        .map(|s| !tools_to_remove.contains(&s))
+                        .map(|s| !DENIED_TOOLS.contains(&s))
                         .unwrap_or(true)
                 });
                 if arr.len() != before_len {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Copy,
@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { useToastStore } from "../../hooks/useToastStore";
+import { useVmStore } from "../../hooks/useVmStatus";
 import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
 
 function CopyButton({ text }: { text: string }) {
@@ -72,9 +73,12 @@ function generatePreviewJson(entry: McpServerEntry): string {
 export default function ClaudeIntegration() {
   const { config, updateSection } = useSandboxConfig();
   const addToast = useToastStore((s) => s.addToast);
+  const vmStatus = useVmStore((s) => s.status);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
   const [cliCommand, setCliCommand] = useState("");
+
+  const isVmRunning = vmStatus.state === "running";
 
   const detect = useCallback(async () => {
     try {
@@ -110,34 +114,19 @@ export default function ClaudeIntegration() {
 
   const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit"];
 
-  // Auto-sync config file when settings change and registration is enabled
-  const prevPreviewRef = useRef(preview);
-  useEffect(() => {
-    if (!config.claude_code.enabled) return;
-    if (sandboxBinary === "sandbox") return;
-    if (prevPreviewRef.current === preview) return;
-    prevPreviewRef.current = preview;
-    invoke("write_claude_code_config", {
-      entry,
-      scope: config.claude_code.scope,
-    }).catch(() => {});
-  }, [preview, config.claude_code.enabled, sandboxBinary, entry, config.claude_code.scope]);
-
-  // Sync tool restrictions when the toggle changes
-  const prevDisableRef = useRef(config.claude_code.disable_builtin_tools);
-  useEffect(() => {
-    if (!config.claude_code.enabled) return;
-    if (prevDisableRef.current === config.claude_code.disable_builtin_tools) return;
-    prevDisableRef.current = config.claude_code.disable_builtin_tools;
-    if (config.claude_code.disable_builtin_tools) {
-      invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS }).catch(() => {});
-    } else {
-      invoke("remove_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS }).catch(() => {});
-    }
-  }, [config.claude_code.disable_builtin_tools, config.claude_code.enabled]);
-
+  // MCP registration is handled by the backend on VM start/stop.
+  // The toggle saves the preference; immediate effect only if the VM is running.
   const handleToggle = async (enabled: boolean) => {
     updateSection("claude_code", { enabled });
+    if (!isVmRunning) {
+      addToast(
+        "info",
+        enabled
+          ? "MCP server will be registered when the sandbox starts."
+          : "MCP server preference disabled.",
+      );
+      return;
+    }
     try {
       if (enabled) {
         await invoke("write_claude_code_config", {
@@ -147,14 +136,15 @@ export default function ClaudeIntegration() {
         if (config.claude_code.disable_builtin_tools) {
           await invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
         }
+        addToast("warning", "Restart Claude Code for changes to take effect.");
       } else {
         await invoke("remove_claude_code_config", {
           serverName: config.claude_code.server_name,
           scope: config.claude_code.scope,
         });
         await invoke("remove_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
+        addToast("warning", "Restart Claude Code for changes to take effect.");
       }
-      addToast("warning", "Restart Claude Code for changes to take effect.");
       detect();
     } catch (e) {
       addToast("error", `Failed to update Claude Code config: ${e}`);
@@ -206,7 +196,7 @@ export default function ClaudeIntegration() {
                 }`}
               />
             </button>
-            Register as MCP server
+            Enable MCP server
           </label>
           <button
             onClick={detect}
@@ -216,6 +206,10 @@ export default function ClaudeIntegration() {
             <RefreshCw size={14} />
           </button>
         </div>
+        <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
+          The MCP server is automatically registered when the sandbox starts
+          and removed when it stops.
+        </p>
 
         <div className="space-y-3">
           <div>

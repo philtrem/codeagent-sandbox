@@ -220,6 +220,9 @@ pub fn start_vm(
         *guard = child_stdout;
     }
 
+    // Register MCP server in Claude Code config if integration is enabled
+    super::claude::register_mcp_server(&config, &binary);
+
     Ok(VmStatus {
         state: "running".into(),
         pid: Some(pid),
@@ -243,8 +246,8 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
         guard.take()
     };
 
-    // Restore Claude's built-in tools
-    super::claude::cleanup_all_tool_restrictions();
+    // Unregister MCP server and restore Claude's built-in tools
+    super::claude::unregister_mcp_server();
 
     match child {
         Some(mut child) => {
