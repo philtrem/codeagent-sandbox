@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Child;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 /// VM status reported to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -31,8 +31,34 @@ impl Default for VmState {
     }
 }
 
+/// Resolve guest image paths: prefer user config, fall back to bundled resources.
+fn resolve_guest_images(app: &AppHandle, config: &SandboxConfig) -> (String, String) {
+    let mut kernel = config.vm.kernel_path.clone();
+    let mut initrd = config.vm.initrd_path.clone();
+
+    if kernel.is_empty() || initrd.is_empty() {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let guest_dir = resource_dir.join("guest");
+            if kernel.is_empty() {
+                let bundled = guest_dir.join("vmlinuz");
+                if bundled.exists() {
+                    kernel = bundled.to_string_lossy().into_owned();
+                }
+            }
+            if initrd.is_empty() {
+                let bundled = guest_dir.join("initrd.img");
+                if bundled.exists() {
+                    initrd = bundled.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    (kernel, initrd)
+}
+
 /// Build CLI args from config for the sandbox binary.
-fn build_sandbox_args(config: &SandboxConfig) -> Vec<String> {
+fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &str) -> Vec<String> {
     let mut args = Vec::new();
 
     if !config.sandbox.working_dir.is_empty() {
@@ -63,13 +89,13 @@ fn build_sandbox_args(config: &SandboxConfig) -> Vec<String> {
         args.push("--qemu-binary".into());
         args.push(config.vm.qemu_binary.clone());
     }
-    if !config.vm.kernel_path.is_empty() {
+    if !kernel_path.is_empty() {
         args.push("--kernel-path".into());
-        args.push(config.vm.kernel_path.clone());
+        args.push(kernel_path.to_string());
     }
-    if !config.vm.initrd_path.is_empty() {
+    if !initrd_path.is_empty() {
         args.push("--initrd-path".into());
-        args.push(config.vm.initrd_path.clone());
+        args.push(initrd_path.to_string());
     }
     if !config.vm.rootfs_path.is_empty() {
         args.push("--rootfs-path".into());
@@ -123,6 +149,7 @@ fn find_sandbox_binary() -> Result<String, String> {
 /// Start the sandbox VM as a child process.
 #[tauri::command]
 pub fn start_vm(
+    app: AppHandle,
     config: SandboxConfig,
     state: State<'_, VmState>,
 ) -> Result<VmStatus, String> {
@@ -133,7 +160,8 @@ pub fn start_vm(
     }
 
     let binary = find_sandbox_binary()?;
-    let args = build_sandbox_args(&config);
+    let (kernel_path, initrd_path) = resolve_guest_images(&app, &config);
+    let args = build_sandbox_args(&config, &kernel_path, &initrd_path);
 
     let mut child = std::process::Command::new(&binary)
         .args(&args)
