@@ -111,6 +111,42 @@ fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &s
     args
 }
 
+/// Kill any orphaned sandbox.exe from a previous session using the PID file.
+pub fn kill_orphaned_sandbox() {
+    let Some(pid_path) = paths::pid_file_path() else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&pid_path) else {
+        return;
+    };
+    let Ok(pid) = contents.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&pid_path);
+        return;
+    };
+
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+}
+
 /// Resolve the sandbox binary path.
 ///
 /// Search order: Tauri sidecar (triple-suffixed) next to executable,

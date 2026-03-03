@@ -3,6 +3,7 @@ mod config;
 mod paths;
 
 use commands::{claude, config as config_cmd, system, undo, vm};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +11,9 @@ pub fn run() {
     // shut down cleanly (e.g., the app or sandbox was killed). At startup no
     // sandbox is running yet, so the config should not be registered.
     claude::unregister_mcp_server();
+
+    // Kill any orphaned sandbox.exe left over from a previous crash
+    vm::kill_orphaned_sandbox();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -48,8 +52,20 @@ pub fn run() {
         .manage(vm::VmState::default())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Kill the sandbox child process before exiting
+                if let Some(vm_state) = app.try_state::<vm::VmState>() {
+                    if let Ok(mut guard) = vm_state.process.lock() {
+                        if let Some(mut child) = guard.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+                if let Some(pid_path) = paths::pid_file_path() {
+                    let _ = std::fs::remove_file(&pid_path);
+                }
                 claude::unregister_mcp_server();
             }
         });
