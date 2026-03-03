@@ -23,9 +23,14 @@ Both backends call into the same `WriteInterceptor` trait. The undo log, safegua
 
 Windows uses 9P because the vhost-user transport requires `SCM_RIGHTS`, which Windows AF_UNIX sockets do not support. Linux and macOS use virtiofs for better performance on metadata-heavy workloads.
 
-## Building
+## Prerequisites
 
-Requires Rust 1.85+ (edition 2024).
+- [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024)
+- [QEMU](https://www.qemu.org/download/) (runtime — needed to run the VM)
+- [Docker](https://docs.docker.com/get-docker/) (build-time only — needed to build the guest VM image)
+- [Node.js](https://nodejs.org/) (only if building the desktop app)
+
+## Building
 
 ```sh
 cargo build --workspace
@@ -33,7 +38,7 @@ cargo build --workspace
 
 ### Guest VM image
 
-Requires Docker with BuildKit. Produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary).
+Requires Docker with BuildKit. Produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary). You can skip this if you already have pre-built kernel and initrd files.
 
 ```sh
 cargo xtask build-guest                    # host architecture
