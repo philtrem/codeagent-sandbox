@@ -2,27 +2,6 @@
 
 A sandboxed execution environment for AI coding agents. Commands run inside a Linux VM (QEMU), with host-side filesystem interception that captures preimages of every write. This gives you N-step undo for any destructive operation — including bulk operations like `rm -rf *`, which count as a single step.
 
-## How it works
-
-The host runs a Rust binary (`sandbox`) that serves the host working directory into a Linux VM through a transparent filesystem bridge. Two separate channels connect host and VM:
-
-- **Filesystem channel** — carries POSIX filesystem operations. The VM kernel mounts a host-backed filesystem (`virtiofs` on Linux/macOS, `9P` on Windows). A write interceptor on the host side captures preimages before mutations land on disk.
-- **Control channel** — carries command orchestration over virtio-serial (JSON Lines). A lightweight shim inside the VM receives commands, runs them via `sh -c`, streams output, and signals step boundaries.
-
-External interfaces speak either the **STDIO API** (JSON Lines over stdin/stdout) or the **MCP protocol** (JSON-RPC 2.0 over a local socket), both of which expose the same capabilities: session lifecycle, command execution, filesystem access, undo, and safeguards.
-
-### Platform-specific filesystem backends
-
-| Host | VM arch | Accelerator | Filesystem backend | Guest mount |
-|---|---|---|---|---|
-| Linux x86_64 | x86_64 | KVM | Forked virtiofsd (Rust, vhost-user) | `mount -t virtiofs` |
-| macOS Apple Silicon | aarch64 | HVF | Forked virtiofsd (ported to macOS) | `mount -t virtiofs` |
-| Windows x86_64 | x86_64 | WHPX | Custom 9P2000.L server (Rust) | `mount -t 9p` |
-
-Both backends call into the same `WriteInterceptor` trait. The undo log, safeguards, step tracking, and API behavior are identical across platforms.
-
-Windows uses 9P because the vhost-user transport requires `SCM_RIGHTS`, which Windows AF_UNIX sockets do not support. Linux and macOS use virtiofs for better performance on metadata-heavy workloads.
-
 ## Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024)
@@ -30,35 +9,19 @@ Windows uses 9P because the vhost-user transport requires `SCM_RIGHTS`, which Wi
 - [Docker](https://docs.docker.com/get-docker/) (build-time only — needed to build the guest VM image)
 - [Node.js](https://nodejs.org/) (only if building the desktop app)
 
-## Building
+## CLI usage
+
+Build the workspace, then build the guest VM image (requires Docker):
 
 ```sh
 cargo build --workspace
-```
-
-### Guest VM image
-
-Requires Docker with BuildKit. Produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary). You can skip this if you already have pre-built kernel and initrd files.
-
-```sh
 cargo xtask build-guest                    # host architecture
 cargo xtask build-guest --arch aarch64     # cross-build for aarch64
 ```
 
-### Desktop app
+The guest image build produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary). You can skip it if you already have pre-built kernel and initrd files.
 
-The optional Tauri v2 desktop app lives in `desktop/` (not a workspace member). The installer bundles the `sandbox` binary and guest VM images.
-
-```sh
-cd desktop && npm install
-npm run build-sidecar   # build sandbox + guest images, copy to src-tauri/
-npm run tauri dev       # development
-npm run tauri build     # production installer (includes sandbox + guest images)
-```
-
-`build-sidecar` builds the sandbox binary in release mode and copies it to `src-tauri/binaries/` with the target triple suffix. It also builds the guest VM images for the host architecture (x86_64 or aarch64) and copies them to `src-tauri/resources/guest/`. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `tauri dev` or `tauri build`.
-
-## Usage
+Run the sandbox:
 
 ```sh
 sandbox --working-dir /path/to/project --undo-dir /tmp/undo
@@ -71,6 +34,19 @@ sandbox --working-dir /path/to/project --undo-dir /tmp/undo --protocol mcp
 ```
 
 Additional options: `--memory-mb` (default 2048), `--cpus` (default 2), `--qemu-binary`, `--kernel-path`, `--initrd-path`, `--virtiofsd-binary`. See `sandbox --help`.
+
+## Desktop app
+
+The optional Tauri v2 desktop app lives in `desktop/`. The installer bundles the sandbox binary and guest VM images so no separate build steps are needed.
+
+```sh
+cd desktop && npm install
+npm run build-sidecar   # build sandbox + guest images, copy to src-tauri/
+npm run tauri dev       # development
+npm run tauri build     # production installer
+```
+
+`build-sidecar` builds the sandbox binary in release mode, builds the guest VM images for the host architecture (x86_64 or aarch64), and copies everything into the Tauri bundle directories. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `tauri dev` or `tauri build`.
 
 ## Testing
 
@@ -96,6 +72,27 @@ Benchmarks (criterion):
 ```sh
 cargo bench --workspace
 ```
+
+## How it works
+
+The host runs a Rust binary (`sandbox`) that serves the host working directory into a Linux VM through a transparent filesystem bridge. Two separate channels connect host and VM:
+
+- **Filesystem channel** — carries POSIX filesystem operations. The VM kernel mounts a host-backed filesystem (`virtiofs` on Linux/macOS, `9P` on Windows). A write interceptor on the host side captures preimages before mutations land on disk.
+- **Control channel** — carries command orchestration over virtio-serial (JSON Lines). A lightweight shim inside the VM receives commands, runs them via `sh -c`, streams output, and signals step boundaries.
+
+External interfaces speak either the **STDIO API** (JSON Lines over stdin/stdout) or the **MCP protocol** (JSON-RPC 2.0 over a local socket), both of which expose the same capabilities: session lifecycle, command execution, filesystem access, undo, and safeguards.
+
+### Platform-specific filesystem backends
+
+| Host | VM arch | Accelerator | Filesystem backend | Guest mount |
+|---|---|---|---|---|
+| Linux x86_64 | x86_64 | KVM | Forked virtiofsd (Rust, vhost-user) | `mount -t virtiofs` |
+| macOS Apple Silicon | aarch64 | HVF | Forked virtiofsd (ported to macOS) | `mount -t virtiofs` |
+| Windows x86_64 | x86_64 | WHPX | Custom 9P2000.L server (Rust) | `mount -t 9p` |
+
+Both backends call into the same `WriteInterceptor` trait. The undo log, safeguards, step tracking, and API behavior are identical across platforms.
+
+Windows uses 9P because the vhost-user transport requires `SCM_RIGHTS`, which Windows AF_UNIX sockets do not support. Linux and macOS use virtiofs for better performance on metadata-heavy workloads.
 
 ## Project structure
 
