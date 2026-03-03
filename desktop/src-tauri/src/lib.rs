@@ -6,6 +6,11 @@ use commands::{claude, config as config_cmd, system, undo, vm};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Clean up any stale MCP registration from a previous session that wasn't
+    // shut down cleanly (e.g., the app or sandbox was killed). At startup no
+    // sandbox is running yet, so the config should not be registered.
+    claude::unregister_mcp_server();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())

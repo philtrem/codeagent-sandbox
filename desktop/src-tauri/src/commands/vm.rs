@@ -300,6 +300,9 @@ pub fn get_vm_status(state: State<'_, VmState>) -> Result<VmStatus, String> {
                     let _ = std::fs::remove_file(&pid_path);
                 }
 
+                // Process exited unexpectedly — clean up MCP registration
+                super::claude::unregister_mcp_server();
+
                 Ok(VmStatus {
                     state: "stopped".into(),
                     pid: None,
