@@ -23,9 +23,14 @@ Both backends call into the same `WriteInterceptor` trait. The undo log, safegua
 
 Windows uses 9P because the vhost-user transport requires `SCM_RIGHTS`, which Windows AF_UNIX sockets do not support. Linux and macOS use virtiofs for better performance on metadata-heavy workloads.
 
-## Building
+## Prerequisites
 
-Requires Rust 1.85+ (edition 2024).
+- [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024)
+- [QEMU](https://www.qemu.org/download/) (runtime — needed to run the VM)
+- [Docker](https://docs.docker.com/get-docker/) (build-time only — needed to build the guest VM image)
+- [Node.js](https://nodejs.org/) (only if building the desktop app)
+
+## Building
 
 ```sh
 cargo build --workspace
@@ -33,7 +38,7 @@ cargo build --workspace
 
 ### Guest VM image
 
-Requires Docker with BuildKit. Produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary).
+Requires Docker with BuildKit. Produces `vmlinuz` + `initrd.img` (Alpine linux-virt kernel, busybox, statically-linked shim binary). You can skip this if you already have pre-built kernel and initrd files.
 
 ```sh
 cargo xtask build-guest                    # host architecture
@@ -42,16 +47,16 @@ cargo xtask build-guest --arch aarch64     # cross-build for aarch64
 
 ### Desktop app
 
-The optional Tauri v2 desktop app lives in `desktop/` (not a workspace member). The installer bundles the `sandbox` binary as a sidecar.
+The optional Tauri v2 desktop app lives in `desktop/` (not a workspace member). The installer bundles the `sandbox` binary and guest VM images.
 
 ```sh
 cd desktop && npm install
-npm run build-sidecar   # build sandbox binary + copy to src-tauri/binaries/
+npm run build-sidecar   # build sandbox + guest images, copy to src-tauri/
 npm run tauri dev       # development
-npm run tauri build     # production installer (includes sandbox)
+npm run tauri build     # production installer (includes sandbox + guest images)
 ```
 
-`build-sidecar` builds the sandbox binary in release mode and copies it to `src-tauri/binaries/` with the target triple suffix that Tauri expects. Run it before `tauri dev` or `tauri build`.
+`build-sidecar` builds the sandbox binary in release mode and copies it to `src-tauri/binaries/` with the target triple suffix. It also builds the guest VM images for the host architecture (x86_64 or aarch64) and copies them to `src-tauri/resources/guest/`. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `tauri dev` or `tauri build`.
 
 ## Usage
 
