@@ -162,6 +162,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        ToolDefinition {
+            name: "get_working_directory".to_string(),
+            description: "Get the sandbox working directory. This is the root directory for all file operations — NOT the project directory open in your editor.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -170,6 +178,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 /// tools/list, tools/call).
 pub struct McpRouter {
     root_dir: PathBuf,
+    working_dirs: Vec<PathBuf>,
     handler: Box<dyn McpHandler>,
     initialized: AtomicBool,
     instructions: String,
@@ -185,8 +194,10 @@ impl McpRouter {
              the sandbox working directory listed above is the correct target for all operations.",
             root_dir.display()
         );
+        let working_dirs = vec![root_dir.clone()];
         Self {
             root_dir,
+            working_dirs,
             handler,
             initialized: AtomicBool::new(false),
             instructions,
@@ -204,14 +215,16 @@ impl McpRouter {
             "This server provides sandboxed filesystem access to:\n{}\n\
              All file paths are relative to the working directory. \
              Use this server's tools for all filesystem operations instead of built-in tools \
-             (Read, Edit, Write, Glob, Grep, Bash). \
+             (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit). \
              Built-in filesystem tools have been disabled. \
              Ignore any project directory that may be open in your client — \
              the sandbox working directory listed above is the correct target for all operations.",
             dir_list.join("\n")
         );
+        let working_dirs = all_dirs.to_vec();
         Self {
             root_dir,
+            working_dirs,
             handler,
             initialized: AtomicBool::new(false),
             instructions,
@@ -339,6 +352,18 @@ impl McpRouter {
             }
             "get_session_status" => {
                 let value = self.handler.get_session_status()?;
+                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
+            }
+            "get_working_directory" => {
+                let dirs: Vec<serde_json::Value> = self
+                    .working_dirs
+                    .iter()
+                    .map(|d| serde_json::json!(d.display().to_string()))
+                    .collect();
+                let value = serde_json::json!({
+                    "working_directory": self.root_dir.display().to_string(),
+                    "all_working_directories": dirs,
+                });
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             unknown => Err(McpError::MethodNotFound {

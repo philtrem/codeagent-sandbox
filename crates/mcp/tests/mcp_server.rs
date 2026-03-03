@@ -280,7 +280,7 @@ async fn mc01_tools_list_returns_seven_tools() {
 
     let resp = harness.send_request(2, "tools/list", json!({})).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"execute_command"));
@@ -289,6 +289,7 @@ async fn mc01_tools_list_returns_seven_tools() {
     assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"undo"));
     assert!(names.contains(&"get_undo_history"));
+    assert!(names.contains(&"get_working_directory"));
     assert!(names.contains(&"get_session_status"));
 }
 

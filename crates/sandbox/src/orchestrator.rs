@@ -722,7 +722,10 @@ impl RequestHandler for Orchestrator {
             })
             .collect();
 
-        Ok(json!({ "entries": entries }))
+        Ok(json!({
+            "working_directory": target.display().to_string(),
+            "entries": entries,
+        }))
     }
 
     fn fs_read(&self, payload: FsReadPayload) -> Result<serde_json::Value, StdioError> {
@@ -923,7 +926,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             })
             .collect();
 
-        Ok(json!({ "entries": entries }))
+        Ok(json!({
+            "working_directory": target.display().to_string(),
+            "entries": entries,
+        }))
     }
 
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError> {
