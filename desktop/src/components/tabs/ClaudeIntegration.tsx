@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Copy,
@@ -102,6 +102,16 @@ function ClaudeDesktopPanel({
     sandboxBinary,
   );
   const preview = generatePreviewJson(entry);
+
+  // Auto-sync config file when settings change and registration is enabled
+  const prevPreviewRef = useRef(preview);
+  useEffect(() => {
+    if (!config.claude_desktop.enabled) return;
+    if (sandboxBinary === "sandbox") return;
+    if (prevPreviewRef.current === preview) return;
+    prevPreviewRef.current = preview;
+    invoke("write_claude_desktop_config", { entry }).catch(() => {});
+  }, [preview, config.claude_desktop.enabled, sandboxBinary, entry]);
 
   const handleToggle = async (enabled: boolean) => {
     updateSection("claude_desktop", { enabled });
@@ -244,6 +254,19 @@ function ClaudeCodePanel({
       setCliCommand,
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
+
+  // Auto-sync config file when settings change and registration is enabled
+  const prevPreviewRef = useRef(preview);
+  useEffect(() => {
+    if (!config.claude_code.enabled) return;
+    if (sandboxBinary === "sandbox") return;
+    if (prevPreviewRef.current === preview) return;
+    prevPreviewRef.current = preview;
+    invoke("write_claude_code_config", {
+      entry,
+      scope: config.claude_code.scope,
+    }).catch(() => {});
+  }, [preview, config.claude_code.enabled, sandboxBinary, entry, config.claude_code.scope]);
 
   const handleToggle = async (enabled: boolean) => {
     updateSection("claude_code", { enabled });
