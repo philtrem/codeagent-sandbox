@@ -11,6 +11,9 @@ pub enum AgentError {
     #[error("invalid working directory: {path}")]
     InvalidWorkingDir { path: String },
 
+    #[error("undo directory overlaps with working directory: undo={undo_dir}, working={working_dir}")]
+    UndoDirectoryOverlap { working_dir: String, undo_dir: String },
+
     #[error("VM not available: QEMU and guest image are not yet built")]
     QemuUnavailable,
 

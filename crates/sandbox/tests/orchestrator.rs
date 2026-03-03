@@ -12,7 +12,7 @@ use codeagent_stdio::{Event, RequestHandler};
 
 fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliArgs {
     CliArgs {
-        working_dir: working_dir.to_path_buf(),
+        working_dirs: vec![working_dir.to_path_buf()],
         undo_dir: undo_dir.to_path_buf(),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
@@ -640,4 +640,70 @@ fn ao_15_fs_status_reports_backend_info() {
 
     // vm_pid should not be present in non-VM mode
     assert!(result.get("vm_pid").is_none());
+}
+
+// -----------------------------------------------------------------------
+// AO-16: session.start rejects undo dir inside working dir
+// -----------------------------------------------------------------------
+#[test]
+fn ao_16_undo_inside_working_dir_rejected() {
+    let working = TempDir::new().unwrap();
+    let undo = working.path().join("undo");
+    std::fs::create_dir_all(&undo).unwrap();
+
+    let (event_sender, _rx) = mpsc::unbounded_channel();
+    let args = CliArgs {
+        working_dirs: vec![working.path().to_path_buf()],
+        undo_dir: undo.clone(),
+        vm_mode: "ephemeral".to_string(),
+        protocol: "stdio".to_string(),
+        log_level: "info".to_string(),
+        qemu_binary: None,
+        kernel_path: None,
+        initrd_path: None,
+        rootfs_path: None,
+        memory_mb: 2048,
+        cpus: 2,
+        virtiofsd_binary: None,
+    };
+    let orchestrator = Orchestrator::new(args, event_sender);
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let result = orchestrator.session_start(payload);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("overlaps"), "expected overlap error, got: {err}");
+}
+
+// -----------------------------------------------------------------------
+// AO-17: session.start rejects working dir inside undo dir
+// -----------------------------------------------------------------------
+#[test]
+fn ao_17_working_inside_undo_dir_rejected() {
+    let undo = TempDir::new().unwrap();
+    let working = undo.path().join("project");
+    std::fs::create_dir_all(&working).unwrap();
+
+    let (event_sender, _rx) = mpsc::unbounded_channel();
+    let args = CliArgs {
+        working_dirs: vec![working.clone()],
+        undo_dir: undo.path().to_path_buf(),
+        vm_mode: "ephemeral".to_string(),
+        protocol: "stdio".to_string(),
+        log_level: "info".to_string(),
+        qemu_binary: None,
+        kernel_path: None,
+        initrd_path: None,
+        rootfs_path: None,
+        memory_mb: 2048,
+        cpus: 2,
+        virtiofsd_binary: None,
+    };
+    let orchestrator = Orchestrator::new(args, event_sender);
+
+    let payload = make_start_payload(&working.display().to_string());
+    let result = orchestrator.session_start(payload);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("overlaps"), "expected overlap error, got: {err}");
 }

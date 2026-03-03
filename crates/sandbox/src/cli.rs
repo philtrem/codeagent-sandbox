@@ -5,9 +5,9 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sandbox", about = "Sandboxed coding agent host")]
 pub struct CliArgs {
-    /// Host directory shared with the guest VM as the primary working directory.
-    #[arg(long)]
-    pub working_dir: PathBuf,
+    /// Host directories shared with the guest VM. At least one is required.
+    #[arg(long = "working-dir", required = true, num_args = 1..)]
+    pub working_dirs: Vec<PathBuf>,
 
     /// Directory for storing undo logs and preimages.
     #[arg(long)]
@@ -68,11 +68,29 @@ mod tests {
             "/tmp/undo",
         ])
         .unwrap();
-        assert_eq!(args.working_dir, PathBuf::from("/tmp/work"));
+        assert_eq!(args.working_dirs, vec![PathBuf::from("/tmp/work")]);
         assert_eq!(args.undo_dir, PathBuf::from("/tmp/undo"));
         assert_eq!(args.vm_mode, "ephemeral");
         assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
+    }
+
+    #[test]
+    fn multiple_working_dirs_parse() {
+        let args = CliArgs::try_parse_from([
+            "sandbox",
+            "--working-dir",
+            "/tmp/work1",
+            "--working-dir",
+            "/tmp/work2",
+            "--undo-dir",
+            "/tmp/undo",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.working_dirs,
+            vec![PathBuf::from("/tmp/work1"), PathBuf::from("/tmp/work2")]
+        );
     }
 
     #[test]

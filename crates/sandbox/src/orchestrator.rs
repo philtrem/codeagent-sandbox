@@ -24,6 +24,28 @@ use crate::qemu::{QemuConfig, QemuProcess};
 use crate::safeguard_bridge::PendingSafeguard;
 use crate::session::{Session, SessionState};
 
+/// Check that two paths do not contain each other.
+/// Both paths must exist (so canonicalization works).
+fn check_paths_overlap(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> Result<(), AgentError> {
+    let canonical_working = match std::fs::canonicalize(working_dir) {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // non-existent paths can't overlap
+    };
+    let canonical_undo = match std::fs::canonicalize(undo_dir) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+
+    if canonical_undo.starts_with(&canonical_working) || canonical_working.starts_with(&canonical_undo) {
+        return Err(AgentError::UndoDirectoryOverlap {
+            working_dir: working_dir.display().to_string(),
+            undo_dir: undo_dir.display().to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 /// Central orchestrator that implements both `RequestHandler` (STDIO API)
 /// and `McpHandler` (MCP server) by delegating to shared session state.
 pub struct Orchestrator {
@@ -64,7 +86,7 @@ impl Orchestrator {
         }
 
         let working_dirs: Vec<PathBuf> = if payload.working_directories.is_empty() {
-            vec![self.cli_args.working_dir.clone()]
+            self.cli_args.working_dirs.clone()
         } else {
             payload
                 .working_directories
@@ -80,6 +102,11 @@ impl Orchestrator {
                     path: dir.display().to_string(),
                 });
             }
+        }
+
+        // Validate undo directory does not overlap with any working directory
+        for dir in &working_dirs {
+            check_paths_overlap(dir, &self.cli_args.undo_dir)?;
         }
 
         let mut interceptors = Vec::with_capacity(working_dirs.len());
