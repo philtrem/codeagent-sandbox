@@ -7,7 +7,6 @@ export interface SandboxConfig {
   symlinks: SymlinkSection;
   external_modifications: ExternalModificationsSection;
   gitignore: GitignoreSection;
-  claude_desktop: ClaudeDesktopSection;
   claude_code: ClaudeCodeSection;
 }
 
@@ -55,12 +54,6 @@ export interface ExternalModificationsSection {
 
 export interface GitignoreSection {
   enabled: boolean;
-}
-
-export interface ClaudeDesktopSection {
-  enabled: boolean;
-  server_name: string;
-  disable_builtin_tools: boolean;
 }
 
 export interface ClaudeCodeSection {
@@ -151,7 +144,6 @@ export function defaultConfig(): SandboxConfig {
     symlinks: { policy: "ignore" },
     external_modifications: { policy: "barrier" },
     gitignore: { enabled: true },
-    claude_desktop: { enabled: false, server_name: "codeagent-sandbox", disable_builtin_tools: true },
     claude_code: {
       enabled: false,
       server_name: "codeagent-sandbox",

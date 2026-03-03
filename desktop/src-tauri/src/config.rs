@@ -11,7 +11,6 @@ pub struct SandboxConfig {
     pub symlinks: SymlinkSection,
     pub external_modifications: ExternalModificationsSection,
     pub gitignore: GitignoreSection,
-    pub claude_desktop: ClaudeDesktopSection,
     pub claude_code: ClaudeCodeSection,
 }
 
@@ -25,7 +24,6 @@ impl Default for SandboxConfig {
             symlinks: SymlinkSection::default(),
             external_modifications: ExternalModificationsSection::default(),
             gitignore: GitignoreSection::default(),
-            claude_desktop: ClaudeDesktopSection::default(),
             claude_code: ClaudeCodeSection::default(),
         }
     }
@@ -160,24 +158,6 @@ pub struct GitignoreSection {
 impl Default for GitignoreSection {
     fn default() -> Self {
         Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ClaudeDesktopSection {
-    pub enabled: bool,
-    pub server_name: String,
-    pub disable_builtin_tools: bool,
-}
-
-impl Default for ClaudeDesktopSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            server_name: "codeagent-sandbox".into(),
-            disable_builtin_tools: true,
-        }
     }
 }
 

@@ -21,15 +21,10 @@ pub fn run() {
             vm::stop_vm,
             vm::get_vm_status,
             // Claude commands
-            claude::detect_claude_desktop_config,
-            claude::write_claude_desktop_config,
-            claude::remove_claude_desktop_config,
             claude::detect_claude_code_config,
             claude::write_claude_code_config,
             claude::remove_claude_code_config,
             claude::generate_claude_code_cli_command,
-            claude::set_claude_desktop_disallowed_tools,
-            claude::remove_claude_desktop_disallowed_tools,
             claude::set_claude_code_denied_tools,
             claude::remove_claude_code_denied_tools,
             // System commands

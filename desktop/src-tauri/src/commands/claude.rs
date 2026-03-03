@@ -97,48 +97,6 @@ fn write_json_file(path: &std::path::Path, value: &serde_json::Value) -> Result<
     Ok(())
 }
 
-// --- Claude Desktop commands ---
-
-#[tauri::command]
-pub fn detect_claude_desktop_config() -> Result<ClaudeConfigInfo, String> {
-    let path = claude_desktop_config_path()
-        .ok_or("Could not determine Claude Desktop config path")?;
-    let exists = path.exists();
-    let mcp_servers = if exists {
-        let value = read_json_file(&path);
-        list_mcp_servers(&value)
-    } else {
-        Vec::new()
-    };
-
-    Ok(ClaudeConfigInfo {
-        path: path.to_string_lossy().into_owned(),
-        exists,
-        mcp_servers,
-    })
-}
-
-#[tauri::command]
-pub fn write_claude_desktop_config(entry: McpServerEntry) -> Result<(), String> {
-    let path = claude_desktop_config_path()
-        .ok_or("Could not determine Claude Desktop config path")?;
-    let mut value = read_json_file(&path);
-    merge_mcp_entry(&mut value, &entry);
-    write_json_file(&path, &value)
-}
-
-#[tauri::command]
-pub fn remove_claude_desktop_config(server_name: String) -> Result<(), String> {
-    let path = claude_desktop_config_path()
-        .ok_or("Could not determine Claude Desktop config path")?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut value = read_json_file(&path);
-    remove_mcp_entry(&mut value, &server_name);
-    write_json_file(&path, &value)
-}
-
 // --- Claude Code commands ---
 
 fn resolve_claude_code_path(scope: &str) -> Result<PathBuf, String> {
@@ -184,34 +142,6 @@ pub fn remove_claude_code_config(server_name: String, scope: String) -> Result<(
     }
     let mut value = read_json_file(&path);
     remove_mcp_entry(&mut value, &server_name);
-    write_json_file(&path, &value)
-}
-
-// --- Claude Desktop: disallowed tools ---
-
-#[tauri::command]
-pub fn set_claude_desktop_disallowed_tools(tools: Vec<String>) -> Result<(), String> {
-    let path = claude_desktop_config_path()
-        .ok_or("Could not determine Claude Desktop config path")?;
-    let mut value = read_json_file(&path);
-    value
-        .as_object_mut()
-        .unwrap()
-        .insert("disallowedTools".into(), serde_json::json!(tools));
-    write_json_file(&path, &value)
-}
-
-#[tauri::command]
-pub fn remove_claude_desktop_disallowed_tools() -> Result<(), String> {
-    let path = claude_desktop_config_path()
-        .ok_or("Could not determine Claude Desktop config path")?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut value = read_json_file(&path);
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("disallowedTools");
-    }
     write_json_file(&path, &value)
 }
 
@@ -284,7 +214,7 @@ pub fn cleanup_all_tool_restrictions() {
 
     // Claude Code: remove our deny entries from settings.json
     let tools_to_remove = vec![
-        "Read", "Edit", "Write", "Glob", "Grep", "Bash",
+        "Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit",
     ];
     if let Some(path) = claude_code_settings_path() {
         if path.exists() {
