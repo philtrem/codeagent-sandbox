@@ -174,15 +174,33 @@ impl QemuConfig {
     }
 
     /// Control channel: virtio-serial device connected via a chardev socket.
+    ///
+    /// On Unix: QEMU creates a Unix domain socket (server mode).
+    /// On Windows: QEMU connects to a host-side TCP listener (client mode).
+    /// The TCP address is read from the file at `control_socket_path`.
     fn add_control_channel_args(&self, args: &mut Vec<OsString>) {
-        args.extend([
-            "-chardev".into(),
-            format!(
-                "socket,id=ctrl,path={},server=on,wait=off",
-                self.control_socket_path.display()
-            )
-            .into(),
-        ]);
+        #[cfg(not(target_os = "windows"))]
+        {
+            args.extend([
+                "-chardev".into(),
+                format!(
+                    "socket,id=ctrl,path={},server=on,wait=off",
+                    self.control_socket_path.display()
+                )
+                .into(),
+            ]);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let addr = std::fs::read_to_string(&self.control_socket_path)
+                .unwrap_or_default();
+            args.extend([
+                "-chardev".into(),
+                format!("socket,id=ctrl,host={},server=off", addr.trim()).into(),
+            ]);
+        }
+
         args.extend(["-device".into(), "virtio-serial-pci".into()]);
         args.extend([
             "-device".into(),
@@ -450,10 +468,15 @@ mod tests {
         let (_binary, args) = config.build_args().unwrap();
         let args = args_to_strings(&args);
 
-        let has_ctrl_chardev = args.iter().any(|a| {
-            a.contains("socket,id=ctrl") && a.contains("/tmp/control.sock")
-        });
+        let has_ctrl_chardev = args.iter().any(|a| a.contains("socket,id=ctrl"));
         assert!(has_ctrl_chardev, "missing control chardev: {args:?}");
+
+        // Unix uses path= (QEMU is server), Windows uses host= (QEMU is client)
+        #[cfg(unix)]
+        {
+            let has_path = args.iter().any(|a| a.contains("/tmp/control.sock"));
+            assert!(has_path, "missing control socket path: {args:?}");
+        }
 
         assert!(args.contains(&"virtio-serial-pci".to_string()));
         assert!(args.contains(&"virtconsole,chardev=ctrl,name=control".to_string()));

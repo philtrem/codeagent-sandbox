@@ -231,8 +231,7 @@ impl Orchestrator {
         }
     }
 
-    /// Launch VM components: virtiofsd backends, QEMU, control channel.
-    #[allow(unused_variables, unused_mut)]
+    /// Launch VM components: filesystem backends, QEMU, control channel.
     fn launch_vm(
         &self,
         working_dirs: &[PathBuf],
@@ -285,7 +284,24 @@ impl Orchestrator {
             }
         }
 
-        // 2. Build QEMU config and spawn
+        // 2. On Windows, bind a TCP listener for the control channel before
+        //    QEMU starts. QEMU will connect to this address as a client.
+        //    The address file must exist before build_args() reads it.
+        #[cfg(target_os = "windows")]
+        let control_listener = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to bind control channel listener: {error}"),
+                })?;
+            let addr = listener.local_addr()
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to get control listener address: {error}"),
+                })?;
+            std::fs::write(&control_socket_path, addr.to_string())?;
+            listener
+        };
+
+        // 3. Build QEMU config and spawn
         let config = QemuConfig {
             qemu_binary: self.cli_args.qemu_binary.clone(),
             kernel_path: self.cli_args.kernel_path.clone().unwrap(),
@@ -302,76 +318,119 @@ impl Orchestrator {
 
         let qemu_process = QemuProcess::spawn(config)?;
 
-        // 3. Connect to control socket and set up channel handler
-        #[cfg(not(unix))]
-        {
-            // On Windows, control channel will use named pipes (Phase 3).
-            Err(AgentError::ControlChannelFailed {
-                reason: "control channel not yet supported on Windows".to_string(),
-            })
-        }
+        // 4. Connect to control channel (platform-specific transport)
+        //
+        // Unix: connect to the Unix domain socket that QEMU created (server mode).
+        // Windows: accept the TCP connection from QEMU (client mode).
+        // Both produce a (reader, writer) pair implementing AsyncRead/AsyncWrite.
 
         #[cfg(unix)]
-        {
-            let (reader, writer) = {
-                let std_stream = std::os::unix::net::UnixStream::connect(&control_socket_path)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to connect to control socket: {error}"),
-                    })?;
-                std_stream
-                    .set_nonblocking(true)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to set socket non-blocking: {error}"),
-                    })?;
-                let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to convert socket: {error}"),
-                    })?;
-                tokio_stream.into_split()
+        let (reader, writer) = {
+            let std_stream = std::os::unix::net::UnixStream::connect(&control_socket_path)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to connect to control socket: {error}"),
+                })?;
+            std_stream
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set socket non-blocking: {error}"),
+                })?;
+            let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to convert socket: {error}"),
+                })?;
+            tokio_stream.into_split()
+        };
+
+        #[cfg(target_os = "windows")]
+        let (reader, writer) = {
+            // Accept one connection from QEMU with a polling timeout.
+            // QEMU connects to our TCP listener as a client (server=off).
+            control_listener
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set listener non-blocking: {error}"),
+                })?;
+
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(30);
+            let poll_interval = std::time::Duration::from_millis(100);
+
+            let stream = loop {
+                match control_listener.accept() {
+                    Ok((stream, _addr)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if start.elapsed() > timeout {
+                            return Err(AgentError::ControlChannelFailed {
+                                reason: "QEMU did not connect to the control channel within 30s"
+                                    .to_string(),
+                            });
+                        }
+                        std::thread::sleep(poll_interval);
+                    }
+                    Err(error) => {
+                        return Err(AgentError::ControlChannelFailed {
+                            reason: format!(
+                                "failed to accept control channel connection: {error}"
+                            ),
+                        });
+                    }
+                }
             };
 
-            // 4. Create control channel handler
-            use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
-            use crate::event_bridge::run_event_bridge;
-            use crate::step_adapter::StepManagerAdapter;
+            stream
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set stream non-blocking: {error}"),
+                })?;
+            let tokio_stream = tokio::net::TcpStream::from_std(stream)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to convert TCP stream: {error}"),
+                })?;
+            tokio_stream.into_split()
+        };
 
-            let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
-            let quiescence_config = QuiescenceConfig::default();
+        // 5. Create control channel handler
+        use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
+        use crate::event_bridge::run_event_bridge;
+        use crate::step_adapter::StepManagerAdapter;
 
-            let (handler, handler_events) = ControlChannelHandler::new(
-                step_manager,
-                in_flight_tracker.clone(),
-                quiescence_config,
-            );
-            let handler = Arc::new(handler);
+        let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
+        let quiescence_config = QuiescenceConfig::default();
 
-            // 5. Spawn event bridge (control events → STDIO events)
-            let event_bridge_handle = tokio::spawn(run_event_bridge(
-                handler_events,
-                self.event_sender.clone(),
-            ));
+        let (handler, handler_events) = ControlChannelHandler::new(
+            step_manager,
+            in_flight_tracker.clone(),
+            quiescence_config,
+        );
+        let handler = Arc::new(handler);
 
-            // 6. Spawn control channel writer and reader tasks
-            let (control_writer_sender, control_writer_handle) =
-                control_bridge::spawn_control_writer(writer);
+        // 6. Spawn event bridge (control events → STDIO events)
+        let event_bridge_handle = tokio::spawn(run_event_bridge(
+            handler_events,
+            self.event_sender.clone(),
+        ));
 
-            let control_reader_handle = control_bridge::spawn_control_reader(
-                reader,
-                handler,
-                self.event_sender.clone(),
-            );
+        // 7. Spawn control channel writer and reader tasks
+        let (control_writer_sender, control_writer_handle) =
+            control_bridge::spawn_control_writer(writer);
 
-            Ok(VmSessionParts {
-                qemu_process: Some(qemu_process),
-                fs_backends,
-                in_flight_tracker: Some(in_flight_tracker),
-                control_writer: Some(control_writer_sender),
-                event_bridge_handle: Some(event_bridge_handle),
-                control_reader_handle: Some(control_reader_handle),
-                control_writer_handle: Some(control_writer_handle),
-                socket_dir: Some(socket_dir),
-            })
-        }
+        let control_reader_handle = control_bridge::spawn_control_reader(
+            reader,
+            handler,
+            self.event_sender.clone(),
+        );
+
+        Ok(VmSessionParts {
+            qemu_process: Some(qemu_process),
+            fs_backends,
+            in_flight_tracker: Some(in_flight_tracker),
+            control_writer: Some(control_writer_sender),
+            event_bridge_handle: Some(event_bridge_handle),
+            control_reader_handle: Some(control_reader_handle),
+            control_writer_handle: Some(control_writer_handle),
+            socket_dir: Some(socket_dir),
+        })
     }
 
     fn do_session_stop(&self) -> Result<serde_json::Value, AgentError> {
