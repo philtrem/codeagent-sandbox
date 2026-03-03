@@ -9,6 +9,16 @@
 
 set -euo pipefail
 
+# Ensure cargo is in PATH (Git Bash on Windows doesn't source .cargo/env)
+if ! command -v cargo &>/dev/null; then
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        source "$HOME/.cargo/env"
+    else
+        echo "error: cargo not found. Install Rust from https://rustup.rs/" >&2
+        exit 1
+    fi
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BINARIES_DIR="$REPO_ROOT/desktop/src-tauri/binaries"
 RESOURCES_DIR="$REPO_ROOT/desktop/src-tauri/resources/guest"

@@ -8,8 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build-sidecar": "bash ../desktop/scripts/copy-sidecar.sh",
-    "build-sidecar:debug": "bash ../desktop/scripts/copy-sidecar.sh --debug"
+    "build-sidecar": "bash scripts/copy-sidecar.sh",
+    "build-sidecar:debug": "bash scripts/copy-sidecar.sh --debug"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
