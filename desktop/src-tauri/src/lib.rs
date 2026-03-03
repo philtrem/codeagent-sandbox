@@ -28,6 +28,10 @@ pub fn run() {
             claude::write_claude_code_config,
             claude::remove_claude_code_config,
             claude::generate_claude_code_cli_command,
+            claude::set_claude_desktop_disallowed_tools,
+            claude::remove_claude_desktop_disallowed_tools,
+            claude::set_claude_code_denied_tools,
+            claude::remove_claude_code_denied_tools,
             // System commands
             system::get_platform,
             system::get_cpu_count,
@@ -42,6 +46,11 @@ pub fn run() {
             vm::send_mcp_request,
         ])
         .manage(vm::VmState::default())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                claude::cleanup_all_tool_restrictions();
+            }
+        });
 }

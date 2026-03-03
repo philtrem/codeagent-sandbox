@@ -168,6 +168,7 @@ impl Default for GitignoreSection {
 pub struct ClaudeDesktopSection {
     pub enabled: bool,
     pub server_name: String,
+    pub disable_builtin_tools: bool,
 }
 
 impl Default for ClaudeDesktopSection {
@@ -175,6 +176,7 @@ impl Default for ClaudeDesktopSection {
         Self {
             enabled: false,
             server_name: "codeagent-sandbox".into(),
+            disable_builtin_tools: true,
         }
     }
 }
@@ -185,6 +187,7 @@ pub struct ClaudeCodeSection {
     pub enabled: bool,
     pub server_name: String,
     pub scope: String,
+    pub disable_builtin_tools: bool,
 }
 
 impl Default for ClaudeCodeSection {
@@ -193,6 +196,7 @@ impl Default for ClaudeCodeSection {
             enabled: false,
             server_name: "codeagent-sandbox".into(),
             scope: "user".into(),
+            disable_builtin_tools: true,
         }
     }
 }

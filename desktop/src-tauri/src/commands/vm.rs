@@ -243,6 +243,9 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
         guard.take()
     };
 
+    // Restore Claude's built-in tools
+    super::claude::cleanup_all_tool_restrictions();
+
     match child {
         Some(mut child) => {
             let _ = child.kill();

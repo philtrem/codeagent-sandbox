@@ -60,12 +60,14 @@ export interface GitignoreSection {
 export interface ClaudeDesktopSection {
   enabled: boolean;
   server_name: string;
+  disable_builtin_tools: boolean;
 }
 
 export interface ClaudeCodeSection {
   enabled: boolean;
   server_name: string;
   scope: string;
+  disable_builtin_tools: boolean;
 }
 
 export interface VmStatus {
@@ -149,11 +151,12 @@ export function defaultConfig(): SandboxConfig {
     symlinks: { policy: "ignore" },
     external_modifications: { policy: "barrier" },
     gitignore: { enabled: true },
-    claude_desktop: { enabled: false, server_name: "codeagent-sandbox" },
+    claude_desktop: { enabled: false, server_name: "codeagent-sandbox", disable_builtin_tools: true },
     claude_code: {
       enabled: false,
       server_name: "codeagent-sandbox",
       scope: "user",
+      disable_builtin_tools: true,
     },
   };
 }

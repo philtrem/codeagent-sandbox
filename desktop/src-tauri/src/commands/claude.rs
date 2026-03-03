@@ -187,6 +187,126 @@ pub fn remove_claude_code_config(server_name: String, scope: String) -> Result<(
     write_json_file(&path, &value)
 }
 
+// --- Claude Desktop: disallowed tools ---
+
+#[tauri::command]
+pub fn set_claude_desktop_disallowed_tools(tools: Vec<String>) -> Result<(), String> {
+    let path = claude_desktop_config_path()
+        .ok_or("Could not determine Claude Desktop config path")?;
+    let mut value = read_json_file(&path);
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("disallowedTools".into(), serde_json::json!(tools));
+    write_json_file(&path, &value)
+}
+
+#[tauri::command]
+pub fn remove_claude_desktop_disallowed_tools() -> Result<(), String> {
+    let path = claude_desktop_config_path()
+        .ok_or("Could not determine Claude Desktop config path")?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut value = read_json_file(&path);
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("disallowedTools");
+    }
+    write_json_file(&path, &value)
+}
+
+// --- Claude Code: denied tools (settings.json) ---
+
+fn claude_code_settings_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
+}
+
+#[tauri::command]
+pub fn set_claude_code_denied_tools(tools: Vec<String>) -> Result<(), String> {
+    let path = claude_code_settings_path()
+        .ok_or("Could not determine Claude Code settings path")?;
+    let mut value = read_json_file(&path);
+    let obj = value.as_object_mut().unwrap();
+    let permissions = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    let deny = permissions
+        .as_object_mut()
+        .ok_or("permissions is not an object")?
+        .entry("deny")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(arr) = deny.as_array_mut() {
+        for tool in &tools {
+            if !arr.iter().any(|v| v.as_str() == Some(tool)) {
+                arr.push(serde_json::Value::String(tool.clone()));
+            }
+        }
+    }
+    write_json_file(&path, &value)
+}
+
+#[tauri::command]
+pub fn remove_claude_code_denied_tools(tools: Vec<String>) -> Result<(), String> {
+    let path = claude_code_settings_path()
+        .ok_or("Could not determine Claude Code settings path")?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut value = read_json_file(&path);
+    if let Some(arr) = value
+        .pointer_mut("/permissions/deny")
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !tools.iter().any(|t| t == s))
+                .unwrap_or(true)
+        });
+    }
+    write_json_file(&path, &value)
+}
+
+// --- Cleanup helper (non-command, called from stop_vm and exit handler) ---
+
+/// Remove all tool restrictions from both Claude Desktop and Claude Code configs.
+pub fn cleanup_all_tool_restrictions() {
+    // Claude Desktop: remove disallowedTools
+    if let Some(path) = claude_desktop_config_path() {
+        if path.exists() {
+            let mut value = read_json_file(&path);
+            if let Some(obj) = value.as_object_mut() {
+                if obj.remove("disallowedTools").is_some() {
+                    let _ = write_json_file(&path, &value);
+                }
+            }
+        }
+    }
+
+    // Claude Code: remove our deny entries from settings.json
+    let tools_to_remove = vec![
+        "Read", "Edit", "Write", "Glob", "Grep", "Bash",
+    ];
+    if let Some(path) = claude_code_settings_path() {
+        if path.exists() {
+            let mut value = read_json_file(&path);
+            if let Some(arr) = value
+                .pointer_mut("/permissions/deny")
+                .and_then(|v| v.as_array_mut())
+            {
+                let before_len = arr.len();
+                arr.retain(|v| {
+                    v.as_str()
+                        .map(|s| !tools_to_remove.contains(&s))
+                        .unwrap_or(true)
+                });
+                if arr.len() != before_len {
+                    let _ = write_json_file(&path, &value);
+                }
+            }
+        }
+    }
+}
+
 /// Generate a `claude mcp add` CLI command string.
 #[tauri::command]
 pub fn generate_claude_code_cli_command(entry: McpServerEntry) -> String {
