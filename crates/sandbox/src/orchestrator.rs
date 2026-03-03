@@ -884,12 +884,46 @@ use codeagent_mcp::protocol::{
 impl codeagent_mcp::McpHandler for Orchestrator {
     fn execute_command(
         &self,
-        _args: ExecuteCommandArgs,
+        args: ExecuteCommandArgs,
     ) -> Result<serde_json::Value, McpError> {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
 
-        Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable))
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Active(s) => s,
+            _ => return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
+        };
+
+        let control_writer = match &session.control_writer {
+            Some(writer) => writer.clone(),
+            None => return Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable)),
+        };
+
+        let command_id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
+
+        let exec_msg = codeagent_control::HostMessage::Exec {
+            id: command_id,
+            command: args.command.clone(),
+            cwd: args.cwd,
+            env: args.env,
+        };
+
+        let json_str = control_bridge::serialize_host_message(&exec_msg)
+            .map_err(|error| McpError::InternalError {
+                message: format!("failed to serialize exec message: {error}"),
+            })?;
+
+        control_writer
+            .send(json_str)
+            .map_err(|_| McpError::InternalError {
+                message: "control channel closed".to_string(),
+            })?;
+
+        Ok(json!({
+            "command_id": command_id,
+            "status": "started",
+        }))
     }
 
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError> {
