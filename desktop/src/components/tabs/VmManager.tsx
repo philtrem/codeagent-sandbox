@@ -6,6 +6,7 @@ import {
   FolderOpen,
   ChevronDown,
   ChevronRight,
+  Info,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVmStore, useVmPolling } from "../../hooks/useVmStatus";
@@ -134,7 +135,7 @@ function FilePicker({
 }
 
 export default function VmManager() {
-  const { status, start, stop } = useVmStore();
+  const { status, sandboxMode, start, stop } = useVmStore();
   const { config, loaded, updateSection } = useSandboxConfig();
   const [platform, setPlatform] = useState<string>("");
   const [cpuCount, setCpuCount] = useState<number>(16);
@@ -186,13 +187,36 @@ export default function VmManager() {
 
           {isRunning && (
             <div className="text-xs text-[var(--color-text-secondary)]">
-              {config.vm.memory_mb} MB &middot; {config.vm.cpus} CPU
-              {config.vm.cpus !== 1 ? "s" : ""} &middot;{" "}
-              {platform === "windows" ? "9P" : "virtiofs"}
+              {sandboxMode === "vm" ? (
+                <>
+                  {config.vm.memory_mb} MB &middot; {config.vm.cpus} CPU
+                  {config.vm.cpus !== 1 ? "s" : ""} &middot;{" "}
+                  {platform === "windows" ? "9P" : "virtiofs"}
+                </>
+              ) : sandboxMode === "host_only" ? (
+                "Host-only mode"
+              ) : (
+                "Connecting\u2026"
+              )}
             </div>
           )}
         </div>
       </div>
+
+      {/* Host-only mode info banner */}
+      {isRunning && sandboxMode === "host_only" && (
+        <div className="flex gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-[var(--color-text-secondary)]">
+          <Info size={14} className="mt-0.5 shrink-0 text-blue-400" />
+          <div>
+            <span className="font-medium text-[var(--color-text)]">
+              Host-only mode
+            </span>{" "}
+            — Filesystem tools (read, write, edit, undo, etc.) are available.
+            Command execution requires a VM. Configure a QEMU binary and guest
+            images above to enable full VM mode.
+          </div>
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex gap-2">
