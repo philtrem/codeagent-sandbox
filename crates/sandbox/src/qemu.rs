@@ -106,13 +106,11 @@ impl QemuConfig {
 
         #[cfg(target_os = "windows")]
         {
-            args.extend(["-machine".into(), "q35".into()]);
-            args.extend([
-                "-cpu".into(),
-                "host".into(),
-                "-accel".into(),
-                "whpx".into(),
-            ]);
+            // Use whpx:tcg — QEMU tries WHPX (hardware) first, falls back to
+            // TCG (software emulation) if WHPX fails (known VP exit code bugs
+            // on some Windows 11 / CPU combinations).
+            args.extend(["-machine".into(), "q35,accel=whpx:tcg".into()]);
+            args.extend(["-cpu".into(), "max".into()]);
         }
     }
 
@@ -163,11 +161,11 @@ impl QemuConfig {
                     "-chardev".into(),
                     format!("socket,id={chardev_id},host={addr},server=off").into(),
                 ]);
-                // The virtconsole device exposes the chardev as a virtio-serial
+                // The virtserialport device exposes the chardev as a virtio-serial
                 // port named "p9fs{index}" in the guest.
                 args.extend([
                     "-device".into(),
-                    format!("virtconsole,chardev={chardev_id},name=p9fs{index}").into(),
+                    format!("virtserialport,chardev={chardev_id},name=p9fs{index}").into(),
                 ]);
             }
         }
@@ -204,7 +202,7 @@ impl QemuConfig {
         args.extend(["-device".into(), "virtio-serial-pci".into()]);
         args.extend([
             "-device".into(),
-            "virtconsole,chardev=ctrl,name=control".into(),
+            "virtserialport,chardev=ctrl,name=control".into(),
         ]);
     }
 
@@ -444,7 +442,7 @@ mod tests {
         assert!(args.contains(&"virt".to_string()));
 
         #[cfg(target_os = "windows")]
-        assert!(args.contains(&"q35".to_string()));
+        assert!(args.iter().any(|a| a.starts_with("q35")));
     }
 
     /// QC-02: build_args includes kernel and initrd paths.
@@ -479,7 +477,7 @@ mod tests {
         }
 
         assert!(args.contains(&"virtio-serial-pci".to_string()));
-        assert!(args.contains(&"virtconsole,chardev=ctrl,name=control".to_string()));
+        assert!(args.contains(&"virtserialport,chardev=ctrl,name=control".to_string()));
     }
 
     /// QC-04: build_args includes one filesystem device per working dir.
