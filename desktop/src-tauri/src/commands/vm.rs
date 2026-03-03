@@ -177,11 +177,21 @@ pub fn start_vm(
     let (kernel_path, initrd_path) = resolve_guest_images(&app, &config);
     let args = build_sandbox_args(&config, &kernel_path, &initrd_path);
 
-    let mut child = std::process::Command::new(&binary)
+    let mut command = std::process::Command::new(&binary);
+    command
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start sandbox: {e}"))?;
 
