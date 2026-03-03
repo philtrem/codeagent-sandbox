@@ -422,7 +422,7 @@ FodyWeavers.xsd
 /fuzz/target/
 /xtask/target/
 
-# Tauri sidecar binaries and bundled resources (built by scripts/copy-sidecar.sh)
+# Tauri sidecar binaries and bundled resources (built by scripts/copy-sidecar.cjs)
 /desktop/src-tauri/binaries/
 /desktop/src-tauri/resources/guest/
 
