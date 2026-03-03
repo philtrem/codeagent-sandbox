@@ -33,6 +33,7 @@ pub fn run() {
             system::get_cpu_count,
             system::get_default_undo_dir,
             system::resolve_binary,
+            system::resolve_sandbox_binary,
             system::validate_directory,
             system::validate_paths_overlap,
             // Undo commands

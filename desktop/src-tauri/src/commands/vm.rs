@@ -114,8 +114,10 @@ fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &s
 /// Resolve the sandbox binary path.
 ///
 /// Search order: Tauri sidecar (triple-suffixed) next to executable,
-/// plain name next to executable, then PATH.
-fn find_sandbox_binary() -> Result<String, String> {
+/// plain name next to executable, workspace target directory, then PATH.
+pub(super) fn find_sandbox_binary() -> Result<String, String> {
+    let sandbox_name = if cfg!(windows) { "sandbox.exe" } else { "sandbox" };
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // Tauri sidecar binary (target triple suffix added by bundler)
@@ -130,13 +132,23 @@ fn find_sandbox_binary() -> Result<String, String> {
             }
 
             // Plain name (dev mode or manual placement)
-            let candidate = dir.join(if cfg!(windows) {
-                "sandbox.exe"
-            } else {
-                "sandbox"
-            });
+            let candidate = dir.join(sandbox_name);
             if candidate.exists() {
                 return Ok(candidate.to_string_lossy().into_owned());
+            }
+        }
+
+        // Development fallback: workspace target directory
+        // In dev, the Tauri exe is in target/debug/desktop.exe
+        // The sandbox binary is in target/release/sandbox.exe or target/debug/sandbox.exe
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
+                for profile in &["release", "debug"] {
+                    let candidate = target_dir.join(profile).join(sandbox_name);
+                    if candidate.exists() {
+                        return Ok(candidate.to_string_lossy().into_owned());
+                    }
+                }
             }
         }
     }
@@ -145,7 +157,7 @@ fn find_sandbox_binary() -> Result<String, String> {
         return Ok(path.to_string_lossy().into_owned());
     }
 
-    Err("Could not find the sandbox binary. Build it with `cargo build -p codeagent-sandbox` or place it on PATH.".into())
+    Err("Could not find the sandbox binary. Build it with 'cargo build -p codeagent-sandbox' or place it on PATH.".into())
 }
 
 /// Start the sandbox VM as a child process.

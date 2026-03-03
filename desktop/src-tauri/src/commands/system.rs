@@ -72,6 +72,14 @@ pub fn get_cpu_count() -> usize {
         .unwrap_or(4)
 }
 
+/// Resolve the sandbox binary path for use in MCP config entries.
+///
+/// Delegates to the same resolution logic used by the VM launcher.
+#[tauri::command]
+pub fn resolve_sandbox_binary() -> Result<String, String> {
+    super::vm::find_sandbox_binary()
+}
+
 /// Resolve a binary name to its full path via the system PATH.
 #[tauri::command]
 pub fn resolve_binary(name: String) -> Result<Option<String>, String> {

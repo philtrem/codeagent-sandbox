@@ -91,11 +91,9 @@ function ClaudeDesktopPanel({
 
   useEffect(() => {
     detect();
-    invoke<string | null>("resolve_binary", { name: "sandbox" }).then(
-      (path) => {
-        if (path) setSandboxBinary(path);
-      },
-    );
+    invoke<string>("resolve_sandbox_binary")
+      .then(setSandboxBinary)
+      .catch(() => {});
   }, [detect]);
 
   const entry = buildMcpEntry(
@@ -229,11 +227,9 @@ function ClaudeCodePanel({
 
   useEffect(() => {
     detect();
-    invoke<string | null>("resolve_binary", { name: "sandbox" }).then(
-      (path) => {
-        if (path) setSandboxBinary(path);
-      },
-    );
+    invoke<string>("resolve_sandbox_binary")
+      .then(setSandboxBinary)
+      .catch(() => {});
   }, [detect]);
 
   const entry = buildMcpEntry(
