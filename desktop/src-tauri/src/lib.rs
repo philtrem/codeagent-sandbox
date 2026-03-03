@@ -44,6 +44,7 @@ pub fn run() {
             system::resolve_sandbox_binary,
             system::validate_directory,
             system::validate_paths_overlap,
+            system::ensure_directory,
             // Undo commands
             undo::read_undo_history,
             // VM MCP passthrough

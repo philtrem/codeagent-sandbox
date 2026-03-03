@@ -16,6 +16,13 @@ pub fn validate_directory(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
 }
 
+/// Create a directory (and parents) if it doesn't exist. Returns true on success.
+#[tauri::command]
+pub fn ensure_directory(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("Failed to create directory: {e}"))
+}
+
 /// Check whether the undo directory overlaps with any working directory.
 /// Returns `None` if no overlap, or an error message if they overlap.
 #[tauri::command]

@@ -44,10 +44,12 @@ function DirPicker({
   label,
   value,
   onChange,
+  autoCreate,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  autoCreate?: boolean;
 }) {
   const [invalid, setInvalid] = useState(false);
 
@@ -56,10 +58,19 @@ function DirPicker({
       setInvalid(false);
       return;
     }
-    invoke<boolean>("validate_directory", { path: value }).then((valid) => {
+    invoke<boolean>("validate_directory", { path: value }).then(async (valid) => {
+      if (!valid && autoCreate) {
+        try {
+          await invoke("ensure_directory", { path: value });
+          setInvalid(false);
+          return;
+        } catch {
+          // Creation failed — fall through to show error
+        }
+      }
       setInvalid(!valid);
     });
-  }, [value]);
+  }, [value, autoCreate]);
 
   const pickDir = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -310,6 +321,7 @@ function WorkingDirSection({
         label="Undo Directory"
         value={undoDir}
         onChange={onUndoDirChange}
+        autoCreate
       />
       {overlapError && (
         <p className="flex items-center gap-1 text-xs text-[var(--color-error)]">
