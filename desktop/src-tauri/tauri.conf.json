@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "identifier": "com.codeagent.desktop",
   "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
