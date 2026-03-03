@@ -1,14 +1,16 @@
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Child;
 use std::time::Duration;
 
 use crate::error::AgentError;
 
 /// Timeout for waiting for the control socket to appear after QEMU starts.
+#[cfg(not(target_os = "windows"))]
 const CONTROL_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Polling interval while waiting for the control socket.
+#[cfg(not(target_os = "windows"))]
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Timeout for graceful QEMU shutdown before sending SIGKILL.
@@ -106,21 +108,28 @@ impl QemuConfig {
 
         #[cfg(target_os = "windows")]
         {
-            // Use whpx:tcg — QEMU tries WHPX (hardware) first, falls back to
-            // TCG (software emulation) if WHPX fails (known VP exit code bugs
-            // on some Windows 11 / CPU combinations).
+            // Try WHPX (hardware virtualization) first, fall back to TCG
+            // (software emulation) if WHPX is unavailable. Use `-cpu qemu64`
+            // instead of `-cpu max` because WHPX cannot handle certain advanced
+            // CPU features exposed by `max` (causes "Unexpected VP exit code 4").
             args.extend(["-machine".into(), "q35,accel=whpx:tcg".into()]);
-            args.extend(["-cpu".into(), "max".into()]);
+            args.extend(["-cpu".into(), "qemu64".into()]);
         }
     }
 
-    /// Common arguments: memory, CPUs, network, display.
+    /// Common arguments: memory, CPUs, network, display, virtio-serial bus.
     fn add_common_args(&self, args: &mut Vec<OsString>) {
         args.extend(["-m".into(), format!("{}M", self.memory_mb).into()]);
         args.extend(["-smp".into(), self.cpus.to_string().into()]);
         args.extend(["-netdev".into(), "user,id=net0".into()]);
         args.extend(["-device".into(), "virtio-net-pci,netdev=net0".into()]);
         args.push("-nographic".into());
+
+        // On Windows, both filesystem (virtserialport) and control channel
+        // (virtserialport) devices need the virtio-serial-pci bus. Add it
+        // here so it's available before any port devices are added.
+        #[cfg(target_os = "windows")]
+        args.extend(["-device".into(), "virtio-serial-pci".into()]);
     }
 
     /// Filesystem sharing devices (virtiofs on Linux/macOS, 9P on Windows).
@@ -156,10 +165,14 @@ impl QemuConfig {
             {
                 // Read the TCP address from the socket_path file written by
                 // P9Backend::start(). Connect QEMU via a TCP chardev.
+                // QEMU requires host and port as separate parameters:
+                //   socket,id=ID,host=IP,port=PORT,server=off
                 let addr = std::fs::read_to_string(socket_path).unwrap_or_default();
+                let addr = addr.trim();
+                let (host, port) = addr.rsplit_once(':').unwrap_or((addr, "0"));
                 args.extend([
                     "-chardev".into(),
-                    format!("socket,id={chardev_id},host={addr},server=off").into(),
+                    format!("socket,id={chardev_id},host={host},port={port},server=off").into(),
                 ]);
                 // The virtserialport device exposes the chardev as a virtio-serial
                 // port named "p9fs{index}" in the guest.
@@ -191,15 +204,24 @@ impl QemuConfig {
 
         #[cfg(target_os = "windows")]
         {
+            // QEMU requires host and port as separate parameters:
+            //   socket,id=ctrl,host=IP,port=PORT,server=off
             let addr = std::fs::read_to_string(&self.control_socket_path)
                 .unwrap_or_default();
+            let addr = addr.trim();
+            let (host, port) = addr.rsplit_once(':').unwrap_or((addr, "0"));
             args.extend([
                 "-chardev".into(),
-                format!("socket,id=ctrl,host={},server=off", addr.trim()).into(),
+                format!("socket,id=ctrl,host={host},port={port},server=off").into(),
             ]);
         }
 
+        // On Unix, the virtio-serial-pci bus is only needed for the control
+        // channel. On Windows it's added in add_common_args() since filesystem
+        // ports also use it.
+        #[cfg(not(target_os = "windows"))]
         args.extend(["-device".into(), "virtio-serial-pci".into()]);
+
         args.extend([
             "-device".into(),
             "virtserialport,chardev=ctrl,name=control".into(),
@@ -312,8 +334,9 @@ impl QemuProcess {
     /// Spawn a QEMU VM.
     ///
     /// Builds the platform-specific command line, spawns the process,
-    /// and waits for the control socket to appear (indicating the VM
-    /// is ready to accept connections).
+    /// and waits for readiness. On Unix, waits for the control socket
+    /// file to appear. On Windows, verifies QEMU hasn't exited early
+    /// (the orchestrator handles TCP connection acceptance separately).
     pub fn spawn(config: QemuConfig) -> Result<Self, AgentError> {
         let (binary, args) = config.build_args()?;
 
@@ -330,10 +353,9 @@ impl QemuProcess {
                 ),
             })?;
 
-        let process = Self { config, child };
+        let mut process = Self { config, child };
 
-        // Wait for the control socket to appear
-        Self::wait_for_ready(&process.config.control_socket_path)?;
+        process.wait_for_ready()?;
 
         Ok(process)
     }
@@ -374,22 +396,59 @@ impl QemuProcess {
         Some(self.child.id())
     }
 
-    /// Wait for the control socket to appear, indicating VM readiness.
-    fn wait_for_ready(control_socket: &Path) -> Result<(), AgentError> {
-        let start = std::time::Instant::now();
-        while start.elapsed() < CONTROL_SOCKET_TIMEOUT {
-            if control_socket.exists() {
-                return Ok(());
+    /// Wait for the VM to be ready after spawn.
+    ///
+    /// On Unix: waits for the control socket file to appear (QEMU creates it
+    /// in server mode).
+    ///
+    /// On Windows: the control socket address file is written by the
+    /// orchestrator BEFORE QEMU starts, so file existence is meaningless.
+    /// Instead, we briefly verify QEMU hasn't crashed on startup (e.g.,
+    /// due to invalid arguments). The actual connection is handled by the
+    /// orchestrator's TCP accept loop with its own timeout.
+    fn wait_for_ready(&mut self) -> Result<(), AgentError> {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let start = std::time::Instant::now();
+            while start.elapsed() < CONTROL_SOCKET_TIMEOUT {
+                if self.config.control_socket_path.exists() {
+                    return Ok(());
+                }
+                std::thread::sleep(SOCKET_POLL_INTERVAL);
             }
-            std::thread::sleep(SOCKET_POLL_INTERVAL);
+            return Err(AgentError::QemuSpawnFailed {
+                reason: format!(
+                    "control socket {} did not appear within {}s",
+                    self.config.control_socket_path.display(),
+                    CONTROL_SOCKET_TIMEOUT.as_secs()
+                ),
+            });
         }
-        Err(AgentError::QemuSpawnFailed {
-            reason: format!(
-                "control socket {} did not appear within {}s",
-                control_socket.display(),
-                CONTROL_SOCKET_TIMEOUT.as_secs()
-            ),
-        })
+
+        #[cfg(target_os = "windows")]
+        {
+            // Give QEMU a moment to start, then check if it crashed immediately
+            // (e.g., invalid arguments, missing files, accelerator failure).
+            std::thread::sleep(Duration::from_millis(500));
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut stderr_output = String::new();
+                    if let Some(mut stderr) = self.child.stderr.take() {
+                        use std::io::Read;
+                        let _ = stderr.read_to_string(&mut stderr_output);
+                    }
+                    Err(AgentError::QemuSpawnFailed {
+                        reason: format!(
+                            "QEMU exited immediately with {status}. stderr: {stderr_output}"
+                        ),
+                    })
+                }
+                Ok(None) => Ok(()), // Still running — good
+                Err(error) => Err(AgentError::QemuSpawnFailed {
+                    reason: format!("failed to check QEMU process status: {error}"),
+                }),
+            }
+        }
     }
 }
 
@@ -594,5 +653,45 @@ mod tests {
         // Extra args should appear at the end
         assert!(args.contains(&"-nodefaults".to_string()));
         assert!(args.contains(&"-S".to_string()));
+    }
+
+    /// QC-11: Windows chardev uses separate host and port parameters.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn qc_11_windows_chardev_uses_separate_host_port() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a TCP address file for the control channel
+        let ctrl_addr_path = dir.path().join("control.addr");
+        std::fs::write(&ctrl_addr_path, "127.0.0.1:54321").unwrap();
+
+        // Write a TCP address file for the filesystem channel
+        let fs_addr_path = dir.path().join("p9fs0.addr");
+        std::fs::write(&fs_addr_path, "127.0.0.1:54322").unwrap();
+
+        let mut config = test_config();
+        config.control_socket_path = ctrl_addr_path;
+        config.fs_socket_paths = vec![fs_addr_path];
+
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        // Control channel chardev should have host=...,port=... separately
+        let ctrl_chardev = args.iter().find(|a| a.contains("id=ctrl")).unwrap();
+        assert!(
+            ctrl_chardev.contains("host=127.0.0.1,port=54321"),
+            "expected separate host and port in control chardev: {ctrl_chardev}"
+        );
+        assert!(
+            !ctrl_chardev.contains("host=127.0.0.1:54321"),
+            "should not use colon-separated host:port format: {ctrl_chardev}"
+        );
+
+        // Filesystem chardev should also have host=...,port=... separately
+        let fs_chardev = args.iter().find(|a| a.contains("id=vfs0")).unwrap();
+        assert!(
+            fs_chardev.contains("host=127.0.0.1,port=54322"),
+            "expected separate host and port in fs chardev: {fs_chardev}"
+        );
     }
 }

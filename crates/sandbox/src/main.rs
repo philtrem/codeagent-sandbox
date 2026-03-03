@@ -39,7 +39,7 @@ async fn run_mcp(args: CliArgs) {
     use codeagent_stdio::protocol::SessionStartPayload;
     use codeagent_stdio::RequestHandler;
 
-    let (event_sender, _event_receiver) = mpsc::unbounded_channel();
+    let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let working_dir = args.working_dirs[0].clone();
     let vm_mode = args.vm_mode.clone();
     let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
@@ -64,6 +64,18 @@ async fn run_mcp(args: CliArgs) {
     if let Err(e) = orchestrator.session_start(payload) {
         eprintln!("{{\"level\":\"error\",\"message\":\"session auto-start failed: {e}\"}}");
         std::process::exit(1);
+    }
+
+    // Drain any events emitted during session start (e.g., VM launch warnings)
+    // and log them to stderr so they're visible in diagnostic output.
+    while let Ok(event) = event_receiver.try_recv() {
+        match &event {
+            codeagent_stdio::Event::Warning { code, message }
+            | codeagent_stdio::Event::Error { code, message } => {
+                eprintln!("{{\"level\":\"warn\",\"code\":\"{code}\",\"message\":\"{message}\"}}");
+            }
+            _ => {}
+        }
     }
 
     let (_notification_sender, notification_receiver) = mpsc::unbounded_channel();
