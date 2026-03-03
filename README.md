@@ -46,7 +46,7 @@ npm run tauri dev       # development
 npm run tauri build     # production installer
 ```
 
-`build-sidecar` builds the sandbox binary in release mode, builds the guest VM images for the host architecture (x86_64 or aarch64), and copies everything into the Tauri bundle directories. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `tauri dev` or `tauri build`.
+`npm run build-sidecar` builds the sandbox binary in release mode, builds the guest VM images for the host architecture (x86_64 or aarch64), and copies everything into the Tauri bundle directories. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `npm run tauri dev` or `npm run tauri build`.
 
 ## Testing
 
