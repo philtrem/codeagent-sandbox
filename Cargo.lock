@@ -468,6 +468,7 @@ name = "codeagent-shim"
 version = "0.1.0"
 dependencies = [
  "codeagent-control",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

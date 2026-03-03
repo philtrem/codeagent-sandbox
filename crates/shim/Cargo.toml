@@ -17,6 +17,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "process",
 
 codeagent-control = { path = "../control" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util", "test-util"] }

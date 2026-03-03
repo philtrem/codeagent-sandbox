@@ -2,11 +2,13 @@
 
 A sandboxed execution environment for AI coding agents. Commands run inside a Linux VM (QEMU), with host-side filesystem interception that captures preimages of every write. This gives you N-step undo for any destructive operation — including bulk operations like `rm -rf *`, which count as a single step.
 
+When no VM is available, the sandbox runs in **host-only mode** — filesystem tools (read, write, edit, glob, grep, undo) work directly on the host, but command execution is disabled.
+
 ## Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024)
-- [QEMU](https://www.qemu.org/download/) (runtime — needed to run the VM)
-- [Docker](https://docs.docker.com/get-docker/) (build-time only — needed to build the guest VM image)
+- [QEMU](https://www.qemu.org/download/) (runtime — needed to run the VM; optional for host-only mode)
+- [Docker](https://docs.docker.com/get-docker/) (build-time only — needed to build the guest VM image; on Windows, keep the default "Use WSL 2" option during install — Hyper-V can conflict with QEMU's WHPX accelerator)
 - [Node.js](https://nodejs.org/) (only if building the desktop app)
 
 ## CLI usage
@@ -27,17 +29,21 @@ Run the sandbox:
 sandbox --working-dir /path/to/project --undo-dir /tmp/undo
 ```
 
-This starts in STDIO mode (JSON Lines on stdin/stdout). For MCP mode (used by Claude Code Desktop and similar tools):
+This starts in STDIO mode (JSON Lines on stdin/stdout). For MCP mode (used by Claude Code and other MCP clients):
 
 ```sh
 sandbox --working-dir /path/to/project --undo-dir /tmp/undo --protocol mcp
 ```
 
+In MCP mode the sandbox speaks JSON-RPC 2.0 over stdin/stdout and exposes 11 tools: `execute_command`, `read_file`, `write_file`, `edit_file`, `list_directory`, `glob`, `grep`, `undo`, `get_undo_history`, `get_session_status`, `get_working_directory`.
+
 Additional options: `--memory-mb` (default 2048), `--cpus` (default 2), `--qemu-binary`, `--kernel-path`, `--initrd-path`, `--virtiofsd-binary`. See `sandbox --help`.
+
+If `--kernel-path` and `--initrd-path` are omitted and no guest images are found, the sandbox starts in host-only mode automatically.
 
 ## Desktop app
 
-The optional Tauri v2 desktop app lives in `desktop/`. The installer bundles the sandbox binary and guest VM images so no separate build steps are needed.
+The Tauri v2 desktop app (`desktop/`) provides a GUI for managing the sandbox. It handles configuration, VM lifecycle, undo history, and Claude Code integration (MCP server registration, built-in tool blocking).
 
 ```sh
 cd desktop && npm install
@@ -48,10 +54,16 @@ npm run tauri build     # production installer
 
 `npm run build-sidecar` builds the sandbox binary in release mode, builds the guest VM images for the host architecture (x86_64 or aarch64), and copies everything into the Tauri bundle directories. Requires Docker for the guest image build; if Docker is unavailable, the guest images are skipped with a warning. Run it before `npm run tauri dev` or `npm run tauri build`.
 
+The desktop app and the sandbox binary are **separate executables**. The app spawns `sandbox.exe` as a child process and communicates via JSON-RPC over stdin/stdout. Rebuilding one does not rebuild the other.
+
+### Claude Code integration
+
+When started from the desktop app, the sandbox automatically registers itself as an MCP server in Claude Code's configuration and blocks Claude Code's built-in filesystem tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) so all operations go through the sandbox. On stop or app exit, the registration is removed and built-in tools are restored.
+
 ## Testing
 
 ```sh
-cargo test --workspace              # ~554 tests (Windows), ~557 (Linux)
+cargo test --workspace              # ~596 tests (Windows), ~599 (Linux)
 cargo clippy --workspace --tests    # lint
 ```
 
@@ -80,7 +92,7 @@ The host runs a Rust binary (`sandbox`) that serves the host working directory i
 - **Filesystem channel** — carries POSIX filesystem operations. The VM kernel mounts a host-backed filesystem (`virtiofs` on Linux/macOS, `9P` on Windows). A write interceptor on the host side captures preimages before mutations land on disk.
 - **Control channel** — carries command orchestration over virtio-serial (JSON Lines). A lightweight shim inside the VM receives commands, runs them via `sh -c`, streams output, and signals step boundaries.
 
-External interfaces speak either the **STDIO API** (JSON Lines over stdin/stdout) or the **MCP protocol** (JSON-RPC 2.0 over a local socket), both of which expose the same capabilities: session lifecycle, command execution, filesystem access, undo, and safeguards.
+External interfaces speak either the **STDIO API** (JSON Lines over stdin/stdout) or the **MCP protocol** (JSON-RPC 2.0 over stdin/stdout), both of which expose the same capabilities: session lifecycle, command execution, filesystem access, undo, and safeguards.
 
 ### Platform-specific filesystem backends
 
@@ -103,7 +115,7 @@ crates/
                       resource limits, gitignore filtering, symlink policy)
   control/            Control channel protocol + state machine + handler
   stdio/              STDIO API server (JSON Lines)
-  mcp/                MCP server (JSON-RPC 2.0)
+  mcp/                MCP server (JSON-RPC 2.0, 11 tools)
   sandbox/            Host-side binary wiring everything together
   shim/               VM-side command executor
   p9/                 9P2000.L server (Windows filesystem backend)
@@ -115,7 +127,7 @@ crates/
 guest/                Guest VM image build (Dockerfile + init script)
 fuzz/                 Fuzz targets for all parsers
 xtask/                Build task runner (guest image builds)
-desktop/              Tauri v2 desktop app (React + TypeScript)
+desktop/              Tauri v2 desktop app (React + TypeScript + Zustand)
 ```
 
 ## Key design decisions
@@ -125,6 +137,7 @@ desktop/              Tauri v2 desktop app (React + TypeScript)
 - **Safeguards.** Configurable thresholds for destructive operations (delete count, overwrite large files, rename over existing). Triggers block until explicitly allowed or denied. On deny, the current step is rolled back automatically.
 - **Undo barriers.** External modifications between steps create barriers that prevent rolling back past the modification point (since the rollback would destroy the external change). `force` flag overrides.
 - **Two-channel separation.** The filesystem channel and control channel are completely independent. The control channel never sees filesystem operations. Correlation happens on the host: all filesystem writes between `step_started(N)` and `step_completed(N)` belong to undo step N.
+- **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Command execution is disabled.
 
 ## License
 
