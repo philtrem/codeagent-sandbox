@@ -213,7 +213,7 @@ export default function VmManager() {
             </span>{" "}
             — Filesystem tools (read, write, edit, undo, etc.) are available.
             Command execution requires a VM. Configure a QEMU binary and guest
-            images above to enable full VM mode.
+            images below to enable full VM mode.
           </div>
         </div>
       )}
