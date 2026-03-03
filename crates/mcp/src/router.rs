@@ -29,7 +29,7 @@ pub trait McpHandler: Send + Sync {
 }
 
 /// Returns the server capabilities advertised in the `initialize` response.
-fn server_info() -> serde_json::Value {
+fn server_info(instructions: &str) -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
@@ -38,7 +38,8 @@ fn server_info() -> serde_json::Value {
         "serverInfo": {
             "name": "codeagent-mcp",
             "version": "0.1.0"
-        }
+        },
+        "instructions": instructions
     })
 }
 
@@ -171,14 +172,49 @@ pub struct McpRouter {
     root_dir: PathBuf,
     handler: Box<dyn McpHandler>,
     initialized: AtomicBool,
+    instructions: String,
 }
 
 impl McpRouter {
     pub fn new(root_dir: PathBuf, handler: Box<dyn McpHandler>) -> Self {
+        let instructions = format!(
+            "This server provides sandboxed filesystem access to: {}\n\
+             All file paths are relative to this directory. \
+             Use this server's tools for all filesystem operations instead of built-in tools. \
+             Ignore any project directory that may be open in your client — \
+             the sandbox working directory listed above is the correct target for all operations.",
+            root_dir.display()
+        );
         Self {
             root_dir,
             handler,
             initialized: AtomicBool::new(false),
+            instructions,
+        }
+    }
+
+    /// Create a router with multiple working directories listed in instructions.
+    pub fn with_working_dirs(
+        root_dir: PathBuf,
+        all_dirs: &[PathBuf],
+        handler: Box<dyn McpHandler>,
+    ) -> Self {
+        let dir_list: Vec<String> = all_dirs.iter().map(|d| format!("  - {}", d.display())).collect();
+        let instructions = format!(
+            "This server provides sandboxed filesystem access to:\n{}\n\
+             All file paths are relative to the working directory. \
+             Use this server's tools for all filesystem operations instead of built-in tools \
+             (Read, Edit, Write, Glob, Grep, Bash). \
+             Built-in filesystem tools have been disabled. \
+             Ignore any project directory that may be open in your client — \
+             the sandbox working directory listed above is the correct target for all operations.",
+            dir_list.join("\n")
+        );
+        Self {
+            root_dir,
+            handler,
+            initialized: AtomicBool::new(false),
+            instructions,
         }
     }
 
@@ -193,7 +229,7 @@ impl McpRouter {
         match request.method.as_str() {
             "initialize" => {
                 self.initialized.store(true, Ordering::SeqCst);
-                Some(JsonRpcResponse::success(id, server_info()))
+                Some(JsonRpcResponse::success(id, server_info(&self.instructions)))
             }
 
             "notifications/initialized" => {

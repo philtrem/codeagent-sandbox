@@ -42,6 +42,7 @@ async fn run_mcp(args: CliArgs) {
     let (event_sender, _event_receiver) = mpsc::unbounded_channel();
     let working_dir = args.working_dirs[0].clone();
     let vm_mode = args.vm_mode.clone();
+    let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
     let working_directories: Vec<_> = args
         .working_dirs
         .iter()
@@ -66,7 +67,7 @@ async fn run_mcp(args: CliArgs) {
     }
 
     let (_notification_sender, notification_receiver) = mpsc::unbounded_channel();
-    let mcp_router = McpRouter::new(working_dir, Box::new(orchestrator));
+    let mcp_router = McpRouter::with_working_dirs(working_dir, &all_dirs, Box::new(orchestrator));
     let mut server = McpServer::new(mcp_router, notification_receiver);
 
     let stdin = tokio::io::stdin();
