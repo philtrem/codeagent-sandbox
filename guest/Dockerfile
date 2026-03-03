@@ -85,15 +85,21 @@ COPY --from=builder /build/target/release/shim /initramfs/bin/shim
 # Copy required kernel modules for filesystem and serial transport.
 # Alpine's linux-virt may have some of these built-in, but we include
 # the module files so modprobe works regardless.
+# Include fuse + netfs as they are dependencies of virtiofs and 9pnet.
 RUN KVER=$(ls /lib/modules/ | head -1) && \
     mkdir -p "/initramfs/lib/modules/$KVER" && \
     for mod in \
+        fuse netfs \
         virtiofs virtio_pci virtio_mmio virtio_ring \
         9pnet 9pnet_virtio 9p \
-        virtio_console virtio_net; do \
+        virtio_console virtio_net net_failover failover; do \
         find "/lib/modules/$KVER" -name "${mod}.ko*" \
             -exec cp {} "/initramfs/lib/modules/$KVER/" \; 2>/dev/null || true; \
     done && \
+    # Decompress .ko.gz / .ko.zst modules — busybox modprobe cannot
+    # handle compressed modules, so we store them as plain .ko files.
+    gunzip /initramfs/lib/modules/$KVER/*.ko.gz 2>/dev/null || true && \
+    unzstd --rm /initramfs/lib/modules/$KVER/*.ko.zst 2>/dev/null || true && \
     depmod -b /initramfs "$KVER" 2>/dev/null || true
 
 # Copy the init script

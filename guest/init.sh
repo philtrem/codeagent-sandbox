@@ -20,8 +20,30 @@ if [ -d "/lib/modules/$KVER" ]; then
     done
 fi
 
-# Wait for virtio-serial ports to appear
-sleep 0.2
+# Create /dev/virtio-ports symlinks (no udev in initramfs).
+# The virtio_console driver creates /dev/vportNpM device nodes via devtmpfs,
+# but the named symlinks under /dev/virtio-ports/ are normally created by
+# udev rules. We scan sysfs to create them manually.
+setup_virtio_ports() {
+    mkdir -p /dev/virtio-ports
+    local sysdir="/sys/class/virtio-ports"
+    [ -d "$sysdir" ] || return
+    for port in "$sysdir"/vport*; do
+        [ -d "$port" ] || continue
+        local name_file="$port/name"
+        [ -f "$name_file" ] || continue
+        local name=$(cat "$name_file")
+        [ -n "$name" ] || continue
+        local dev="/dev/${port##*/}"
+        if [ -e "$dev" ]; then
+            ln -sf "$dev" "/dev/virtio-ports/$name"
+        fi
+    done
+}
+
+# Wait briefly for virtio-serial ports to appear, then create symlinks
+sleep 0.5
+setup_virtio_ports
 
 # Mount working directories
 # Virtiofs tags: "working" (index 0), "working1", "working2", ...
@@ -41,7 +63,7 @@ mount_working_dir() {
     mkdir -p "$mount_point"
 
     # Try virtiofs first (Linux/macOS hosts)
-    if mount -t virtiofs -o cache=none "$tag" "$mount_point" 2>/dev/null; then
+    if mount -t virtiofs "$tag" "$mount_point" 2>/dev/null; then
         echo "init: mounted $tag at $mount_point (virtiofs)"
         return 0
     fi
