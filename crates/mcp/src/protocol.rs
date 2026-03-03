@@ -128,6 +128,9 @@ pub struct ExecuteCommandArgs {
     pub env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Timeout in seconds (default: 120).
+    #[serde(default)]
+    pub timeout: Option<u32>,
 }
 
 /// Arguments for the `read_file` tool.
@@ -182,6 +185,9 @@ pub struct GlobArgs {
     pub pattern: String,
     #[serde(default)]
     pub path: Option<String>,
+    /// Maximum number of results to return (default: 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Arguments for the `grep` tool.

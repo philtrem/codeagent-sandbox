@@ -18,6 +18,7 @@ use codeagent_stdio::protocol::{
 use codeagent_stdio::{Event, RequestHandler, StdioError};
 
 use crate::cli::CliArgs;
+use crate::command_waiter::CommandWaiter;
 use crate::control_bridge;
 use crate::error::AgentError;
 use crate::qemu::{QemuConfig, QemuProcess};
@@ -55,6 +56,9 @@ pub struct Orchestrator {
     /// Populated when the filesystem backend connects and safeguards are enabled.
     #[allow(dead_code)]
     safeguard_receiver: Mutex<Option<mpsc::UnboundedReceiver<PendingSafeguard>>>,
+    /// Shared with the event bridge so MCP `execute_command` can block
+    /// until a VM command completes and collect its output.
+    command_waiter: Arc<CommandWaiter>,
 }
 
 impl Orchestrator {
@@ -67,12 +71,38 @@ impl Orchestrator {
             cli_args,
             event_sender,
             safeguard_receiver: Mutex::new(None),
+            command_waiter: CommandWaiter::new(),
         }
     }
 
-    /// Returns true if VM components (kernel + initrd) are configured.
-    fn is_vm_available(&self) -> bool {
-        self.cli_args.kernel_path.is_some() && self.cli_args.initrd_path.is_some()
+    /// Resolve guest image paths: CLI args first, then auto-detect next to the binary.
+    fn resolve_guest_images(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        let mut kernel = self.cli_args.kernel_path.clone();
+        let mut initrd = self.cli_args.initrd_path.clone();
+
+        if kernel.is_some() && initrd.is_some() {
+            return (kernel, initrd);
+        }
+
+        // Auto-detect: look for guest/ directory next to the sandbox binary
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                if kernel.is_none() {
+                    let candidate = exe_dir.join("guest").join("vmlinuz");
+                    if candidate.is_file() {
+                        kernel = Some(candidate);
+                    }
+                }
+                if initrd.is_none() {
+                    let candidate = exe_dir.join("guest").join("initrd.img");
+                    if candidate.is_file() {
+                        initrd = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        (kernel, initrd)
     }
 
     /// Create a session from a `session.start` payload.
@@ -137,12 +167,15 @@ impl Orchestrator {
         }
 
         // Determine VM availability and launch if configured
-        let (vm_status, backend_name) = if self.is_vm_available() {
-            // VM components are configured — attempt to launch.
-            // For now, the actual launch is deferred to when `launch_vm`
-            // is called from `do_session_start`. The launch_vm method
-            // will populate the VM fields on the session.
-            match self.launch_vm(&working_dirs, &interceptors) {
+        let (resolved_kernel, resolved_initrd) = self.resolve_guest_images();
+        let vm_available = resolved_kernel.is_some() && resolved_initrd.is_some();
+        let (vm_status, backend_name) = if vm_available {
+            match self.launch_vm(
+                &working_dirs,
+                &interceptors,
+                resolved_kernel.unwrap(),
+                resolved_initrd.unwrap(),
+            ) {
                 Ok(vm_session_parts) => {
                     let session = Session {
                         interceptors,
@@ -183,6 +216,21 @@ impl Orchestrator {
             }
         } else {
             // No VM components configured — run in host-only mode
+            let missing: Vec<&str> = [
+                self.cli_args.kernel_path.is_none().then_some("kernel"),
+                self.cli_args.initrd_path.is_none().then_some("initrd"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let _ = self.event_sender.send(Event::Warning {
+                code: "vm_not_configured".to_string(),
+                message: format!(
+                    "VM not configured (missing: {}), running in host-only mode. \
+                     Pass --kernel-path and --initrd-path to enable VM mode.",
+                    missing.join(", ")
+                ),
+            });
             let session = Self::create_non_vm_session(
                 interceptors, working_dirs.clone(), undo_dirs, payload,
             );
@@ -236,6 +284,8 @@ impl Orchestrator {
         &self,
         working_dirs: &[PathBuf],
         interceptors: &[Arc<UndoInterceptor>],
+        kernel_path: PathBuf,
+        initrd_path: PathBuf,
     ) -> Result<VmSessionParts, AgentError> {
         let socket_dir = self.cli_args.undo_dir.join(".sockets");
         std::fs::create_dir_all(&socket_dir)?;
@@ -304,8 +354,8 @@ impl Orchestrator {
         // 3. Build QEMU config and spawn
         let config = QemuConfig {
             qemu_binary: self.cli_args.qemu_binary.clone(),
-            kernel_path: self.cli_args.kernel_path.clone().unwrap(),
-            initrd_path: self.cli_args.initrd_path.clone().unwrap(),
+            kernel_path,
+            initrd_path,
             rootfs_path: self.cli_args.rootfs_path.clone(),
             memory_mb: self.cli_args.memory_mb,
             cpus: self.cli_args.cpus,
@@ -405,10 +455,11 @@ impl Orchestrator {
         );
         let handler = Arc::new(handler);
 
-        // 6. Spawn event bridge (control events → STDIO events)
+        // 6. Spawn event bridge (control events → STDIO events + command waiter)
         let event_bridge_handle = tokio::spawn(run_event_bridge(
             handler_events,
             self.event_sender.clone(),
+            Some(self.command_waiter.clone()),
         ));
 
         // 7. Spawn control channel writer and reader tasks
@@ -889,18 +940,24 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
 
-        let state = self.state.lock().unwrap();
-        let session = match &*state {
-            SessionState::Active(s) => s,
-            _ => return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
+        let (control_writer, command_id) = {
+            let state = self.state.lock().unwrap();
+            let session = match &*state {
+                SessionState::Active(s) => s,
+                _ => return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
+            };
+
+            let writer = match &session.control_writer {
+                Some(writer) => writer.clone(),
+                None => return Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable)),
+            };
+
+            let id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
+            (writer, id)
         };
 
-        let control_writer = match &session.control_writer {
-            Some(writer) => writer.clone(),
-            None => return Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable)),
-        };
-
-        let command_id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
+        // Register with the waiter before sending so early events are captured
+        self.command_waiter.register(command_id);
 
         let exec_msg = codeagent_control::HostMessage::Exec {
             id: command_id,
@@ -920,10 +977,47 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: "control channel closed".to_string(),
             })?;
 
-        Ok(json!({
-            "command_id": command_id,
-            "status": "started",
-        }))
+        // Block until the command completes or times out (120s)
+        let timeout = std::time::Duration::from_secs(
+            args.timeout.unwrap_or(120) as u64,
+        );
+        let result = self.command_waiter.wait_for_completion(command_id, timeout);
+
+        match result {
+            Some(r) if r.exit_code.is_some() => {
+                let exit_code = r.exit_code.unwrap();
+                let mut output = r.stdout;
+                if !r.stderr.is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&r.stderr);
+                }
+                Ok(json!({
+                    "command_id": command_id,
+                    "exit_code": exit_code,
+                    "output": output,
+                }))
+            }
+            Some(r) => {
+                // Timed out — return partial output
+                let mut output = r.stdout;
+                if !r.stderr.is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&r.stderr);
+                }
+                Ok(json!({
+                    "command_id": command_id,
+                    "status": "timeout",
+                    "output": output,
+                }))
+            }
+            None => Err(McpError::InternalError {
+                message: "command was not registered".to_string(),
+            }),
+        }
     }
 
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError> {
@@ -1122,8 +1216,17 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // Sort by modification time, newest first
         entries.sort_by(|a, b| b.1.cmp(&a.1));
 
+        let limit = args.limit.unwrap_or(200);
+        let total = entries.len();
+        let truncated = total > limit;
+        entries.truncate(limit);
+
         let result: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
-        Ok(json!(result.join("\n")))
+        let mut output = result.join("\n");
+        if truncated {
+            output.push_str(&format!("\n\n[Truncated: showing {limit} of {total} matches]"));
+        }
+        Ok(json!(output))
     }
 
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {

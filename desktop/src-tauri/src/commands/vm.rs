@@ -293,7 +293,7 @@ pub fn start_vm(
     }
 
     // Register MCP server in Claude Code config if integration is enabled
-    super::claude::register_mcp_server(&config, &binary);
+    super::claude::register_mcp_server(&config, &binary, &kernel_path, &initrd_path);
 
     Ok(VmStatus {
         state: "running".into(),

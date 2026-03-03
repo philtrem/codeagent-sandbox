@@ -505,6 +505,7 @@ fn mcp_10_glob() {
         .glob(GlobArgs {
             pattern: "**/*.rs".to_string(),
             path: None,
+            limit: None,
         })
         .unwrap();
     let output = result.as_str().unwrap();

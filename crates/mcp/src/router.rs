@@ -109,12 +109,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "glob".to_string(),
-            description: "Find files matching a glob pattern".to_string(),
+            description: "Find files matching a glob pattern. Results sorted by modification time (newest first).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs, src/**/*.ts)" },
-                    "path": { "type": "string", "description": "Directory to search in (relative to working dir)" }
+                    "path": { "type": "string", "description": "Directory to search in (relative to working dir)" },
+                    "limit": { "type": "integer", "description": "Max results to return (default: 200)" }
                 },
                 "required": ["pattern"]
             }),

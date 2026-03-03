@@ -203,7 +203,11 @@ const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash",
 // --- Lifecycle helpers (called from start_vm, stop_vm, and exit handler) ---
 
 /// Build the MCP server entry args from config (mirrors the frontend's buildMcpEntry).
-fn build_mcp_args(config: &crate::config::SandboxConfig) -> Vec<String> {
+fn build_mcp_args(
+    config: &crate::config::SandboxConfig,
+    kernel_path: &str,
+    initrd_path: &str,
+) -> Vec<String> {
     let mut args = Vec::new();
     for dir in &config.sandbox.working_dirs {
         if !dir.is_empty() {
@@ -221,12 +225,36 @@ fn build_mcp_args(config: &crate::config::SandboxConfig) -> Vec<String> {
     args.push(config.vm.memory_mb.to_string());
     args.push("--cpus".into());
     args.push(config.vm.cpus.to_string());
+    if !config.vm.qemu_binary.is_empty() {
+        args.push("--qemu-binary".into());
+        args.push(config.vm.qemu_binary.clone());
+    }
+    if !kernel_path.is_empty() {
+        args.push("--kernel-path".into());
+        args.push(kernel_path.into());
+    }
+    if !initrd_path.is_empty() {
+        args.push("--initrd-path".into());
+        args.push(initrd_path.into());
+    }
+    if !config.vm.rootfs_path.is_empty() {
+        args.push("--rootfs-path".into());
+        args.push(config.vm.rootfs_path.clone());
+    }
     args
 }
 
 /// Register the MCP server in Claude Code config and set denied tools.
 /// Called from `start_vm` when Claude Code integration is enabled.
-pub fn register_mcp_server(config: &crate::config::SandboxConfig, binary_path: &str) {
+///
+/// `kernel_path` and `initrd_path` are the resolved (not raw config) paths
+/// so that Claude Code's spawned sandbox instance can find the guest images.
+pub fn register_mcp_server(
+    config: &crate::config::SandboxConfig,
+    binary_path: &str,
+    kernel_path: &str,
+    initrd_path: &str,
+) {
     if !config.claude_code.enabled {
         return;
     }
@@ -234,7 +262,7 @@ pub fn register_mcp_server(config: &crate::config::SandboxConfig, binary_path: &
     let entry = McpServerEntry {
         server_name: config.claude_code.server_name.clone(),
         command: binary_path.into(),
-        args: build_mcp_args(config),
+        args: build_mcp_args(config, kernel_path, initrd_path),
     };
 
     if let Ok(path) = resolve_claude_code_path(&config.claude_code.scope) {
