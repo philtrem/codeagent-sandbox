@@ -41,6 +41,7 @@ serde_json = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] }
+tempfile = "3"
 TOML
 
 # Build a statically-linked release binary
