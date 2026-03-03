@@ -11,7 +11,6 @@ pub struct SandboxConfig {
     pub symlinks: SymlinkSection,
     pub external_modifications: ExternalModificationsSection,
     pub gitignore: GitignoreSection,
-    pub claude_desktop: ClaudeDesktopSection,
     pub claude_code: ClaudeCodeSection,
 }
 
@@ -25,7 +24,6 @@ impl Default for SandboxConfig {
             symlinks: SymlinkSection::default(),
             external_modifications: ExternalModificationsSection::default(),
             gitignore: GitignoreSection::default(),
-            claude_desktop: ClaudeDesktopSection::default(),
             claude_code: ClaudeCodeSection::default(),
         }
     }
@@ -34,7 +32,7 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxSection {
-    pub working_dir: String,
+    pub working_dirs: Vec<String>,
     pub undo_dir: String,
     pub vm_mode: String,
     pub protocol: String,
@@ -44,7 +42,7 @@ pub struct SandboxSection {
 impl Default for SandboxSection {
     fn default() -> Self {
         Self {
-            working_dir: String::new(),
+            working_dirs: vec![],
             undo_dir: String::new(),
             vm_mode: "ephemeral".into(),
             protocol: "mcp".into(),
@@ -104,6 +102,7 @@ impl Default for UndoSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SafeguardSection {
+    pub enabled: bool,
     pub delete_threshold: u32,
     pub overwrite_file_size_kb: u32,
     pub rename_over_existing: bool,
@@ -113,6 +112,7 @@ pub struct SafeguardSection {
 impl Default for SafeguardSection {
     fn default() -> Self {
         Self {
+            enabled: true,
             delete_threshold: 10,
             overwrite_file_size_kb: 1024,
             rename_over_existing: true,
@@ -157,23 +157,7 @@ pub struct GitignoreSection {
 
 impl Default for GitignoreSection {
     fn default() -> Self {
-        Self { enabled: false }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ClaudeDesktopSection {
-    pub enabled: bool,
-    pub server_name: String,
-}
-
-impl Default for ClaudeDesktopSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            server_name: "codeagent-sandbox".into(),
-        }
+        Self { enabled: true }
     }
 }
 
@@ -183,6 +167,7 @@ pub struct ClaudeCodeSection {
     pub enabled: bool,
     pub server_name: String,
     pub scope: String,
+    pub disable_builtin_tools: bool,
 }
 
 impl Default for ClaudeCodeSection {
@@ -191,6 +176,7 @@ impl Default for ClaudeCodeSection {
             enabled: false,
             server_name: "codeagent-sandbox".into(),
             scope: "user".into(),
+            disable_builtin_tools: true,
         }
     }
 }

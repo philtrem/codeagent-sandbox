@@ -36,6 +36,16 @@ export const useSandboxConfig = create<ConfigState>((set, get) => ({
         invoke<SandboxConfig>("read_config"),
         invoke<string>("get_config_path"),
       ]);
+      // Auto-populate undo_dir with a default path if empty
+      if (!config.sandbox.undo_dir) {
+        try {
+          const defaultUndoDir = await invoke<string>("get_default_undo_dir");
+          config.sandbox.undo_dir = defaultUndoDir;
+          await saveConfig(config);
+        } catch {
+          // Ignore — user can set it manually
+        }
+      }
       set({ config, loaded: true, error: null, configPath });
     } catch (e) {
       set({ error: String(e), loaded: true });

@@ -7,12 +7,11 @@ export interface SandboxConfig {
   symlinks: SymlinkSection;
   external_modifications: ExternalModificationsSection;
   gitignore: GitignoreSection;
-  claude_desktop: ClaudeDesktopSection;
   claude_code: ClaudeCodeSection;
 }
 
 export interface SandboxSection {
-  working_dir: string;
+  working_dirs: string[];
   undo_dir: string;
   vm_mode: string;
   protocol: string;
@@ -38,6 +37,7 @@ export interface UndoSection {
 }
 
 export interface SafeguardSection {
+  enabled: boolean;
   delete_threshold: number;
   overwrite_file_size_kb: number;
   rename_over_existing: boolean;
@@ -56,15 +56,11 @@ export interface GitignoreSection {
   enabled: boolean;
 }
 
-export interface ClaudeDesktopSection {
-  enabled: boolean;
-  server_name: string;
-}
-
 export interface ClaudeCodeSection {
   enabled: boolean;
   server_name: string;
   scope: string;
+  disable_builtin_tools: boolean;
 }
 
 export interface VmStatus {
@@ -116,7 +112,7 @@ export interface UndoHistoryData {
 export function defaultConfig(): SandboxConfig {
   return {
     sandbox: {
-      working_dir: "",
+      working_dirs: [""],
       undo_dir: "",
       vm_mode: "ephemeral",
       protocol: "mcp",
@@ -139,6 +135,7 @@ export function defaultConfig(): SandboxConfig {
       max_single_step_size_mb: 50,
     },
     safeguards: {
+      enabled: true,
       delete_threshold: 10,
       overwrite_file_size_kb: 1024,
       rename_over_existing: true,
@@ -146,12 +143,12 @@ export function defaultConfig(): SandboxConfig {
     },
     symlinks: { policy: "ignore" },
     external_modifications: { policy: "barrier" },
-    gitignore: { enabled: false },
-    claude_desktop: { enabled: false, server_name: "codeagent-sandbox" },
+    gitignore: { enabled: true },
     claude_code: {
       enabled: false,
       server_name: "codeagent-sandbox",
       scope: "user",
+      disable_builtin_tools: true,
     },
   };
 }

@@ -18,7 +18,7 @@ async fn run_stdio(args: CliArgs) {
     use codeagent_stdio::{Router, StdioServer};
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
-    let working_dir = args.working_dir.clone();
+    let working_dir = args.working_dirs[0].clone();
     let orchestrator = Orchestrator::new(args, event_sender);
 
     let router = Router::new(working_dir, Box::new(orchestrator));
@@ -40,14 +40,23 @@ async fn run_mcp(args: CliArgs) {
     use codeagent_stdio::RequestHandler;
 
     let (event_sender, _event_receiver) = mpsc::unbounded_channel();
-    let working_dir = args.working_dir.clone();
+    let working_dir = args.working_dirs[0].clone();
     let vm_mode = args.vm_mode.clone();
+    let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
+    let working_directories: Vec<_> = args
+        .working_dirs
+        .iter()
+        .map(|d| codeagent_stdio::protocol::WorkingDirectoryConfig {
+            path: d.display().to_string(),
+            label: None,
+        })
+        .collect();
     let orchestrator = Orchestrator::new(args, event_sender);
 
     // MCP mode auto-starts the session from CLI args since MCP has no
     // session.start concept — the client expects tools to be ready immediately.
     let payload = SessionStartPayload {
-        working_directories: vec![],
+        working_directories,
         vm_mode,
         network_policy: "disabled".to_string(),
         protocol_version: None,
@@ -58,7 +67,7 @@ async fn run_mcp(args: CliArgs) {
     }
 
     let (_notification_sender, notification_receiver) = mpsc::unbounded_channel();
-    let mcp_router = McpRouter::new(working_dir, Box::new(orchestrator));
+    let mcp_router = McpRouter::with_working_dirs(working_dir, &all_dirs, Box::new(orchestrator));
     let mut server = McpServer::new(mcp_router, notification_receiver);
 
     let stdin = tokio::io::stdin();

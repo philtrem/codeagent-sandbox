@@ -29,7 +29,7 @@ pub trait McpHandler: Send + Sync {
 }
 
 /// Returns the server capabilities advertised in the `initialize` response.
-fn server_info() -> serde_json::Value {
+fn server_info(instructions: &str) -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
@@ -38,7 +38,8 @@ fn server_info() -> serde_json::Value {
         "serverInfo": {
             "name": "codeagent-mcp",
             "version": "0.1.0"
-        }
+        },
+        "instructions": instructions
     })
 }
 
@@ -161,6 +162,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        ToolDefinition {
+            name: "get_working_directory".to_string(),
+            description: "Get the sandbox working directory. This is the root directory for all file operations — NOT the project directory open in your editor.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -169,16 +178,60 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 /// tools/list, tools/call).
 pub struct McpRouter {
     root_dir: PathBuf,
+    working_dirs: Vec<PathBuf>,
     handler: Box<dyn McpHandler>,
     initialized: AtomicBool,
+    instructions: String,
 }
 
 impl McpRouter {
     pub fn new(root_dir: PathBuf, handler: Box<dyn McpHandler>) -> Self {
+        let instructions = format!(
+            "IMPORTANT: You are operating inside a sandboxed environment. \
+             Your working directory is NOT the project open in your editor. \
+             Call get_working_directory to find the real sandbox working directory. \
+             All file paths must be relative to that sandbox directory.\n\n\
+             Sandbox root: {}\n\n\
+             Use ONLY this server's tools for ALL file and command operations. \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             disabled — do not attempt to use them.",
+            root_dir.display()
+        );
+        let working_dirs = vec![root_dir.clone()];
         Self {
             root_dir,
+            working_dirs,
             handler,
             initialized: AtomicBool::new(false),
+            instructions,
+        }
+    }
+
+    /// Create a router with multiple working directories listed in instructions.
+    pub fn with_working_dirs(
+        root_dir: PathBuf,
+        all_dirs: &[PathBuf],
+        handler: Box<dyn McpHandler>,
+    ) -> Self {
+        let dir_list: Vec<String> = all_dirs.iter().map(|d| format!("  - {}", d.display())).collect();
+        let instructions = format!(
+            "IMPORTANT: You are operating inside a sandboxed environment. \
+             Your working directory is NOT the project open in your editor. \
+             Call get_working_directory to find the real sandbox working directory. \
+             All file paths must be relative to that sandbox directory.\n\n\
+             Sandbox roots:\n{}\n\n\
+             Use ONLY this server's tools for ALL file and command operations. \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             disabled — do not attempt to use them.",
+            dir_list.join("\n")
+        );
+        let working_dirs = all_dirs.to_vec();
+        Self {
+            root_dir,
+            working_dirs,
+            handler,
+            initialized: AtomicBool::new(false),
+            instructions,
         }
     }
 
@@ -193,7 +246,7 @@ impl McpRouter {
         match request.method.as_str() {
             "initialize" => {
                 self.initialized.store(true, Ordering::SeqCst);
-                Some(JsonRpcResponse::success(id, server_info()))
+                Some(JsonRpcResponse::success(id, server_info(&self.instructions)))
             }
 
             "notifications/initialized" => {
@@ -303,6 +356,18 @@ impl McpRouter {
             }
             "get_session_status" => {
                 let value = self.handler.get_session_status()?;
+                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
+            }
+            "get_working_directory" => {
+                let dirs: Vec<serde_json::Value> = self
+                    .working_dirs
+                    .iter()
+                    .map(|d| serde_json::json!(d.display().to_string()))
+                    .collect();
+                let value = serde_json::json!({
+                    "working_directory": self.root_dir.display().to_string(),
+                    "all_working_directories": dirs,
+                });
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             unknown => Err(McpError::MethodNotFound {

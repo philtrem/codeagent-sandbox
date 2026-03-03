@@ -286,10 +286,7 @@ export default function UndoHistory() {
         <div className="flex flex-col items-center gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-12 text-center">
           <History size={48} className="text-[var(--color-text-secondary)]" />
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Start a session to view undo history
-          </p>
-          <p className="text-xs text-[var(--color-text-secondary)]">
-            Configure an undo directory in the Settings tab, then start the VM
+            Undo history will appear here
           </p>
         </div>
       </div>
@@ -312,11 +309,11 @@ export default function UndoHistory() {
         </div>
       )}
 
-      {data && data.steps.length === 0 && (
+      {!loading && !error && (!data || data.steps.length === 0) && (
         <div className="flex flex-col items-center gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-12 text-center">
           <History size={48} className="text-[var(--color-text-secondary)]" />
           <p className="text-sm text-[var(--color-text-secondary)]">
-            No undo steps recorded yet
+            Undo history will appear here
           </p>
         </div>
       )}

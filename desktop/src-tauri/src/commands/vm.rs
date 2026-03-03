@@ -61,9 +61,11 @@ fn resolve_guest_images(app: &AppHandle, config: &SandboxConfig) -> (String, Str
 fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &str) -> Vec<String> {
     let mut args = Vec::new();
 
-    if !config.sandbox.working_dir.is_empty() {
-        args.push("--working-dir".into());
-        args.push(config.sandbox.working_dir.clone());
+    for dir in &config.sandbox.working_dirs {
+        if !dir.is_empty() {
+            args.push("--working-dir".into());
+            args.push(dir.clone());
+        }
     }
     if !config.sandbox.undo_dir.is_empty() {
         args.push("--undo-dir".into());
@@ -109,11 +111,49 @@ fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &s
     args
 }
 
+/// Kill any orphaned sandbox.exe from a previous session using the PID file.
+pub fn kill_orphaned_sandbox() {
+    let Some(pid_path) = paths::pid_file_path() else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&pid_path) else {
+        return;
+    };
+    let Ok(pid) = contents.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&pid_path);
+        return;
+    };
+
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+}
+
 /// Resolve the sandbox binary path.
 ///
 /// Search order: Tauri sidecar (triple-suffixed) next to executable,
-/// plain name next to executable, then PATH.
-fn find_sandbox_binary() -> Result<String, String> {
+/// plain name next to executable, workspace target directory, then PATH.
+pub(super) fn find_sandbox_binary() -> Result<String, String> {
+    let sandbox_name = if cfg!(windows) { "sandbox.exe" } else { "sandbox" };
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             // Tauri sidecar binary (target triple suffix added by bundler)
@@ -128,13 +168,23 @@ fn find_sandbox_binary() -> Result<String, String> {
             }
 
             // Plain name (dev mode or manual placement)
-            let candidate = dir.join(if cfg!(windows) {
-                "sandbox.exe"
-            } else {
-                "sandbox"
-            });
+            let candidate = dir.join(sandbox_name);
             if candidate.exists() {
                 return Ok(candidate.to_string_lossy().into_owned());
+            }
+        }
+
+        // Development fallback: workspace target directory
+        // In dev, the Tauri exe is in target/debug/desktop.exe
+        // The sandbox binary is in target/release/sandbox.exe or target/debug/sandbox.exe
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
+                for profile in &["release", "debug"] {
+                    let candidate = target_dir.join(profile).join(sandbox_name);
+                    if candidate.exists() {
+                        return Ok(candidate.to_string_lossy().into_owned());
+                    }
+                }
             }
         }
     }
@@ -143,7 +193,7 @@ fn find_sandbox_binary() -> Result<String, String> {
         return Ok(path.to_string_lossy().into_owned());
     }
 
-    Err("Could not find the sandbox binary. Build it with `cargo build -p codeagent-sandbox` or place it on PATH.".into())
+    Err("Could not find the sandbox binary. Build it with 'cargo build -p codeagent-sandbox' or place it on PATH.".into())
 }
 
 /// Start the sandbox VM as a child process.
@@ -163,11 +213,21 @@ pub fn start_vm(
     let (kernel_path, initrd_path) = resolve_guest_images(&app, &config);
     let args = build_sandbox_args(&config, &kernel_path, &initrd_path);
 
-    let mut child = std::process::Command::new(&binary)
+    let mut command = std::process::Command::new(&binary);
+    command
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start sandbox: {e}"))?;
 
@@ -196,6 +256,9 @@ pub fn start_vm(
         *guard = child_stdout;
     }
 
+    // Register MCP server in Claude Code config if integration is enabled
+    super::claude::register_mcp_server(&config, &binary);
+
     Ok(VmStatus {
         state: "running".into(),
         pid: Some(pid),
@@ -218,6 +281,9 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
         let mut guard = state.process.lock().map_err(|e| e.to_string())?;
         guard.take()
     };
+
+    // Unregister MCP server and restore Claude's built-in tools
+    super::claude::unregister_mcp_server();
 
     match child {
         Some(mut child) => {
@@ -269,6 +335,9 @@ pub fn get_vm_status(state: State<'_, VmState>) -> Result<VmStatus, String> {
                 if let Some(pid_path) = paths::pid_file_path() {
                     let _ = std::fs::remove_file(&pid_path);
                 }
+
+                // Process exited unexpectedly — clean up MCP registration
+                super::claude::unregister_mcp_server();
 
                 Ok(VmStatus {
                     state: "stopped".into(),

@@ -1,15 +1,17 @@
 {
-  "productName": "Code Agent Desktop",
+  "productName": "Code Agent Sandbox",
   "version": "0.1.0",
   "identifier": "com.codeagent.desktop",
   "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "Code Agent Desktop",
+        "title": "Code Agent Sandbox",
         "width": 1024,
         "height": 768,
         "resizable": true,
@@ -44,7 +46,8 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "macOS": {
