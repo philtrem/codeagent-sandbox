@@ -25,15 +25,15 @@ interface TerminalState {
 
 let nextEntryId = 0;
 
-/** Common Linux/shell commands for autocomplete suggestions. */
+/** Common Linux/shell commands for autocomplete suggestions (busybox sh compatible). */
 const COMMON_COMMANDS = [
   "ls", "cd", "cat", "echo", "mkdir", "rmdir", "rm", "cp", "mv", "touch",
   "pwd", "find", "grep", "head", "tail", "wc", "sort", "uniq", "chmod",
   "chown", "ps", "kill", "df", "du", "tar", "gzip", "gunzip", "curl",
-  "wget", "which", "whoami", "env", "export", "source", "history", "clear",
+  "wget", "which", "whoami", "env", "export", "source", "history",
   "sed", "awk", "cut", "tr", "tee", "xargs", "diff", "file", "stat",
   "ln", "readlink", "mount", "umount", "uname", "date", "sleep", "true",
-  "false", "test", "sh", "bash",
+  "false", "test", "sh",
 ];
 
 /**
@@ -71,7 +71,7 @@ export function getSuggestions(prefix: string, commandHistory: string[], limit =
   return results;
 }
 
-/** Commands that take directory arguments (use `compgen -d` instead of `-f`). */
+/** Commands that take directory arguments (filter to directories only). */
 const DIRECTORY_COMMANDS = new Set(["cd", "mkdir", "rmdir", "ls", "pushd"]);
 
 /**
@@ -97,7 +97,7 @@ const pathCache = new Map<string, { entries: string[]; timestamp: number }>();
 const PATH_CACHE_TTL_MS = 5000;
 
 /**
- * Fetch path completions from the VM using `compgen`.
+ * Fetch path completions from the VM using `find` (POSIX, works in busybox sh).
  *
  * Calls `execute_terminal_command` directly (bypassing the terminal store)
  * so the command doesn't appear in terminal output.
@@ -111,18 +111,43 @@ export async function getPathSuggestions(
   if (!parsed || parsed.argPrefix.length === 0) return [];
 
   const { command, argPrefix } = parsed;
-  const useDirectories = DIRECTORY_COMMANDS.has(command);
-  const compgenFlag = useDirectories ? "-d" : "-f";
+  const directoriesOnly = DIRECTORY_COMMANDS.has(command);
+  const typeFlag = directoriesOnly ? " -type d" : "";
 
-  // Cache key includes directory context and compgen mode
-  const cacheKey = `${cwd}:${compgenFlag}:${argPrefix}`;
+  // Split argPrefix into directory and name parts
+  const lastSlash = argPrefix.lastIndexOf("/");
+  let searchDir: string;
+  let namePrefix: string;
+  let stripDotSlash: boolean;
+
+  if (lastSlash === -1) {
+    // Relative name in cwd: "sc" → find . -name 'sc*'
+    searchDir = ".";
+    namePrefix = argPrefix;
+    stripDotSlash = true;
+  } else {
+    // Path with directory: "/etc/p" → find /etc -name 'p*'
+    searchDir = argPrefix.slice(0, lastSlash) || "/";
+    namePrefix = argPrefix.slice(lastSlash + 1);
+    stripDotSlash = false;
+  }
+
+  const cacheKey = `${cwd}:${directoriesOnly}:${argPrefix}`;
   const cached = pathCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < PATH_CACHE_TTL_MS) {
     return cached.entries.slice(0, limit);
   }
 
   try {
-    const shellCmd = `cd ${shellQuote(cwd)} && compgen ${compgenFlag} -- ${shellQuote(argPrefix)}`;
+    const nameFilter = namePrefix
+      ? ` -name ${shellQuote(namePrefix + "*")}`
+      : "";
+    const strip = stripDotSlash ? " | sed 's|^\\./||'" : "";
+    const shellCmd =
+      `cd ${shellQuote(cwd)} && find ${shellQuote(searchDir)}` +
+      ` -mindepth 1 -maxdepth 1${typeFlag}${nameFilter}` +
+      ` 2>/dev/null${strip} | sort | head -n ${limit}`;
+
     const result = await invoke<TerminalOutput>("execute_terminal_command", {
       command: shellCmd,
       timeout: 3,
