@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -10,6 +10,7 @@ import {
   Folder,
   Trash2,
   X,
+  Clock,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import {
@@ -18,7 +19,7 @@ import {
 } from "../../hooks/useUndoHistory";
 import { useVmStore } from "../../hooks/useVmStatus";
 import { useToastStore } from "../../hooks/useToastStore";
-import type { UndoStepDetail, BarrierDetail } from "../../lib/types";
+import type { UndoStepDetail, BarrierDetail, UndoHistoryData } from "../../lib/types";
 
 function StepTypeBadge({ step }: { step: UndoStepDetail }) {
   if (step.unprotected) {
@@ -102,10 +103,10 @@ function StepCard({
           <button
             onClick={() => onRollback(rollbackCount)}
             className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-tertiary)]"
-            title={`Roll back ${rollbackCount} step${rollbackCount > 1 ? "s" : ""}`}
+            title={`Undo the most recent ${rollbackCount} step${rollbackCount > 1 ? "s" : ""}, restoring files to the state before this step`}
           >
             <RotateCcw size={12} />
-            Rollback
+            Undo to here
           </button>
         )}
       </div>
@@ -278,6 +279,122 @@ function ClearHistoryDialog({
   );
 }
 
+function StepList({
+  steps,
+  barriers,
+  indexOffset,
+  onRollback,
+}: {
+  steps: UndoStepDetail[];
+  barriers: BarrierDetail[];
+  indexOffset: number;
+  onRollback: (stepsToRollBack: number) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {steps.map((step, localIndex) => {
+        const barriersAfterStep = barriers.filter(
+          (b) => b.after_step_id === step.step_id,
+        );
+        const globalIndex = indexOffset + localIndex;
+        return (
+          <div key={step.step_id}>
+            {barriersAfterStep.map((barrier) => (
+              <BarrierIndicator
+                key={barrier.barrier_id}
+                barrier={barrier}
+              />
+            ))}
+            <StepCard
+              step={step}
+              stepIndex={globalIndex}
+              onRollback={onRollback}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SessionGroupedSteps({
+  data,
+  onRollback,
+}: {
+  data: UndoHistoryData;
+  onRollback: (stepsToRollBack: number) => void;
+}) {
+  const [showPrevious, setShowPrevious] = useState(false);
+
+  // Find the session boundary: the barrier with the highest after_step_id
+  // marks where the current session started. Steps above it are current session.
+  const sessionBoundary = useMemo(() => {
+    if (data.barriers.length === 0) return null;
+    return data.barriers.reduce((max, b) =>
+      b.after_step_id > max.after_step_id ? b : max,
+    );
+  }, [data.barriers]);
+
+  const { currentSteps, previousSteps } = useMemo(() => {
+    if (!sessionBoundary) {
+      return { currentSteps: data.steps, previousSteps: [] };
+    }
+    const splitIndex = data.steps.findIndex(
+      (s) => s.step_id <= sessionBoundary.after_step_id,
+    );
+    if (splitIndex === -1) {
+      return { currentSteps: data.steps, previousSteps: [] };
+    }
+    return {
+      currentSteps: data.steps.slice(0, splitIndex),
+      previousSteps: data.steps.slice(splitIndex),
+    };
+  }, [data.steps, sessionBoundary]);
+
+  const hasPreviousSteps = previousSteps.length > 0;
+
+  return (
+    <div className="space-y-2">
+      {currentSteps.length > 0 ? (
+        <StepList
+          steps={currentSteps}
+          barriers={data.barriers}
+          indexOffset={0}
+          onRollback={onRollback}
+        />
+      ) : (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-6 text-center text-sm text-[var(--color-text-secondary)]">
+          No steps in the current session
+        </div>
+      )}
+
+      {hasPreviousSteps && (
+        <div className="pt-2">
+          <button
+            onClick={() => setShowPrevious(!showPrevious)}
+            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-[var(--color-border)] px-4 py-2.5 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+          >
+            {showPrevious ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <Clock size={12} />
+            {showPrevious ? "Hide" : "Show"} {previousSteps.length} step{previousSteps.length !== 1 ? "s" : ""} from previous sessions
+          </button>
+
+          {showPrevious && (
+            <div className="mt-2 space-y-2 border-l-2 border-dashed border-[var(--color-border)] pl-3">
+              <StepList
+                steps={previousSteps}
+                barriers={data.barriers}
+                indexOffset={currentSteps.length}
+                onRollback={onRollback}
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function UndoHistory() {
   const { config } = useSandboxConfig();
   const vmStatus = useVmStore((s) => s.status);
@@ -387,30 +504,10 @@ export default function UndoHistory() {
       )}
 
       {data && data.steps.length > 0 && (
-        <div className="space-y-2">
-          {data.steps.map((step, index) => {
-            // Find barriers that sit after this step (between this step and the next newer one)
-            const barriersAfterStep = data.barriers.filter(
-              (b) => b.after_step_id === step.step_id,
-            );
-
-            return (
-              <div key={step.step_id}>
-                {barriersAfterStep.map((barrier) => (
-                  <BarrierIndicator
-                    key={barrier.barrier_id}
-                    barrier={barrier}
-                  />
-                ))}
-                <StepCard
-                  step={step}
-                  stepIndex={index}
-                  onRollback={handleRollback}
-                />
-              </div>
-            );
-          })}
-        </div>
+        <SessionGroupedSteps
+          data={data}
+          onRollback={handleRollback}
+        />
       )}
 
       {pendingRollback !== null && (
