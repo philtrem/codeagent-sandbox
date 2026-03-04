@@ -37,16 +37,17 @@ pub struct UndoHistoryData {
     pub barriers: Vec<BarrierDetail>,
 }
 
-/// Read undo history directly from disk (no MCP needed).
-#[tauri::command]
-pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
-    let base = Path::new(&undo_dir);
-    let steps_dir = base.join("steps");
-
-    let mut steps = Vec::new();
+/// Read steps from a single interceptor's undo directory (contains `steps/` and `barriers.json`).
+fn read_interceptor_dir(
+    dir: &Path,
+    steps: &mut Vec<UndoStepDetail>,
+    barriers: &mut Vec<BarrierDetail>,
+) -> Result<(), String> {
+    let steps_dir = dir.join("steps");
 
     if steps_dir.exists() && steps_dir.is_dir() {
-        let entries = fs::read_dir(&steps_dir).map_err(|e| format!("Failed to read steps dir: {e}"))?;
+        let entries =
+            fs::read_dir(&steps_dir).map_err(|e| format!("Failed to read steps dir: {e}"))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
@@ -101,12 +102,7 @@ pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
         }
     }
 
-    // Sort by step_id descending (newest first)
-    steps.sort_by(|a, b| b.step_id.cmp(&a.step_id));
-
-    // Read barriers
-    let mut barriers = Vec::new();
-    let barriers_path = base.join("barriers.json");
+    let barriers_path = dir.join("barriers.json");
     if barriers_path.exists() {
         let json = fs::read_to_string(&barriers_path)
             .map_err(|e| format!("Failed to read barriers: {e}"))?;
@@ -131,6 +127,47 @@ pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Read undo history directly from disk (no MCP needed).
+///
+/// The orchestrator creates per-working-directory subdirectories under the
+/// base undo_dir (e.g. `{undo_dir}/0/`, `{undo_dir}/1/`). This function
+/// scans all such subdirectories and merges the results.
+#[tauri::command]
+pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
+    let base = Path::new(&undo_dir);
+
+    let mut steps = Vec::new();
+    let mut barriers = Vec::new();
+
+    if !base.exists() || !base.is_dir() {
+        return Ok(UndoHistoryData { steps, barriers });
+    }
+
+    let entries = fs::read_dir(base).map_err(|e| format!("Failed to read undo dir: {e}"))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
+        let path = entry.path();
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Each per-working-directory subdirectory is named by its index (0, 1, 2, ...)
+        let name = entry.file_name();
+        if name.to_string_lossy().parse::<usize>().is_err() {
+            continue;
+        }
+
+        read_interceptor_dir(&path, &mut steps, &mut barriers)?;
+    }
+
+    // Sort by step_id descending (newest first)
+    steps.sort_by(|a, b| b.step_id.cmp(&a.step_id));
 
     Ok(UndoHistoryData { steps, barriers })
 }

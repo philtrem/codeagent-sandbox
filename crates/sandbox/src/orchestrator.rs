@@ -1104,15 +1104,28 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: e.to_string(),
             })?;
 
-        // Capture preimage before writing
-        if target.exists() {
+        let existed_before = target.exists();
+
+        if existed_before {
             let _ = interceptor.pre_write(&target);
         } else {
-            // Ensure parent directory exists
+            // Collect directories that need to be created so we can track them
+            let mut dirs_to_track = Vec::new();
             if let Some(parent) = target.parent() {
+                let mut ancestor = parent.to_path_buf();
+                while !ancestor.exists() {
+                    dirs_to_track.push(ancestor.clone());
+                    if !ancestor.pop() {
+                        break;
+                    }
+                }
                 std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
                     message: e.to_string(),
                 })?;
+                // Record created directories shallowest-first
+                for dir in dirs_to_track.iter().rev() {
+                    let _ = interceptor.post_mkdir(dir);
+                }
             }
         }
 
@@ -1120,7 +1133,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             message: e.to_string(),
         })?;
 
-        if !target.exists() {
+        if !existed_before {
             let _ = interceptor.post_create(&target);
         }
 

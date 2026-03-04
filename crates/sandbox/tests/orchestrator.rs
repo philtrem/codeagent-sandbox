@@ -315,7 +315,7 @@ fn ao_13_agent_execute_unavailable() {
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
     BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
-    ReadFileArgs, UndoArgs,
+    ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
 #[test]
@@ -785,5 +785,108 @@ fn ba_03_bash_empty_command_rejected() {
         rpc_err.message.contains("empty command"),
         "expected empty command rejection, got: {}",
         rpc_err.message
+    );
+}
+
+// ── MCP write_file undo tracking tests ──
+
+/// write_file creating a new file should produce an undo step that,
+/// when rolled back, removes the file.
+#[test]
+fn mcp_14_write_file_new_file_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let target = working.path().join("new.txt");
+    assert!(!target.exists());
+
+    let result = orchestrator
+        .write_file(WriteFileArgs {
+            path: "new.txt".to_string(),
+            content: "hello".to_string(),
+        })
+        .unwrap();
+    assert_eq!(result["written"], true);
+    assert!(target.exists());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+
+    // Undo should remove the newly created file
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert!(
+        !target.exists(),
+        "newly created file should be removed after undo"
+    );
+}
+
+/// write_file overwriting an existing file should capture the preimage
+/// and restore it on undo.
+#[test]
+fn mcp_15_write_file_overwrite_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("existing.txt"), "original").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    orchestrator
+        .write_file(WriteFileArgs {
+            path: "existing.txt".to_string(),
+            content: "replaced".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("existing.txt")).unwrap(),
+        "replaced"
+    );
+
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("existing.txt")).unwrap(),
+        "original"
+    );
+}
+
+/// write_file to a nested path should create parent directories and
+/// track them for undo.
+#[test]
+fn mcp_16_write_file_creates_parent_dirs_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let nested_dir = working.path().join("a").join("b");
+    let target = nested_dir.join("file.txt");
+    assert!(!working.path().join("a").exists());
+
+    orchestrator
+        .write_file(WriteFileArgs {
+            path: "a/b/file.txt".to_string(),
+            content: "deep".to_string(),
+        })
+        .unwrap();
+    assert!(target.exists());
+
+    // Undo should remove the file and the created directories
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert!(!target.exists(), "file should be removed after undo");
+    assert!(
+        !working.path().join("a").exists(),
+        "created parent directories should be removed after undo"
     );
 }
