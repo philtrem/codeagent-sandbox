@@ -220,14 +220,20 @@ crates/
                                    #   data, parent calls mount then exits); bidirectional copy
                                    #   between socket and port via two threads
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
-    Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
+    Cargo.toml                     #   [[bin]] name = "sandbox", depends on which, toml, dirs
     src/
       main.rs                      #   entry point: parse CLI → branch on --protocol (stdio|mcp)
       lib.rs                       #   module declarations + re-exports
       cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
                                    #   --protocol, --log-level, --qemu-binary, --kernel-path,
                                    #   --initrd-path, --rootfs-path, --memory-mb, --cpus,
-                                   #   --virtiofsd-binary
+                                   #   --virtiofsd-binary, --config-file
+      config.rs                    #   SandboxTomlConfig, load_config(), default_config_dir/file_path;
+                                   #   loads TOML from --config-file or platform default
+      command_classifier.rs        #   CommandClassifierConfig (serde, 9 Vec<String> fields),
+                                   #   CommandClassifier (HashSet-based O(1) lookup), classify(),
+                                   #   sanitize(); configurable allowlists for read-only/write/
+                                   #   destructive commands + git/cargo/npm subcommand lists
       error.rs                     #   AgentError enum (10 variants: SessionNotActive,
                                    #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
                                    #   QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed,
@@ -240,7 +246,8 @@ crates/
                                    #   direct host fs access, safeguard confirm/configure,
                                    #   launch_vm() for QEMU + virtiofsd + control channel setup,
                                    #   agent_execute sends commands through control channel when VM
-                                   #   available, fs_status reports backend/VM info
+                                   #   available, fs_status reports backend/VM info; holds
+                                   #   CommandClassifier for configurable command classification
       step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
       safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
       event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
@@ -259,7 +266,7 @@ crates/
                                    #   virtconsole for 9P transport), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
     tests/
-      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (28 tests)
+      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (33 tests)
   shim/                             # codeagent-shim — VM-side command executor binary
     Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
     src/
@@ -369,8 +376,9 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
     vite-env.d.ts                  #   Vite type declarations
     lib/
       types.ts                     #   TypeScript types mirroring Rust SandboxConfig, VmStatus,
-                                   #   ClaudeConfigInfo, McpServerEntry, UndoStepDetail,
-                                   #   BarrierDetail, UndoHistoryData, defaultConfig()
+                                   #   ClaudeConfigInfo, McpServerEntry, CommandClassifierSection,
+                                   #   UndoStepDetail, BarrierDetail, UndoHistoryData,
+                                   #   defaultConfig(), defaultCommandClassifier()
     hooks/
       useSandboxConfig.ts          #   Zustand store: config load/save with 500ms debounced auto-save,
                                    #   toast on save errors
@@ -383,8 +391,9 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
       Toast.tsx                    #   Global toast container (multi-variant, stacked, fixed bottom-right)
       tabs/
         SandboxConfig.tsx          #   Tab 1: collapsible sections (Working Dir, Resource Limits,
-                                   #   Safeguards, Advanced) with DirPicker (validates via backend),
-                                   #   NumberInput (range display), Toggle, Select
+                                   #   Safeguards, Advanced, Command Classification) with DirPicker
+                                   #   (validates via backend), NumberInput, Toggle, Select,
+                                   #   CommandListEditor (tag-style add/remove for command lists)
         VmManager.tsx              #   Tab 2: status panel, Start/Stop/Restart, memory/CPU sliders,
                                    #   file pickers for QEMU/kernel/initrd, auto-start + persist toggles
         ClaudeIntegration.tsx      #   Tab 3: Claude Desktop + Code panels side-by-side, MCP server
@@ -405,8 +414,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
       main.rs                      #   entry point (calls lib::run)
       lib.rs                       #   plugin registration (incl. updater) + invoke_handler with all cmds
       config.rs                    #   SandboxConfig (9 sections: sandbox, vm, undo, safeguards,
-                                   #   symlinks, external_modifications, gitignore, claude_desktop,
-                                   #   claude_code) — serde Serialize/Deserialize + Default
+                                   #   symlinks, external_modifications, gitignore, claude_code,
+                                   #   command_classifier) — serde Serialize/Deserialize + Default
       paths.rs                     #   config_dir(), config_file_path(), pid_file_path() — platform paths
       commands/
         mod.rs                     #   re-exports: claude, config, system, undo, vm
@@ -515,9 +524,15 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   `getdents64`) have macOS equivalents or `ENOSYS` fallbacks. The fork is excluded from workspace
   members (Unix-only) but available via `[patch.crates-io]` — only compiled when a Unix dependency
   chain requires it.
+- **Command classification**: The `CommandClassifier` classifies shell commands into ReadOnly,
+  Write, or Destructive categories. Allowlists (read-only, write, destructive commands + git/
+  cargo/npm subcommand lists) are configurable via `CommandClassifierConfig` loaded from
+  `codeagent.toml`. Sanitization checks (fork bombs, `sudo`, device access, shell expansion
+  attacks) are hardcoded and not user-configurable — these are security-critical.
 - **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
   serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Unix-only** (virtiofs
+  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd), toml (config loading),
+  dirs (platform config directory). **Unix-only** (virtiofs
   backend): virtiofsd (Apache-2.0/BSD-3, via local fork), vhost-user-backend, vhost, vm-memory,
   log; vmm-sys-util (via local fork with macOS support). **Dev-only**: proptest (model-based
   testing), criterion (performance benchmarks, with html_reports).
@@ -783,8 +798,13 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - MCP `glob`: pattern matching via `glob` crate, results sorted by mtime (newest first)
   - MCP `grep`: regex search via `regex` + `walkdir` crates, 3 output modes (files_with_matches, content, count)
   - `main.rs`: `--protocol stdio` (default) runs StdioServer; `--protocol mcp` runs McpServer on stdin/stdout
+  - MCP Bash tool: command sanitization (fork bombs, sudo, device access) + configurable
+    classification (read-only/write/destructive) via `CommandClassifier` with `HashSet` lookup
+  - `config.rs`: `SandboxTomlConfig` with `load_config()` — loads from `--config-file` arg
+    or platform default (`{config_dir}/CodeAgent/codeagent.toml`), falls back to built-in defaults
   - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
-    integration tests AO-01..AO-15 + MCP-01..MCP-13 (28 tests) = 43 total tests
+    command classifier config tests (10 tests) + TOML config loading tests (5 tests) +
+    integration tests AO-01..AO-15 + MCP-01..MCP-13 (33 tests) = 137 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -935,7 +955,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~554 on Windows, ~557 on Linux; 22 E2E+shim + 16 FB ignored)
+cargo test --workspace           # run all tests (~687 on Windows; 24 E2E+shim+FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -953,8 +973,8 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (43 tests)
-cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (28 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config tests (137 tests)
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (33 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
 cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)
