@@ -34,8 +34,8 @@ pub struct TerminalOutput {
 /// Shared state holding the sandbox child process and its I/O handles.
 pub struct VmState {
     pub process: Mutex<Option<Child>>,
-    pub stdin: Mutex<Option<std::process::ChildStdin>>,
-    pub stdout: Mutex<Option<BufReader<std::process::ChildStdout>>>,
+    pub stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    pub stdout: Arc<Mutex<Option<BufReader<std::process::ChildStdout>>>>,
     pub debug_log: Arc<Mutex<Vec<DebugLogLine>>>,
     pub stderr_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -44,8 +44,8 @@ impl Default for VmState {
     fn default() -> Self {
         Self {
             process: Mutex::new(None),
-            stdin: Mutex::new(None),
-            stdout: Mutex::new(None),
+            stdin: Arc::new(Mutex::new(None)),
+            stdout: Arc::new(Mutex::new(None)),
             debug_log: Arc::new(Mutex::new(Vec::new())),
             stderr_handle: Mutex::new(None),
         }
@@ -527,60 +527,69 @@ pub fn clear_debug_log(state: State<'_, VmState>) -> Result<(), String> {
 }
 
 /// Execute a shell command in the VM via the MCP execute_command tool.
+///
+/// This is async so it runs on a background thread instead of blocking the
+/// main (UI) thread while waiting for the sandbox to respond.
 #[tauri::command]
-pub fn execute_terminal_command(
+pub async fn execute_terminal_command(
     command: String,
     timeout: Option<u32>,
     state: State<'_, VmState>,
 ) -> Result<TerminalOutput, String> {
-    let request_id = TERMINAL_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": format!("term-{request_id}"),
-        "method": "tools/call",
-        "params": {
-            "name": "execute_command",
-            "arguments": {
-                "command": command,
-                "timeout": timeout.unwrap_or(120),
+    let stdin = Arc::clone(&state.stdin);
+    let stdout = Arc::clone(&state.stdout);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let request_id = TERMINAL_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": format!("term-{request_id}"),
+            "method": "tools/call",
+            "params": {
+                "name": "execute_command",
+                "arguments": {
+                    "command": command,
+                    "timeout": timeout.unwrap_or(120),
+                }
             }
+        });
+
+        let request_str = request.to_string();
+
+        let mut stdin_guard = stdin.lock().map_err(|e| e.to_string())?;
+        let stdin_handle = stdin_guard
+            .as_mut()
+            .ok_or_else(|| "Sandbox process is not running".to_string())?;
+
+        stdin_handle
+            .write_all(request_str.as_bytes())
+            .map_err(|e| format!("Failed to write to sandbox stdin: {e}"))?;
+        stdin_handle
+            .write_all(b"\n")
+            .map_err(|e| format!("Failed to write newline: {e}"))?;
+        stdin_handle
+            .flush()
+            .map_err(|e| format!("Failed to flush stdin: {e}"))?;
+        drop(stdin_guard);
+
+        let mut stdout_guard = stdout.lock().map_err(|e| e.to_string())?;
+        let stdout_handle = stdout_guard
+            .as_mut()
+            .ok_or_else(|| "Sandbox process stdout unavailable".to_string())?;
+
+        let mut line = String::new();
+        stdout_handle
+            .read_line(&mut line)
+            .map_err(|e| format!("Failed to read from sandbox stdout: {e}"))?;
+
+        if line.is_empty() {
+            return Err("Sandbox process closed stdout".into());
         }
-    });
 
-    let request_str = request.to_string();
-
-    // Reuse the same stdin/stdout logic as send_mcp_request
-    let mut stdin_guard = state.stdin.lock().map_err(|e| e.to_string())?;
-    let stdin = stdin_guard
-        .as_mut()
-        .ok_or_else(|| "Sandbox process is not running".to_string())?;
-
-    stdin
-        .write_all(request_str.as_bytes())
-        .map_err(|e| format!("Failed to write to sandbox stdin: {e}"))?;
-    stdin
-        .write_all(b"\n")
-        .map_err(|e| format!("Failed to write newline: {e}"))?;
-    stdin
-        .flush()
-        .map_err(|e| format!("Failed to flush stdin: {e}"))?;
-    drop(stdin_guard);
-
-    let mut stdout_guard = state.stdout.lock().map_err(|e| e.to_string())?;
-    let stdout = stdout_guard
-        .as_mut()
-        .ok_or_else(|| "Sandbox process stdout unavailable".to_string())?;
-
-    let mut line = String::new();
-    stdout
-        .read_line(&mut line)
-        .map_err(|e| format!("Failed to read from sandbox stdout: {e}"))?;
-
-    if line.is_empty() {
-        return Err("Sandbox process closed stdout".into());
-    }
-
-    parse_terminal_response(&line)
+        parse_terminal_response(&line)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Parse a JSON-RPC response from execute_command into a TerminalOutput.
