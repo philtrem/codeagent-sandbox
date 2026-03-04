@@ -61,6 +61,7 @@ ARG ARCH=x86_64
 RUN apk add --no-cache \
     linux-virt \
     busybox-static \
+    bash \
     cpio \
     findutils \
     kmod
@@ -80,6 +81,19 @@ RUN mkdir -p /initramfs/bin \
 # Install busybox (static binary + symlinks for all utilities)
 RUN cp /bin/busybox.static /initramfs/bin/busybox \
     && chroot /initramfs /bin/busybox --install -s
+
+# Install real bash — used by the shim for command execution.
+# Alpine installs bash to /usr/bin/bash. Copy the binary and all shared
+# library dependencies (musl libc, libreadline, libncursesw) into the
+# initramfs so bash can run in the minimal guest environment.
+RUN BASH_BIN=$(command -v bash) \
+    && cp "$BASH_BIN" /initramfs/bin/bash \
+    && ldd "$BASH_BIN" | awk '/=>/{print $3}' | while read lib; do \
+           mkdir -p "/initramfs$(dirname "$lib")"; \
+           cp "$lib" "/initramfs$lib"; \
+       done \
+    && mkdir -p /initramfs/lib \
+    && cp /lib/ld-musl-*.so.1 /initramfs/lib/ 2>/dev/null || true
 
 # Copy the shim and p9proxy binaries from the builder stage
 COPY --from=builder /build/target/release/shim /initramfs/bin/shim

@@ -45,7 +45,7 @@ pub fn spawn_command(
     message_sender: mpsc::UnboundedSender<VmMessage>,
     buffer_config: OutputBufferConfig,
 ) -> Result<CommandHandle, ShimError> {
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command);
 
     if let Some(dir) = cwd {
