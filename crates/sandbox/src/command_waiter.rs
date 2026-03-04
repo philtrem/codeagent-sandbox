@@ -15,9 +15,9 @@ pub struct CommandResult {
 /// synchronous callers to block until a command completes.
 ///
 /// The event bridge task calls `append_output` / `mark_completed` as
-/// events arrive from the VM control channel. The MCP `execute_command`
-/// handler calls `wait_for_completion` to block until the command
-/// finishes (or times out).
+/// events arrive from the VM control channel. The MCP `Bash` handler
+/// calls `wait_for_completion` to block until the command finishes
+/// (or times out).
 pub struct CommandWaiter {
     results: Mutex<HashMap<u64, CommandResult>>,
     notify: Condvar,

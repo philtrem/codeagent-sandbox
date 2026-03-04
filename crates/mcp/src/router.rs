@@ -5,7 +5,7 @@ use crate::error::McpError;
 use crate::parser::extract_missing_field;
 use crate::path_validation::validate_path;
 use crate::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, JsonRpcRequest,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, JsonRpcRequest,
     JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams, ToolCallResult,
     ToolDefinition, UndoArgs, WriteFileArgs,
 };
@@ -16,7 +16,7 @@ use crate::protocol::{
 /// or an `McpError`. For contract tests, a stub implementation provides
 /// canned responses. Real implementations are added in later TDD steps.
 pub trait McpHandler: Send + Sync {
-    fn execute_command(&self, args: ExecuteCommandArgs) -> Result<serde_json::Value, McpError>;
+    fn bash(&self, args: BashArgs) -> Result<serde_json::Value, McpError>;
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError>;
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError>;
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError>;
@@ -47,14 +47,14 @@ fn server_info(instructions: &str) -> serde_json::Value {
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "execute_command".to_string(),
-            description: "Run a terminal command inside the VM".to_string(),
+            name: "Bash".to_string(),
+            description: "Executes a bash command in the sandbox VM. Working directory persists between commands; shell state does not.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Command to execute" },
-                    "env": { "type": "object", "description": "Environment variables", "additionalProperties": { "type": "string" } },
-                    "cwd": { "type": "string", "description": "Working directory for the command" }
+                    "command": { "type": "string", "description": "The command to execute" },
+                    "description": { "type": "string", "description": "Clear, concise description of what this command does" },
+                    "timeout": { "type": "number", "description": "Optional timeout in milliseconds (max 600000)" }
                 },
                 "required": ["command"]
             }),
@@ -300,9 +300,9 @@ impl McpRouter {
             })?;
 
         match tool_params.name.as_str() {
-            "execute_command" => {
-                let args = parse_tool_args::<ExecuteCommandArgs>(tool_params.arguments)?;
-                let value = self.handler.execute_command(args)?;
+            "Bash" => {
+                let args = parse_tool_args::<BashArgs>(tool_params.arguments)?;
+                let value = self.handler.bash(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "read_file" => {

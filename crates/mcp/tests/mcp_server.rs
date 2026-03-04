@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use codeagent_mcp::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
     JsonRpcNotification, ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
@@ -19,7 +19,7 @@ use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
 struct StubMcpHandler;
 
 impl McpHandler for StubMcpHandler {
-    fn execute_command(&self, args: ExecuteCommandArgs) -> Result<Value, McpError> {
+    fn bash(&self, args: BashArgs) -> Result<Value, McpError> {
         Ok(json!({
             "exit_code": 0,
             "stdout": format!("executed: {}", args.command),
@@ -283,7 +283,7 @@ async fn mc01_tools_list_returns_seven_tools() {
     assert_eq!(tools.len(), 11);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"execute_command"));
+    assert!(names.contains(&"Bash"));
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
     assert!(names.contains(&"list_directory"));
@@ -294,11 +294,11 @@ async fn mc01_tools_list_returns_seven_tools() {
 }
 
 // ===========================================================================
-// MC-02: execute_command
+// MC-02: Bash tool
 // ===========================================================================
 
 #[tokio::test]
-async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
+async fn mc02_bash_returns_exit_code_stdout_stderr() {
     let mut harness = McpTestHarness::new();
     harness.initialize().await;
 
@@ -307,7 +307,7 @@ async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
             10,
             "tools/call",
             json!({
-                "name": "execute_command",
+                "name": "Bash",
                 "arguments": { "command": "echo hello" }
             }),
         )
@@ -322,7 +322,7 @@ async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
 }
 
 #[tokio::test]
-async fn mc02_execute_command_missing_command_returns_invalid_params() {
+async fn mc02_bash_missing_command_returns_invalid_params() {
     let mut harness = McpTestHarness::new();
     harness.initialize().await;
 
@@ -331,7 +331,7 @@ async fn mc02_execute_command_missing_command_returns_invalid_params() {
             11,
             "tools/call",
             json!({
-                "name": "execute_command",
+                "name": "Bash",
                 "arguments": {}
             }),
         )
@@ -483,7 +483,7 @@ impl UndoMcpHandler {
 }
 
 impl McpHandler for UndoMcpHandler {
-    fn execute_command(&self, _args: ExecuteCommandArgs) -> Result<Value, McpError> {
+    fn bash(&self, _args: BashArgs) -> Result<Value, McpError> {
         Ok(json!({ "exit_code": 0, "stdout": "", "stderr": "" }))
     }
 

@@ -1,4 +1,4 @@
-//! Isolated component tests for the MCP `execute_command` pipeline.
+//! Isolated component tests for the MCP `Bash` tool pipeline.
 //!
 //! These tests verify each stage of the pipeline that carries a command from
 //! the MCP handler through to completion, targeting the `rm` hang bug where
@@ -143,7 +143,7 @@ async fn cp_04_event_bridge_forwards_completion() {
         })
         .unwrap();
 
-    // Block on a separate thread (mimicking execute_command's block_in_place).
+    // Block on a separate thread (mimicking Bash tool's block_in_place).
     let waiter_for_blocking = waiter.clone();
     let result = tokio::task::spawn_blocking(move || {
         waiter_for_blocking.wait_for_completion(42, Duration::from_secs(5))
@@ -293,7 +293,7 @@ async fn cp_06_quiescence_inflight_max_timeout() {
 // ===========================================================================
 
 /// Wire together ControlChannelHandler + event bridge + CommandWaiter and
-/// simulate VM messages, verifying the complete execute_command pipeline.
+/// simulate VM messages, verifying the complete Bash tool pipeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cp_07_full_pipeline_simulation() {
     let waiter = CommandWaiter::new();

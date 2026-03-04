@@ -56,7 +56,7 @@ pub struct Orchestrator {
     /// Populated when the filesystem backend connects and safeguards are enabled.
     #[allow(dead_code)]
     safeguard_receiver: Mutex<Option<mpsc::UnboundedReceiver<PendingSafeguard>>>,
-    /// Shared with the event bridge so MCP `execute_command` can block
+    /// Shared with the event bridge so MCP `Bash` tool can block
     /// until a VM command completes and collect its output.
     command_waiter: Arc<CommandWaiter>,
 }
@@ -932,14 +932,14 @@ impl RequestHandler for Orchestrator {
 // ---------------------------------------------------------------------------
 
 use codeagent_mcp::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
     ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
 impl codeagent_mcp::McpHandler for Orchestrator {
-    fn execute_command(
+    fn bash(
         &self,
-        args: ExecuteCommandArgs,
+        args: BashArgs,
     ) -> Result<serde_json::Value, McpError> {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
@@ -977,8 +977,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 control_handler.send_exec(
                     command_id,
                     args.command.clone(),
-                    args.env,
-                    args.cwd,
+                    None,
+                    None,
                 ),
             )
         });
@@ -998,13 +998,12 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // Use block_in_place so tokio can spawn a replacement worker thread
         // while this one is blocked on the Condvar — otherwise async tasks
         // (control reader, event bridge, P9 server) may starve.
-        let timeout = std::time::Duration::from_secs(
-            args.timeout.unwrap_or(120) as u64,
-        );
+        let timeout_ms = args.timeout.unwrap_or(120_000).min(600_000);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
         eprintln!(
-            "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"execute_command: waiting for command {} (timeout {}s)\"}}",
+            "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"bash: waiting for command {} (timeout {}ms)\"}}",
             command_id,
-            timeout.as_secs()
+            timeout_ms
         );
         let result = tokio::task::block_in_place(|| {
             self.command_waiter.wait_for_completion(command_id, timeout)
@@ -1014,7 +1013,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             Some(r) if r.exit_code.is_some() => {
                 let exit_code = r.exit_code.unwrap();
                 eprintln!(
-                    "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"execute_command: command {} completed with exit code {}\"}}",
+                    "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"bash: command {} completed with exit code {}\"}}",
                     command_id, exit_code
                 );
                 let mut output = r.stdout;
@@ -1032,7 +1031,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             }
             Some(r) => {
                 eprintln!(
-                    "{{\"level\":\"warn\",\"component\":\"mcp\",\"message\":\"execute_command: command {} timed out\"}}",
+                    "{{\"level\":\"warn\",\"component\":\"mcp\",\"message\":\"bash: command {} timed out\"}}",
                     command_id
                 );
                 let mut output = r.stdout;

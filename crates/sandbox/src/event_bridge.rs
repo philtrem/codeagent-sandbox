@@ -46,7 +46,7 @@ pub fn translate_handler_event(event: &HandlerEvent) -> Option<Event> {
 }
 
 /// Forward a `HandlerEvent` to the `CommandWaiter` so that synchronous
-/// callers (MCP `execute_command`) can collect output and wait for completion.
+/// callers (MCP `Bash` tool) can collect output and wait for completion.
 fn forward_to_command_waiter(event: &HandlerEvent, waiter: &CommandWaiter) {
     match event {
         HandlerEvent::Output {

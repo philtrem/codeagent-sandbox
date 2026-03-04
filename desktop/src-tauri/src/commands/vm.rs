@@ -526,7 +526,7 @@ pub fn clear_debug_log(state: State<'_, VmState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Execute a shell command in the VM via the MCP execute_command tool.
+/// Execute a shell command in the VM via the MCP Bash tool.
 ///
 /// This is async so it runs on a background thread instead of blocking the
 /// main (UI) thread while waiting for the sandbox to respond.
@@ -541,15 +541,16 @@ pub async fn execute_terminal_command(
 
     tauri::async_runtime::spawn_blocking(move || {
         let request_id = TERMINAL_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let timeout_ms = timeout.unwrap_or(120) as u64 * 1000;
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": format!("term-{request_id}"),
             "method": "tools/call",
             "params": {
-                "name": "execute_command",
+                "name": "Bash",
                 "arguments": {
                     "command": command,
-                    "timeout": timeout.unwrap_or(120),
+                    "timeout": timeout_ms,
                 }
             }
         });
@@ -592,7 +593,7 @@ pub async fn execute_terminal_command(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Parse a JSON-RPC response from execute_command into a TerminalOutput.
+/// Parse a JSON-RPC response from the Bash tool into a TerminalOutput.
 fn parse_terminal_response(response: &str) -> Result<TerminalOutput, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(response).map_err(|e| format!("Invalid JSON response: {e}"))?;
@@ -619,7 +620,7 @@ fn parse_terminal_response(response: &str) -> Result<TerminalOutput, String> {
         .and_then(|t| t.as_str())
         .unwrap_or("");
 
-    // The execute_command tool returns JSON with command_id, exit_code, output
+    // The Bash tool returns JSON with command_id, exit_code, output
     if let Ok(result) = serde_json::from_str::<serde_json::Value>(text) {
         let exit_code = result.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
         let output = result
