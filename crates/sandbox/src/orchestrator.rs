@@ -167,6 +167,19 @@ impl Orchestrator {
                 });
             }
 
+            // Place a barrier if previous session steps exist, preventing accidental
+            // rollback across session boundaries where untracked changes may have occurred.
+            if !interceptor.is_undo_disabled() && !interceptor.completed_steps().is_empty() {
+                if let Ok(Some(barrier)) =
+                    interceptor.notify_external_modification(vec![working_dir.clone()])
+                {
+                    let _ = self.event_sender.send(Event::ExternalModification {
+                        affected_paths: vec![working_dir.to_string_lossy().into_owned()],
+                        barrier_id: Some(barrier.barrier_id),
+                    });
+                }
+            }
+
             interceptors.push(Arc::new(interceptor));
             undo_dirs.push(undo_dir);
         }

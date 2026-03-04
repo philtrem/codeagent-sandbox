@@ -890,3 +890,86 @@ fn mcp_16_write_file_creates_parent_dirs_undo() {
         "created parent directories should be removed after undo"
     );
 }
+
+// -----------------------------------------------------------------------
+// AO-18: new session places barrier when previous steps exist
+// -----------------------------------------------------------------------
+#[test]
+fn ao_18_session_boundary_barrier() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+    let path_str = working.path().display().to_string();
+
+    // Session 1: write a file to create an undo step
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = make_args(working.path(), undo.path());
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
+        let _ = orch.session_start(make_start_payload(&path_str));
+
+        orch.write_file(WriteFileArgs {
+            path: "file.txt".to_string(),
+            content: "hello".to_string(),
+        })
+        .unwrap();
+        assert!(working.path().join("file.txt").exists());
+
+        let _ = orch.session_stop();
+    }
+
+    // Session 2: reuse same working + undo dirs
+    {
+        let (event_sender, mut rx) = mpsc::unbounded_channel();
+        let args = make_args(working.path(), undo.path());
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
+        let _ = orch.session_start(make_start_payload(&path_str));
+
+        // Should have received an ExternalModification event with a barrier
+        let mut got_barrier_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::ExternalModification {
+                barrier_id,
+                affected_paths: _,
+            } = event
+            {
+                assert!(barrier_id.is_some(), "barrier_id should be present");
+                got_barrier_event = true;
+            }
+        }
+        assert!(got_barrier_event, "expected ExternalModification event on session start");
+
+        // Rollback without force should fail (barrier blocks it)
+        let result = orch.undo(UndoArgs {
+            count: 1,
+            force: false,
+        });
+        assert!(result.is_err(), "rollback should be blocked by session boundary barrier");
+
+        // Rollback with force should succeed
+        let result = orch.undo(UndoArgs {
+            count: 1,
+            force: true,
+        });
+        assert!(result.is_ok(), "forced rollback should cross the barrier");
+        assert!(
+            !working.path().join("file.txt").exists(),
+            "file should be removed after forced rollback"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// AO-19: new session with no previous steps does NOT place a barrier
+// -----------------------------------------------------------------------
+#[test]
+fn ao_19_no_barrier_on_fresh_session() {
+    let (orchestrator, mut rx, working, _undo) = setup();
+    let _ = orchestrator.session_start(make_start_payload(&working.path().display().to_string()));
+
+    // Drain events — none should be ExternalModification
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, Event::ExternalModification { .. }) {
+            panic!("should not emit ExternalModification on a fresh session with no steps");
+        }
+    }
+}
