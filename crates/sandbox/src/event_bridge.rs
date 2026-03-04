@@ -58,7 +58,6 @@ fn forward_to_command_waiter(event: &HandlerEvent, waiter: &CommandWaiter) {
                 OutputStream::Stdout => "stdout",
                 OutputStream::Stderr => "stderr",
             };
-            eprintln!("[sandbox] event: output step_id={step_id} stream={stream_name} len={}", data.len());
             waiter.append_output(*step_id as u64, stream_name, data);
         }
         HandlerEvent::StepCompleted {
@@ -66,7 +65,6 @@ fn forward_to_command_waiter(event: &HandlerEvent, waiter: &CommandWaiter) {
             exit_code,
             ..
         } => {
-            eprintln!("[sandbox] event: step_completed step_id={step_id} exit_code={exit_code}");
             waiter.mark_completed(*step_id as u64, *exit_code);
         }
         _ => {}

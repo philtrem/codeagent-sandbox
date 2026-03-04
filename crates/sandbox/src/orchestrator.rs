@@ -965,8 +965,6 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             (writer, handler, id)
         };
 
-        eprintln!("[sandbox] execute_command id={command_id} command={:?}", args.command);
-
         // Register with the waiter before sending so early events are captured
         self.command_waiter.register(command_id);
 
@@ -990,8 +988,6 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: format!("failed to serialize exec message: {error}"),
             })?;
 
-        eprintln!("[sandbox] sending to control channel: {json_str}");
-
         control_writer
             .send(json_str)
             .map_err(|_| McpError::InternalError {
@@ -1002,12 +998,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let timeout = std::time::Duration::from_secs(
             args.timeout.unwrap_or(120) as u64,
         );
-        eprintln!("[sandbox] waiting for command {command_id} (timeout={}s)", timeout.as_secs());
         let result = self.command_waiter.wait_for_completion(command_id, timeout);
-
-        eprintln!("[sandbox] command {command_id} result: completed={}, exit_code={:?}",
-            result.as_ref().map_or(false, |r| r.exit_code.is_some()),
-            result.as_ref().and_then(|r| r.exit_code));
 
         match result {
             Some(r) if r.exit_code.is_some() => {
