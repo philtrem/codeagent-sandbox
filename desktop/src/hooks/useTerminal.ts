@@ -71,6 +71,77 @@ export function getSuggestions(prefix: string, commandHistory: string[], limit =
   return results;
 }
 
+/** Commands that take directory arguments (use `compgen -d` instead of `-f`). */
+const DIRECTORY_COMMANDS = new Set(["cd", "mkdir", "rmdir", "ls", "pushd"]);
+
+/**
+ * Parse the input to extract the argument being typed (the last whitespace-delimited token
+ * after the command name). Returns null if no argument is being typed yet.
+ */
+function parseArgumentPrefix(input: string): { command: string; argPrefix: string } | null {
+  const spaceIndex = input.indexOf(" ");
+  if (spaceIndex === -1) return null;
+
+  const command = input.slice(0, spaceIndex);
+  const rest = input.slice(spaceIndex + 1);
+
+  // Find the last "word" being typed (handle multiple args — only complete the last one)
+  const lastSpaceIndex = rest.lastIndexOf(" ");
+  const argPrefix = lastSpaceIndex === -1 ? rest : rest.slice(lastSpaceIndex + 1);
+
+  return { command, argPrefix };
+}
+
+/** Directory listing cache to avoid repeated VM calls for the same directory. */
+const pathCache = new Map<string, { entries: string[]; timestamp: number }>();
+const PATH_CACHE_TTL_MS = 5000;
+
+/**
+ * Fetch path completions from the VM using `compgen`.
+ *
+ * Calls `execute_terminal_command` directly (bypassing the terminal store)
+ * so the command doesn't appear in terminal output.
+ */
+export async function getPathSuggestions(
+  input: string,
+  cwd: string,
+  limit = 6,
+): Promise<string[]> {
+  const parsed = parseArgumentPrefix(input);
+  if (!parsed || parsed.argPrefix.length === 0) return [];
+
+  const { command, argPrefix } = parsed;
+  const useDirectories = DIRECTORY_COMMANDS.has(command);
+  const compgenFlag = useDirectories ? "-d" : "-f";
+
+  // Cache key includes directory context and compgen mode
+  const cacheKey = `${cwd}:${compgenFlag}:${argPrefix}`;
+  const cached = pathCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < PATH_CACHE_TTL_MS) {
+    return cached.entries.slice(0, limit);
+  }
+
+  try {
+    const shellCmd = `cd ${shellQuote(cwd)} && compgen ${compgenFlag} -- ${shellQuote(argPrefix)}`;
+    const result = await invoke<TerminalOutput>("execute_terminal_command", {
+      command: shellCmd,
+      timeout: 3,
+    });
+
+    if (result.status !== "completed" || result.exit_code !== 0) return [];
+
+    const entries = result.output
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0);
+
+    pathCache.set(cacheKey, { entries, timestamp: Date.now() });
+    return entries.slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
 /** Check whether the command is a bare `cd` (possibly with a path argument). */
 function isCdCommand(command: string): boolean {
   const trimmed = command.trim();

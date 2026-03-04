@@ -11,7 +11,7 @@ import {
   Clock,
   Bug,
 } from "lucide-react";
-import { useTerminalStore, getSuggestions, type TerminalEntry } from "../../hooks/useTerminal";
+import { useTerminalStore, getSuggestions, getPathSuggestions, type TerminalEntry } from "../../hooks/useTerminal";
 import {
   useDebugConsoleStore,
   startDebugConsoleListener,
@@ -66,6 +66,11 @@ function TerminalPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
   const prevIsRunning = useRef(isRunning);
 
+  // Auto-focus input on mount (tab switch remounts the component)
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
@@ -80,17 +85,38 @@ function TerminalPanel() {
     prevIsRunning.current = isRunning;
   }, [isRunning]);
 
-  // Derive suggestions from input
+  // Derive suggestions from input: command suggestions (sync) + path suggestions (async, debounced)
   useEffect(() => {
     if (!input) {
       setSuggestions([]);
       setSelectedSuggestionIndex(-1);
       return;
     }
-    const { commandHistory } = useTerminalStore.getState();
-    const matches = getSuggestions(input, commandHistory, 6);
-    setSuggestions(matches);
-    setSelectedSuggestionIndex(-1);
+
+    const hasSpace = input.includes(" ");
+
+    if (!hasSpace) {
+      // Typing a command name — use synchronous command suggestions
+      const { commandHistory } = useTerminalStore.getState();
+      const matches = getSuggestions(input, commandHistory, 6);
+      setSuggestions(matches);
+      setSelectedSuggestionIndex(-1);
+      return;
+    }
+
+    // Typing an argument — fetch path suggestions from the VM with debounce
+    const timer = setTimeout(() => {
+      const currentCwd = useTerminalStore.getState().cwd;
+      getPathSuggestions(input, currentCwd, 6).then((paths) => {
+        // Only update if input hasn't changed while we were fetching
+        if (inputRef.current?.value === input) {
+          setSuggestions(paths);
+          setSelectedSuggestionIndex(-1);
+        }
+      });
+    }, 200);
+
+    return () => clearTimeout(timer);
   }, [input]);
 
   const dismissSuggestions = useCallback(() => {
@@ -99,7 +125,17 @@ function TerminalPanel() {
   }, []);
 
   const acceptSuggestion = useCallback((suggestion: string) => {
-    setInput(suggestion);
+    const currentInput = inputRef.current?.value ?? "";
+    const hasSpace = currentInput.includes(" ");
+
+    if (!hasSpace) {
+      // Command suggestion — replace entire input
+      setInput(suggestion);
+    } else {
+      // Path suggestion — replace only the last argument
+      const lastSpaceIndex = currentInput.lastIndexOf(" ");
+      setInput(currentInput.slice(0, lastSpaceIndex + 1) + suggestion);
+    }
     dismissSuggestions();
     inputRef.current?.focus();
   }, [dismissSuggestions]);
