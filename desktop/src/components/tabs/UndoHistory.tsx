@@ -69,16 +69,21 @@ function StepCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const rollbackCount = stepIndex + 1;
+  const hasFiles = step.files.length > 0;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
       <div className="flex items-center gap-3 px-4 py-3">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-        >
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
+        {hasFiles ? (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        ) : (
+          <span className="w-[14px]" />
+        )}
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -279,15 +284,16 @@ function ClearHistoryDialog({
   );
 }
 
-function StepList({
+/** Renders steps using pre-computed original indices for correct rollback counts. */
+function StepListWithIndices({
   steps,
+  originalIndices,
   barriers,
-  indexOffset,
   onRollback,
 }: {
   steps: UndoStepDetail[];
+  originalIndices: number[];
   barriers: BarrierDetail[];
-  indexOffset: number;
   onRollback: (stepsToRollBack: number) => void;
 }) {
   return (
@@ -296,7 +302,6 @@ function StepList({
         const barriersAfterStep = barriers.filter(
           (b) => b.after_step_id === step.step_id,
         );
-        const globalIndex = indexOffset + localIndex;
         return (
           <div key={step.step_id}>
             {barriersAfterStep.map((barrier) => (
@@ -307,7 +312,7 @@ function StepList({
             ))}
             <StepCard
               step={step}
-              stepIndex={globalIndex}
+              stepIndex={originalIndices[localIndex]}
               onRollback={onRollback}
             />
           </div>
@@ -326,6 +331,22 @@ function SessionGroupedSteps({
 }) {
   const [showPrevious, setShowPrevious] = useState(false);
 
+  // Filter out empty ambient steps before any grouping.
+  // We filter the raw steps but keep the original indices for rollback counting,
+  // so we build an index map from filtered position → original position.
+  const { filteredSteps, originalIndices } = useMemo(() => {
+    const filtered: UndoStepDetail[] = [];
+    const indices: number[] = [];
+    for (let i = 0; i < data.steps.length; i++) {
+      const s = data.steps[i];
+      if (s.file_count > 0 || s.command !== null) {
+        filtered.push(s);
+        indices.push(i);
+      }
+    }
+    return { filteredSteps: filtered, originalIndices: indices };
+  }, [data.steps]);
+
   // Find the session boundary: the barrier with the highest after_step_id
   // marks where the current session started. Steps above it are current session.
   const sessionBoundary = useMemo(() => {
@@ -335,31 +356,44 @@ function SessionGroupedSteps({
     );
   }, [data.barriers]);
 
-  const { currentSteps, previousSteps } = useMemo(() => {
+  const { currentSteps, previousSteps, currentOriginalIndices, previousOriginalIndices } = useMemo(() => {
     if (!sessionBoundary) {
-      return { currentSteps: data.steps, previousSteps: [] };
+      return {
+        currentSteps: filteredSteps,
+        previousSteps: [] as UndoStepDetail[],
+        currentOriginalIndices: originalIndices,
+        previousOriginalIndices: [] as number[],
+      };
     }
-    const splitIndex = data.steps.findIndex(
+    const splitIndex = filteredSteps.findIndex(
       (s) => s.step_id <= sessionBoundary.after_step_id,
     );
     if (splitIndex === -1) {
-      return { currentSteps: data.steps, previousSteps: [] };
+      return {
+        currentSteps: filteredSteps,
+        previousSteps: [] as UndoStepDetail[],
+        currentOriginalIndices: originalIndices,
+        previousOriginalIndices: [] as number[],
+      };
     }
     return {
-      currentSteps: data.steps.slice(0, splitIndex),
-      previousSteps: data.steps.slice(splitIndex),
+      currentSteps: filteredSteps.slice(0, splitIndex),
+      previousSteps: filteredSteps.slice(splitIndex),
+      currentOriginalIndices: originalIndices.slice(0, splitIndex),
+      previousOriginalIndices: originalIndices.slice(splitIndex),
     };
-  }, [data.steps, sessionBoundary]);
+  }, [filteredSteps, originalIndices, sessionBoundary]);
 
   const hasPreviousSteps = previousSteps.length > 0;
+  const hiddenCount = data.steps.length - filteredSteps.length;
 
   return (
     <div className="space-y-2">
       {currentSteps.length > 0 ? (
-        <StepList
+        <StepListWithIndices
           steps={currentSteps}
+          originalIndices={currentOriginalIndices}
           barriers={data.barriers}
-          indexOffset={0}
           onRollback={onRollback}
         />
       ) : (
@@ -381,14 +415,20 @@ function SessionGroupedSteps({
 
           {showPrevious && (
             <div className="mt-2 space-y-2 border-l-2 border-dashed border-[var(--color-border)] pl-3">
-              <StepList
+              <StepListWithIndices
                 steps={previousSteps}
+                originalIndices={previousOriginalIndices}
                 barriers={data.barriers}
-                indexOffset={currentSteps.length}
                 onRollback={onRollback}
               />
             </div>
           )}
+        </div>
+      )}
+
+      {hiddenCount > 0 && (
+        <div className="text-center text-xs text-[var(--color-text-secondary)]">
+          {hiddenCount} empty ambient step{hiddenCount !== 1 ? "s" : ""} hidden
         </div>
       )}
     </div>
