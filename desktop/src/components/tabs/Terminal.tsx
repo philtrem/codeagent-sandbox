@@ -11,7 +11,7 @@ import {
   Clock,
   Bug,
 } from "lucide-react";
-import { useTerminalStore, type TerminalEntry } from "../../hooks/useTerminal";
+import { useTerminalStore, getSuggestions, type TerminalEntry } from "../../hooks/useTerminal";
 import {
   useDebugConsoleStore,
   startDebugConsoleListener,
@@ -60,8 +60,11 @@ function TerminalPanel() {
   const vmState = useVmStore((s) => s.status.state);
   const sandboxMode = useVmStore((s) => s.sandboxMode);
   const [input, setInput] = useState("");
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
   const outputRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const prevIsRunning = useRef(isRunning);
 
   useEffect(() => {
     if (outputRef.current) {
@@ -69,23 +72,91 @@ function TerminalPanel() {
     }
   }, [entries]);
 
+  // Refocus input when a command finishes running
+  useEffect(() => {
+    if (prevIsRunning.current && !isRunning) {
+      inputRef.current?.focus();
+    }
+    prevIsRunning.current = isRunning;
+  }, [isRunning]);
+
+  // Derive suggestions from input
+  useEffect(() => {
+    if (!input) {
+      setSuggestions([]);
+      setSelectedSuggestionIndex(-1);
+      return;
+    }
+    const { commandHistory } = useTerminalStore.getState();
+    const matches = getSuggestions(input, commandHistory, 6);
+    setSuggestions(matches);
+    setSelectedSuggestionIndex(-1);
+  }, [input]);
+
+  const dismissSuggestions = useCallback(() => {
+    setSuggestions([]);
+    setSelectedSuggestionIndex(-1);
+  }, []);
+
+  const acceptSuggestion = useCallback((suggestion: string) => {
+    setInput(suggestion);
+    dismissSuggestions();
+    inputRef.current?.focus();
+  }, [dismissSuggestions]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isRunning) return;
     setInput("");
+    dismissSuggestions();
     execute(trimmed);
+    inputRef.current?.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      if (suggestions.length === 0) return;
+      if (selectedSuggestionIndex === -1) {
+        // First Tab press: select and accept the top suggestion
+        acceptSuggestion(suggestions[0]);
+      } else {
+        // Subsequent Tab presses: cycle to next suggestion
+        const nextIndex = (selectedSuggestionIndex + 1) % suggestions.length;
+        setSelectedSuggestionIndex(nextIndex);
+        setInput(suggestions[nextIndex]);
+      }
+      return;
+    }
+    if (e.key === "Escape") {
+      dismissSuggestions();
+      return;
+    }
     if (e.key === "ArrowUp") {
+      if (suggestions.length > 0) {
+        e.preventDefault();
+        setSelectedSuggestionIndex((prev) => Math.max(0, prev - 1));
+        return;
+      }
       e.preventDefault();
       const cmd = useTerminalStore.getState().navigateHistory("up");
       setInput(cmd);
     } else if (e.key === "ArrowDown") {
+      if (suggestions.length > 0) {
+        e.preventDefault();
+        setSelectedSuggestionIndex((prev) =>
+          Math.min(suggestions.length - 1, prev + 1),
+        );
+        return;
+      }
       e.preventDefault();
       const cmd = useTerminalStore.getState().navigateHistory("down");
       setInput(cmd);
+    } else if (e.key === "Enter" && suggestions.length > 0 && selectedSuggestionIndex >= 0) {
+      // If a suggestion is highlighted via arrow keys, accept it on Enter instead of submitting
+      e.preventDefault();
+      acceptSuggestion(suggestions[selectedSuggestionIndex]);
     }
   };
 
@@ -136,31 +207,53 @@ function TerminalPanel() {
         ))}
       </div>
 
-      {/* Input */}
-      <form
-        onSubmit={handleSubmit}
-        className="flex items-center border-t border-[var(--color-border)] bg-[#1a1a2e] px-3 py-2"
-      >
-        <span className="mr-2 shrink-0 font-mono text-sm text-gray-500">{cwd}</span>
-        <span className="mr-2 font-mono text-sm text-green-400">$</span>
-        <input
-          ref={inputRef}
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={!isVmRunning || isRunning}
-          placeholder={
-            isRunning
-              ? "Running..."
-              : isVmRunning
-                ? "Type a command..."
-                : "VM not available"
-          }
-          className="flex-1 bg-transparent font-mono text-sm text-gray-200 outline-none placeholder:text-gray-600 disabled:opacity-50"
-          autoFocus
-        />
-      </form>
+      {/* Input with autocomplete */}
+      <div className="relative">
+        {/* Suggestions dropdown (above input) */}
+        {suggestions.length > 0 && (
+          <div className="absolute bottom-full left-0 right-0 z-10 max-h-48 overflow-y-auto border border-[var(--color-border)] bg-[#1e1e3a] shadow-lg">
+            {suggestions.map((suggestion, index) => (
+              <button
+                key={suggestion}
+                type="button"
+                onClick={() => acceptSuggestion(suggestion)}
+                onMouseEnter={() => setSelectedSuggestionIndex(index)}
+                className={`block w-full px-3 py-1 text-left font-mono text-sm ${
+                  index === selectedSuggestionIndex
+                    ? "bg-[var(--color-accent)] text-white"
+                    : "text-gray-300 hover:bg-[#2a2a4a]"
+                }`}
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+        <form
+          onSubmit={handleSubmit}
+          className="flex items-center border-t border-[var(--color-border)] bg-[#1a1a2e] px-3 py-2"
+        >
+          <span className="mr-2 shrink-0 font-mono text-sm text-gray-500">{cwd}</span>
+          <span className="mr-2 font-mono text-sm text-green-400">$</span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={!isVmRunning || isRunning}
+            placeholder={
+              isRunning
+                ? "Running..."
+                : isVmRunning
+                  ? "Type a command..."
+                  : "VM not available"
+            }
+            className="flex-1 bg-transparent font-mono text-sm text-gray-200 outline-none placeholder:text-gray-600 disabled:opacity-50"
+            autoFocus
+          />
+        </form>
+      </div>
     </div>
   );
 }

@@ -25,6 +25,52 @@ interface TerminalState {
 
 let nextEntryId = 0;
 
+/** Common Linux/shell commands for autocomplete suggestions. */
+const COMMON_COMMANDS = [
+  "ls", "cd", "cat", "echo", "mkdir", "rmdir", "rm", "cp", "mv", "touch",
+  "pwd", "find", "grep", "head", "tail", "wc", "sort", "uniq", "chmod",
+  "chown", "ps", "kill", "df", "du", "tar", "gzip", "gunzip", "curl",
+  "wget", "which", "whoami", "env", "export", "source", "history", "clear",
+  "sed", "awk", "cut", "tr", "tee", "xargs", "diff", "file", "stat",
+  "ln", "readlink", "mount", "umount", "uname", "date", "sleep", "true",
+  "false", "test", "sh", "bash",
+];
+
+/**
+ * Return autocomplete suggestions for the given input prefix.
+ *
+ * History matches appear first (most recent first, deduplicated),
+ * followed by common commands. Results are capped at `limit`.
+ */
+export function getSuggestions(prefix: string, commandHistory: string[], limit = 8): string[] {
+  if (!prefix) return [];
+
+  const lower = prefix.toLowerCase();
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  // History matches — iterate newest-first so recent commands rank higher.
+  for (let i = commandHistory.length - 1; i >= 0; i--) {
+    const cmd = commandHistory[i];
+    if (cmd.toLowerCase().startsWith(lower) && cmd !== prefix && !seen.has(cmd)) {
+      seen.add(cmd);
+      results.push(cmd);
+      if (results.length >= limit) return results;
+    }
+  }
+
+  // Common command matches.
+  for (const cmd of COMMON_COMMANDS) {
+    if (cmd.startsWith(lower) && cmd !== prefix && !seen.has(cmd)) {
+      seen.add(cmd);
+      results.push(cmd);
+      if (results.length >= limit) return results;
+    }
+  }
+
+  return results;
+}
+
 /** Check whether the command is a bare `cd` (possibly with a path argument). */
 function isCdCommand(command: string): boolean {
   const trimmed = command.trim();
