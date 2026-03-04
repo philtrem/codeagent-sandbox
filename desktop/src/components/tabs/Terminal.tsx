@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Trash2,
   ChevronDown,
@@ -9,6 +9,7 @@ import {
   Check,
   X,
   Clock,
+  Bug,
 } from "lucide-react";
 import { useTerminalStore, type TerminalEntry } from "../../hooks/useTerminal";
 import {
@@ -104,11 +105,10 @@ function TerminalPanel() {
         </button>
       </div>
 
-      {/* Output area */}
+      {/* Output area — select-text overrides global user-select: none */}
       <div
         ref={outputRef}
-        className="flex-1 overflow-y-auto bg-[#1a1a2e] p-3 font-mono text-sm text-gray-200"
-        onClick={() => inputRef.current?.focus()}
+        className="flex-1 select-text overflow-y-auto bg-[#1a1a2e] p-3 font-mono text-sm text-gray-200"
       >
         {!isVmRunning && vmState !== "running" && (
           <div className="mb-2 text-gray-500">
@@ -165,8 +165,50 @@ function TerminalPanel() {
   );
 }
 
+function ResizeHandle() {
+  const setPanelHeight = useDebugConsoleStore((s) => s.setPanelHeight);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = useDebugConsoleStore.getState().panelHeight;
+
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        // Dragging up = increasing panel height (startY - currentY)
+        const delta = startY - moveEvent.clientY;
+        setPanelHeight(startHeight + delta);
+      };
+
+      const handleMouseUp = () => {
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+    },
+    [setPanelHeight],
+  );
+
+  return (
+    <div
+      ref={containerRef}
+      onMouseDown={handleMouseDown}
+      className="group flex h-2 cursor-row-resize items-center justify-center border-y border-[var(--color-border)] bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-tertiary)]"
+    >
+      <div className="h-0.5 w-8 rounded-full bg-gray-600 group-hover:bg-gray-400" />
+    </div>
+  );
+}
+
 function DebugConsolePanel() {
-  const { lines, filter, autoScroll, visible, setFilter, toggleAutoScroll, clear } =
+  const { lines, filter, autoScroll, visible, panelHeight, setFilter, toggleAutoScroll, clear } =
     useDebugConsoleStore();
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -194,7 +236,7 @@ function DebugConsolePanel() {
   if (!visible) return null;
 
   return (
-    <div className="flex flex-col border-t-2 border-[var(--color-border)]" style={{ height: "220px" }}>
+    <div className="flex flex-col border-t-2 border-[var(--color-border)]" style={{ height: `${panelHeight}px` }}>
       {/* Debug header */}
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-1.5">
         <span className="text-xs font-semibold text-[var(--color-text-secondary)]">
@@ -235,10 +277,10 @@ function DebugConsolePanel() {
         </div>
       </div>
 
-      {/* Log lines */}
+      {/* Log lines — select-text overrides global user-select: none */}
       <div
         ref={logRef}
-        className="flex-1 overflow-y-auto bg-[#1a1a2e] px-3 py-1 font-mono text-xs"
+        className="flex-1 select-text overflow-y-auto bg-[#1a1a2e] px-3 py-1 font-mono text-xs"
       >
         {filteredLines.length === 0 ? (
           <div className="py-2 text-gray-600">No debug output yet.</div>
@@ -258,7 +300,8 @@ function DebugConsolePanel() {
 }
 
 export default function Terminal() {
-  const { visible, toggleVisible } = useDebugConsoleStore();
+  const visible = useDebugConsoleStore((s) => s.visible);
+  const toggleVisible = useDebugConsoleStore((s) => s.toggleVisible);
 
   return (
     <div className="flex h-full flex-col">
@@ -266,14 +309,19 @@ export default function Terminal() {
       <div className="flex items-center justify-end px-3 py-1">
         <button
           onClick={toggleVisible}
-          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)]"
+          title={visible ? "Hide debug console" : "Show debug console"}
+          className="flex h-8 w-8 items-center justify-center rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)]"
         >
-          Debug {visible ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+          <Bug size={16} />
+          {visible ? <ChevronDown size={10} className="-ml-0.5" /> : <ChevronUp size={10} className="-ml-0.5" />}
         </button>
       </div>
 
       {/* Terminal panel takes remaining space */}
       <TerminalPanel />
+
+      {/* Resize handle (only when debug console is visible) */}
+      {visible && <ResizeHandle />}
 
       {/* Debug console (collapsible) */}
       <DebugConsolePanel />

@@ -8,10 +8,13 @@ interface DebugConsoleState {
   filter: string;
   autoScroll: boolean;
   visible: boolean;
+  panelHeight: number;
 
   setFilter: (f: string) => void;
   toggleAutoScroll: () => void;
   toggleVisible: () => void;
+  showPanel: () => void;
+  setPanelHeight: (h: number) => void;
   clear: () => void;
   addLine: (line: DebugLogLine) => void;
   loadExisting: () => Promise<void>;
@@ -22,10 +25,13 @@ export const useDebugConsoleStore = create<DebugConsoleState>((set) => ({
   filter: "",
   autoScroll: true,
   visible: false,
+  panelHeight: 220,
 
   setFilter: (f) => set({ filter: f }),
   toggleAutoScroll: () => set((s) => ({ autoScroll: !s.autoScroll })),
   toggleVisible: () => set((s) => ({ visible: !s.visible })),
+  showPanel: () => set({ visible: true }),
+  setPanelHeight: (h) => set({ panelHeight: Math.max(100, Math.min(500, h)) }),
 
   clear: () => {
     set({ lines: [] });

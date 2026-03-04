@@ -1,23 +1,22 @@
-import { useState } from "react";
 import { Settings, Monitor, Plug, History, SquareTerminal } from "lucide-react";
+import { useLayoutStore, type TabId } from "../hooks/useLayoutStore";
 import SandboxConfig from "./tabs/SandboxConfig";
 import VmManager from "./tabs/VmManager";
 import ClaudeIntegration from "./tabs/ClaudeIntegration";
 import UndoHistory from "./tabs/UndoHistory";
 import Terminal from "./tabs/Terminal";
 
-const tabs = [
+const tabs: { id: TabId; label: string; icon: typeof Settings }[] = [
   { id: "config", label: "Configuration", icon: Settings },
   { id: "vm", label: "VM Manager", icon: Monitor },
   { id: "claude", label: "Claude Integration", icon: Plug },
   { id: "history", label: "Undo History", icon: History },
   { id: "terminal", label: "Terminal", icon: SquareTerminal },
-] as const;
-
-type TabId = (typeof tabs)[number]["id"];
+];
 
 export default function Layout() {
-  const [activeTab, setActiveTab] = useState<TabId>("config");
+  const activeTab = useLayoutStore((s) => s.activeTab);
+  const setActiveTab = useLayoutStore((s) => s.setActiveTab);
 
   return (
     <div className="flex h-full">
