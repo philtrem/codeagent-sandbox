@@ -2,6 +2,7 @@
 # Guest init script for codeagent VM
 # Runs as PID 1 inside the QEMU guest.
 
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 set -e
 
 # Mount virtual filesystems
@@ -15,7 +16,7 @@ mount -t devpts devpts /dev/pts
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     for mod in virtio_pci virtio_mmio virtio_ring virtio_console \
-               virtiofs 9pnet 9pnet_virtio 9p virtio_net; do
+               virtiofs 9pnet 9pnet_virtio 9pnet_fd 9p virtio_net; do
         modprobe "$mod" 2>/dev/null || true
     done
 fi
@@ -47,10 +48,10 @@ setup_virtio_ports
 
 # Mount working directories
 # Virtiofs tags: "working" (index 0), "working1", "working2", ...
-# 9P serial ports: /dev/virtio-ports/p9fs0, p9fs1, ...
+# Virtio-serial 9P: /dev/virtio-ports/p9fsN (bridged by p9proxy)
 mount_working_dir() {
     local index=$1
-    local tag mount_point port_dev
+    local tag mount_point
 
     if [ "$index" -eq 0 ]; then
         tag="working"
@@ -68,17 +69,16 @@ mount_working_dir() {
         return 0
     fi
 
-    # Fall back to 9P over virtio-serial (Windows hosts)
-    port_dev="/dev/virtio-ports/p9fs${index}"
+    # Fall back to 9P over virtio-serial (Windows hosts).
+    # The p9proxy binary bridges the virtio-serial port to a Unix
+    # socketpair so the kernel's trans=fd transport can use it.
+    local port_dev="/dev/virtio-ports/p9fs${index}"
     if [ -e "$port_dev" ]; then
-        eval "exec $((index + 10))<>\"$port_dev\""
-        local fd=$((index + 10))
-        if mount -t 9p -o "version=9p2000.L,trans=fd,rfdno=${fd},wfdno=${fd},cache=none" \
-            "p9fs${index}" "$mount_point" 2>/dev/null; then
-            echo "init: mounted p9fs${index} at $mount_point (9p)"
+        if /bin/p9proxy "$port_dev" "$mount_point"; then
+            echo "init: mounted p9fs${index} at $mount_point (p9proxy)"
             return 0
         fi
-        eval "exec $fd>&-"
+        echo "init: p9proxy mount failed for $port_dev"
     fi
 
     return 1
@@ -93,6 +93,14 @@ fi
 for index in 1 2 3 4 5 6 7 8 9; do
     mount_working_dir "$index" || break
 done
+
+# Create unprivileged user for command execution.
+# The shim runs as root (PID 1) but drops to this user when spawning
+# commands via setuid/setgid in the executor.
+echo "sandbox:x:1000:1000:sandbox:/home/sandbox:/bin/sh" >> /etc/passwd
+echo "sandbox:x:1000:" >> /etc/group
+mkdir -p /home/sandbox
+chown 1000:1000 /home/sandbox
 
 # Set hostname
 hostname codeagent

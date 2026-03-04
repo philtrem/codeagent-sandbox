@@ -439,6 +439,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeagent-p9proxy"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "codeagent-sandbox"
 version = "0.1.0"
 dependencies = [

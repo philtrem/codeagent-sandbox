@@ -59,11 +59,17 @@ pub fn spawn_command(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // Spawn in a new process group so cancel can kill the whole tree.
+    // Spawn in a new process group so cancel can kill the whole tree,
+    // and drop to the unprivileged sandbox user (uid/gid 1000).
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             libc::setpgid(0, 0);
+            // Drop privileges: the shim runs as root (PID 1) but commands
+            // should not. Set gid before uid (setuid drops the ability to
+            // call setgid).
+            libc::setgid(1000);
+            libc::setuid(1000);
             Ok(())
         });
     }

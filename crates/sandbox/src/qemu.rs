@@ -59,16 +59,17 @@ impl QemuConfig {
     /// Returns `(binary_path, args)`. The arguments are platform-specific:
     /// - Linux: q35 + KVM + memory-backend-memfd + vhost-user-fs-pci
     /// - macOS: virt + HVF + memory-backend-shm + vhost-user-fs-pci
-    /// - Windows: q35 + WHPX + virtfs (9P) — no shared memory needed
+    /// - Windows: q35 + WHPX + 9P over virtio-serial — no shared memory needed
     pub fn build_args(&self) -> Result<(PathBuf, Vec<OsString>), AgentError> {
         let binary = self.resolve_qemu_binary()?;
         let mut args: Vec<OsString> = Vec::new();
+        let mut extra_kernel_params: Vec<String> = Vec::new();
 
         self.add_platform_args(&mut args);
         self.add_common_args(&mut args);
-        self.add_filesystem_args(&mut args);
+        self.add_filesystem_args(&mut args, &mut extra_kernel_params);
         self.add_control_channel_args(&mut args);
-        self.add_boot_args(&mut args);
+        self.add_boot_args(&mut args, &extra_kernel_params);
         self.add_extra_args(&mut args);
 
         Ok((binary, args))
@@ -129,7 +130,12 @@ impl QemuConfig {
         // (virtserialport) devices need the virtio-serial-pci bus. Add it
         // here so it's available before any port devices are added.
         #[cfg(target_os = "windows")]
-        args.extend(["-device".into(), "virtio-serial-pci".into()]);
+        {
+            args.extend(["-device".into(), "virtio-serial-pci".into()]);
+            // Disable MSI-X for all virtio PCI devices to work around WHPX
+            // MSI injection failures. Falls back to legacy INTx interrupts.
+            args.extend(["-global".into(), "virtio-pci.vectors=0".into()]);
+        }
     }
 
     /// Filesystem sharing devices (virtiofs on Linux/macOS, 9P on Windows).
@@ -137,48 +143,52 @@ impl QemuConfig {
     /// On Linux/macOS: uses vhost-user-fs-pci with a socket chardev for
     /// each working directory (connects to virtiofsd).
     ///
-    /// On Windows: uses virtio-serial with a socket chardev for each
-    /// working directory (connects to the host P9Server). The guest mounts
-    /// via `mount -t 9p -o trans=fd,rfdno=FD,wfdno=FD`.
-    fn add_filesystem_args(&self, args: &mut Vec<OsString>) {
+    /// On Windows: uses a virtio-serial chardev connecting to the host-side
+    /// P9Backend TCP listener, with a virtserialport device named `p9fsN`.
+    /// Inside the guest, the p9proxy binary bridges the serial port to a
+    /// Unix socketpair for the kernel's 9P `trans=fd` transport.
+    fn add_filesystem_args(
+        &self,
+        args: &mut Vec<OsString>,
+        _extra_kernel_params: &mut Vec<String>,
+    ) {
         for (index, socket_path) in self.fs_socket_paths.iter().enumerate() {
-            let chardev_id = format!("vfs{index}");
-            let _tag = if index == 0 {
-                "working".to_string()
-            } else {
-                format!("working{index}")
-            };
-
             #[cfg(not(target_os = "windows"))]
             {
+                let chardev_id = format!("vfs{index}");
+                let tag = if index == 0 {
+                    "working".to_string()
+                } else {
+                    format!("working{index}")
+                };
                 args.extend([
                     "-chardev".into(),
                     format!("socket,id={chardev_id},path={}", socket_path.display()).into(),
                 ]);
                 args.extend([
                     "-device".into(),
-                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={_tag}").into(),
+                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={tag}").into(),
                 ]);
             }
 
             #[cfg(target_os = "windows")]
             {
                 // Read the TCP address from the socket_path file written by
-                // P9Backend::start(). Connect QEMU via a TCP chardev.
-                // QEMU requires host and port as separate parameters:
-                //   socket,id=ID,host=IP,port=PORT,server=off
+                // P9Backend::start(). QEMU connects to it via a chardev, and
+                // exposes a virtserialport named p9fsN to the guest.
                 let addr = std::fs::read_to_string(socket_path).unwrap_or_default();
-                let addr = addr.trim();
-                let (host, port) = addr.rsplit_once(':').unwrap_or((addr, "0"));
+                let addr = addr.trim().to_string();
+                let (host, port) = addr.rsplit_once(':').unwrap_or((&addr, "0"));
+                let chardev_id = format!("p9fs{index}");
+                let port_name = format!("p9fs{index}");
+
                 args.extend([
                     "-chardev".into(),
                     format!("socket,id={chardev_id},host={host},port={port},server=off").into(),
                 ]);
-                // The virtserialport device exposes the chardev as a virtio-serial
-                // port named "p9fs{index}" in the guest.
                 args.extend([
                     "-device".into(),
-                    format!("virtserialport,chardev={chardev_id},name=p9fs{index}").into(),
+                    format!("virtserialport,chardev={chardev_id},name={port_name}").into(),
                 ]);
             }
         }
@@ -229,7 +239,7 @@ impl QemuConfig {
     }
 
     /// Kernel, initrd, and rootfs boot arguments.
-    fn add_boot_args(&self, args: &mut Vec<OsString>) {
+    fn add_boot_args(&self, args: &mut Vec<OsString>, extra_kernel_params: &[String]) {
         args.extend([
             "-kernel".into(),
             self.kernel_path.as_os_str().to_owned(),
@@ -238,11 +248,25 @@ impl QemuConfig {
             "-initrd".into(),
             self.initrd_path.as_os_str().to_owned(),
         ]);
-        let append = if self.rootfs_path.is_some() {
-            "console=hvc0 root=/dev/vda"
+        // On Windows, add ttyS0 alongside hvc0 so boot messages appear on
+        // the serial port (captured via -nographic → stdout) for debugging,
+        // in case the virtio console (hvc0) is not yet functional.
+        #[cfg(target_os = "windows")]
+        let mut append = if self.rootfs_path.is_some() {
+            "console=ttyS0 console=hvc0 root=/dev/vda".to_string()
         } else {
-            "console=hvc0"
+            "console=ttyS0 console=hvc0".to_string()
         };
+        #[cfg(not(target_os = "windows"))]
+        let mut append = if self.rootfs_path.is_some() {
+            "console=hvc0 root=/dev/vda".to_string()
+        } else {
+            "console=hvc0".to_string()
+        };
+        for param in extra_kernel_params {
+            append.push(' ');
+            append.push_str(param);
+        }
         args.extend(["-append".into(), append.into()]);
 
         if let Some(rootfs) = &self.rootfs_path {
@@ -408,10 +432,19 @@ impl QemuProcess {
     pub fn spawn(config: QemuConfig) -> Result<Self, AgentError> {
         let (binary, args) = config.build_args()?;
 
+        // On Windows, pipe stdout to capture serial console output
+        // (-nographic maps the serial port to stdout). On other platforms
+        // the virtio console (hvc0) is used and serial output is not needed.
+        let stdout_mode = if cfg!(target_os = "windows") {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        };
+
         let child = std::process::Command::new(&binary)
             .args(&args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(stdout_mode)
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|error| AgentError::QemuSpawnFailed {
@@ -511,16 +544,39 @@ impl QemuProcess {
 
         #[cfg(target_os = "windows")]
         {
+            // Spawn threads to drain QEMU's stdout (serial console) and
+            // stderr (QEMU diagnostics) for debugging.
+            if let Some(stdout) = self.child.stdout.take() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(line) => eprintln!("[qemu serial] {line}"),
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+            if let Some(stderr) = self.child.stderr.take() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(line) => eprintln!("[qemu stderr] {line}"),
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+
             // Give QEMU a moment to start, then check if it crashed immediately
             // (e.g., invalid arguments, missing files, accelerator failure).
             std::thread::sleep(Duration::from_millis(500));
             match self.child.try_wait() {
                 Ok(Some(status)) => {
-                    let mut stderr_output = String::new();
-                    if let Some(mut stderr) = self.child.stderr.take() {
-                        use std::io::Read;
-                        let _ = stderr.read_to_string(&mut stderr_output);
-                    }
+                    let stderr_output = "(see [qemu stderr] lines above)";
                     Err(AgentError::QemuSpawnFailed {
                         reason: format!(
                             "QEMU exited immediately with {status}. stderr: {stderr_output}"
@@ -623,7 +679,8 @@ mod tests {
         assert!(args.contains(&"virtserialport,chardev=ctrl,name=control".to_string()));
     }
 
-    /// QC-04: build_args includes one filesystem device per working dir.
+    /// QC-04: build_args includes one filesystem entry per working dir.
+    /// On Unix: chardev + device pairs. On Windows: kernel cmdline p9portN= params.
     #[test]
     fn qc_04_multiple_working_dirs() {
         let mut config = test_config();
@@ -639,16 +696,38 @@ mod tests {
         let (_binary, args) = config.build_args().unwrap();
         let args = args_to_strings(&args);
 
-        let fs_device_count = args
-            .iter()
-            .filter(|a| a.contains("vfs0") || a.contains("vfs1"))
-            .count();
+        #[cfg(not(target_os = "windows"))]
+        {
+            let fs_device_count = args
+                .iter()
+                .filter(|a| a.contains("vfs0") || a.contains("vfs1"))
+                .count();
+            assert!(
+                fs_device_count >= 2,
+                "expected >=2 filesystem device args, got {fs_device_count}: {args:?}"
+            );
+        }
 
-        // Each working dir should produce at least a chardev + device pair (or virtfs)
-        assert!(
-            fs_device_count >= 2,
-            "expected >=2 filesystem device args, got {fs_device_count}: {args:?}"
-        );
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, filesystem ports use chardev + virtserialport
+            let fs_chardev_count = args
+                .iter()
+                .filter(|a| a.contains("id=p9fs0") || a.contains("id=p9fs1"))
+                .count();
+            assert!(
+                fs_chardev_count >= 2,
+                "expected >=2 filesystem chardev args, got {fs_chardev_count}: {args:?}"
+            );
+            let fs_port_count = args
+                .iter()
+                .filter(|a| a.contains("name=p9fs0") || a.contains("name=p9fs1"))
+                .count();
+            assert!(
+                fs_port_count >= 2,
+                "expected >=2 filesystem virtserialport args, got {fs_port_count}: {args:?}"
+            );
+        }
     }
 
     /// QC-05: build_args includes correct memory and CPU settings.
@@ -739,10 +818,11 @@ mod tests {
         assert!(args.contains(&"-S".to_string()));
     }
 
-    /// QC-11: Windows chardev uses separate host and port parameters.
+    /// QC-11: Windows control chardev uses separate host/port; filesystem
+    /// uses virtio-serial chardev + virtserialport connecting to the P9Backend.
     #[cfg(target_os = "windows")]
     #[test]
-    fn qc_11_windows_chardev_uses_separate_host_port() {
+    fn qc_11_windows_chardev_transport() {
         let dir = tempfile::tempdir().unwrap();
 
         // Write a TCP address file for the control channel
@@ -771,11 +851,17 @@ mod tests {
             "should not use colon-separated host:port format: {ctrl_chardev}"
         );
 
-        // Filesystem chardev should also have host=...,port=... separately
-        let fs_chardev = args.iter().find(|a| a.contains("id=vfs0")).unwrap();
+        // Filesystem chardev should connect to the P9Backend TCP address
+        let fs_chardev = args.iter().find(|a| a.contains("id=p9fs0")).unwrap();
         assert!(
             fs_chardev.contains("host=127.0.0.1,port=54322"),
-            "expected separate host and port in fs chardev: {fs_chardev}"
+            "expected P9Backend address in filesystem chardev: {fs_chardev}"
+        );
+
+        // Filesystem virtserialport should be named p9fs0
+        assert!(
+            args.iter().any(|a| a.contains("virtserialport,chardev=p9fs0,name=p9fs0")),
+            "expected virtserialport named p9fs0: {args:?}"
         );
     }
 }

@@ -52,11 +52,13 @@ where
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("[sandbox] control_reader recv: {line}");
             match parse_vm_message(&line) {
                 Ok(msg) => {
                     handler.handle_vm_message(msg).await;
                 }
                 Err(error) => {
+                    eprintln!("[sandbox] control_reader parse error: {error}");
                     let _ = event_sender.send(Event::Error {
                         code: "control_channel_parse_error".to_string(),
                         message: error.to_string(),
@@ -66,6 +68,7 @@ where
         }
 
         // Control channel closed
+        eprintln!("[sandbox] control channel closed (EOF)");
         let _ = event_sender.send(Event::Error {
             code: "control_channel_closed".to_string(),
             message: "VM control channel disconnected".to_string(),

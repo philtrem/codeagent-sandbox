@@ -13,6 +13,7 @@ members = [
     "crates/virtiofs-backend",
     "crates/vmm-sys-util-fork",
     "crates/p9",
+    "crates/p9proxy",
 ]
 exclude = ["fuzz", "crates/virtiofsd-fork", "desktop/src-tauri"]
 
