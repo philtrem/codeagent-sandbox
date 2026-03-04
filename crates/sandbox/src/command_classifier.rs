@@ -8,8 +8,15 @@
 //! 2. **Classification** — labels commands as `ReadOnly`, `Write`, or `Destructive`
 //!    and returns the label as response metadata. Claude Code handles its own
 //!    client-side permission prompts, so this is informational / for logging.
+//!
+//! Classification lists are configurable via [`CommandClassifierConfig`], which can
+//! be loaded from a TOML config file. Sanitization rules are hardcoded and not
+//! user-configurable (security-critical).
 
+use std::collections::HashSet;
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -37,6 +44,323 @@ impl fmt::Display for CommandClassification {
             Self::Write => write!(f, "write"),
             Self::Destructive => write!(f, "destructive"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// User-configurable command classification lists.
+///
+/// Each field holds the list of commands (or subcommands) that belong to a
+/// particular classification tier. The `Default` implementation populates
+/// every field with the built-in allowlists.
+///
+/// Serialize/deserialize with `#[serde(default)]` so that missing fields in
+/// a TOML file fall back to the defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandClassifierConfig {
+    pub read_only_commands: Vec<String>,
+    pub write_commands: Vec<String>,
+    pub destructive_commands: Vec<String>,
+    pub git_read_only_subcommands: Vec<String>,
+    pub git_destructive_subcommands: Vec<String>,
+    pub cargo_read_only_subcommands: Vec<String>,
+    pub cargo_destructive_subcommands: Vec<String>,
+    pub npm_read_only_subcommands: Vec<String>,
+    pub npm_read_only_scripts: Vec<String>,
+}
+
+impl Default for CommandClassifierConfig {
+    fn default() -> Self {
+        Self {
+            read_only_commands: DEFAULT_READ_ONLY_COMMANDS.iter().map(|s| s.to_string()).collect(),
+            write_commands: DEFAULT_WRITE_COMMANDS.iter().map(|s| s.to_string()).collect(),
+            destructive_commands: DEFAULT_DESTRUCTIVE_COMMANDS.iter().map(|s| s.to_string()).collect(),
+            git_read_only_subcommands: DEFAULT_GIT_READ_ONLY_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+            git_destructive_subcommands: DEFAULT_GIT_DESTRUCTIVE_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+            cargo_read_only_subcommands: DEFAULT_CARGO_READ_ONLY_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+            cargo_destructive_subcommands: DEFAULT_CARGO_DESTRUCTIVE_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+            npm_read_only_subcommands: DEFAULT_NPM_READ_ONLY_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+            npm_read_only_scripts: DEFAULT_NPM_READ_ONLY_SCRIPTS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+const DEFAULT_READ_ONLY_COMMANDS: &[&str] = &[
+    "cd", "ls", "cat", "head", "tail", "less", "more", "wc", "file", "find",
+    "grep", "egrep", "fgrep", "rg", "ag", "awk", "gawk", "which", "whereis",
+    "type", "echo", "printf", "pwd", "env", "printenv", "whoami", "id",
+    "hostname", "uname", "date", "cal", "uptime", "df", "du", "free", "top",
+    "htop", "ps", "stat", "readlink", "realpath", "basename", "dirname",
+    "test", "[", "true", "false", "diff", "cmp", "md5sum", "sha256sum",
+    "sha1sum", "sha512sum", "xxd", "od", "strings", "tree", "bat", "jq",
+    "yq", "sort", "uniq", "cut", "tr", "column", "comm", "join", "paste",
+    "fold", "rev", "tac", "nl", "expand", "unexpand", "hexdump", "man",
+    "help", "info",
+];
+
+const DEFAULT_WRITE_COMMANDS: &[&str] = &[
+    "touch", "mkdir", "cp", "mv", "chmod", "chown", "chgrp", "curl", "wget",
+    "tar", "unzip", "zip", "gzip", "gunzip", "bzip2", "bunzip2", "xz",
+    "unxz", "make", "cmake", "patch", "ln",
+];
+
+const DEFAULT_DESTRUCTIVE_COMMANDS: &[&str] = &[
+    "rm", "rmdir", "dd", "mkfs", "shred", "truncate",
+];
+
+const DEFAULT_GIT_READ_ONLY_SUBCOMMANDS: &[&str] = &[
+    "status", "log", "diff", "show", "branch", "tag", "remote", "rev-parse",
+    "ls-files", "ls-tree", "describe", "shortlog", "blame", "bisect",
+    "reflog", "stash list", "config", "help", "version",
+];
+
+const DEFAULT_GIT_DESTRUCTIVE_SUBCOMMANDS: &[&str] = &[
+    "clean",
+];
+
+const DEFAULT_CARGO_READ_ONLY_SUBCOMMANDS: &[&str] = &[
+    "check", "test", "clippy", "doc", "bench", "metadata", "tree", "version", "help",
+];
+
+const DEFAULT_CARGO_DESTRUCTIVE_SUBCOMMANDS: &[&str] = &[
+    "clean",
+];
+
+const DEFAULT_NPM_READ_ONLY_SUBCOMMANDS: &[&str] = &[
+    "test", "list", "ls", "view", "info", "outdated", "help", "version",
+];
+
+const DEFAULT_NPM_READ_ONLY_SCRIPTS: &[&str] = &[
+    "test", "lint", "check", "typecheck", "type-check", "validate",
+];
+
+// ---------------------------------------------------------------------------
+// CommandClassifier struct (pre-computed HashSets for O(1) lookup)
+// ---------------------------------------------------------------------------
+
+/// A command classifier that uses pre-computed `HashSet`s for O(1) lookup.
+///
+/// Constructed from a [`CommandClassifierConfig`] via [`CommandClassifier::new`],
+/// or from defaults via [`CommandClassifier::with_defaults`].
+pub struct CommandClassifier {
+    read_only: HashSet<String>,
+    write: HashSet<String>,
+    destructive: HashSet<String>,
+    git_read_only: HashSet<String>,
+    git_destructive: HashSet<String>,
+    cargo_read_only: HashSet<String>,
+    cargo_destructive: HashSet<String>,
+    npm_read_only: HashSet<String>,
+    npm_read_only_scripts: HashSet<String>,
+}
+
+impl CommandClassifier {
+    /// Build a classifier from a user-provided config.
+    pub fn new(config: CommandClassifierConfig) -> Self {
+        Self {
+            read_only: config.read_only_commands.into_iter().collect(),
+            write: config.write_commands.into_iter().collect(),
+            destructive: config.destructive_commands.into_iter().collect(),
+            git_read_only: config.git_read_only_subcommands.into_iter().collect(),
+            git_destructive: config.git_destructive_subcommands.into_iter().collect(),
+            cargo_read_only: config.cargo_read_only_subcommands.into_iter().collect(),
+            cargo_destructive: config.cargo_destructive_subcommands.into_iter().collect(),
+            npm_read_only: config.npm_read_only_subcommands.into_iter().collect(),
+            npm_read_only_scripts: config.npm_read_only_scripts.into_iter().collect(),
+        }
+    }
+
+    /// Build a classifier with built-in default lists.
+    pub fn with_defaults() -> Self {
+        Self::new(CommandClassifierConfig::default())
+    }
+
+    /// Classify a command as ReadOnly, Write, or Destructive.
+    ///
+    /// Splits on shell operators, handles quoting, command substitution, subshells,
+    /// and redirects. Returns the maximum classification across all segments.
+    pub fn classify(&self, command: &str) -> CommandClassification {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return CommandClassification::ReadOnly;
+        }
+
+        let mut max_class = CommandClassification::ReadOnly;
+
+        // Check for output redirects in unquoted context
+        max_class = max_class.max(classify_redirects(trimmed));
+
+        // Split into segments and classify each
+        for segment in split_command_segments(trimmed) {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let class = self.classify_single_segment(segment);
+            max_class = max_class.max(class);
+        }
+
+        // Check for command substitution, subshells, process substitution
+        max_class = max_class.max(self.classify_nested(trimmed));
+
+        max_class
+    }
+
+    /// Classify a single simple command segment (no shell operators).
+    fn classify_single_segment(&self, segment: &str) -> CommandClassification {
+        let words: Vec<&str> = shell_words(segment);
+        if words.is_empty() {
+            return CommandClassification::ReadOnly;
+        }
+
+        let command_name = extract_command_name(words[0]);
+        let args = &words[1..];
+
+        self.classify_command_with_args(command_name, args)
+    }
+
+    /// Classify based on command name and its arguments.
+    fn classify_command_with_args(&self, command: &str, args: &[&str]) -> CommandClassification {
+        // Context-sensitive commands first
+        match command {
+            "git" => return self.classify_git(args),
+            "cargo" => return self.classify_cargo(args),
+            "npm" | "npx" => return self.classify_npm(command, args),
+            "sed" => return classify_sed(args),
+            "python" | "python3" => return classify_python(args),
+            "node" => return classify_node(args),
+            "tee" => return classify_tee(args),
+            "xargs" => return self.classify_xargs(args),
+            _ => {}
+        }
+
+        if self.read_only.contains(command) {
+            return CommandClassification::ReadOnly;
+        }
+
+        if self.destructive.contains(command) {
+            return CommandClassification::Destructive;
+        }
+
+        if self.write.contains(command) {
+            return CommandClassification::Write;
+        }
+
+        // Unknown commands default to Write
+        CommandClassification::Write
+    }
+
+    /// Extract and classify nested constructs: $(...), `...`, (...), >(...)
+    fn classify_nested(&self, command: &str) -> CommandClassification {
+        let mut max_class = CommandClassification::ReadOnly;
+
+        for inner in extract_parenthesized_contents(command) {
+            let inner_class = self.classify(&inner);
+            max_class = max_class.max(inner_class);
+        }
+
+        for inner in extract_backtick_contents(command) {
+            let inner_class = self.classify(&inner);
+            max_class = max_class.max(inner_class);
+        }
+
+        max_class
+    }
+
+    fn classify_git(&self, args: &[&str]) -> CommandClassification {
+        let subcommand = args.first().copied().unwrap_or("");
+
+        if self.git_read_only.contains(subcommand) {
+            return CommandClassification::ReadOnly;
+        }
+
+        // Configurable destructive subcommands
+        if self.git_destructive.contains(subcommand) {
+            return CommandClassification::Destructive;
+        }
+
+        // Hardcoded destructive patterns (argument-dependent, not configurable)
+        if subcommand == "reset" && args.contains(&"--hard") {
+            return CommandClassification::Destructive;
+        }
+        if subcommand == "push"
+            && args
+                .iter()
+                .any(|a| *a == "--force" || *a == "-f" || a.starts_with("--force-with-lease"))
+        {
+            return CommandClassification::Destructive;
+        }
+        if subcommand == "checkout" && args.contains(&".") {
+            return CommandClassification::Destructive;
+        }
+
+        CommandClassification::Write
+    }
+
+    fn classify_cargo(&self, args: &[&str]) -> CommandClassification {
+        let subcommand = args.first().copied().unwrap_or("");
+
+        if self.cargo_read_only.contains(subcommand) {
+            return CommandClassification::ReadOnly;
+        }
+
+        if self.cargo_destructive.contains(subcommand) {
+            return CommandClassification::Destructive;
+        }
+
+        CommandClassification::Write
+    }
+
+    fn classify_npm(&self, command: &str, args: &[&str]) -> CommandClassification {
+        let subcommand = args.first().copied().unwrap_or("");
+
+        // npx with tsc/eslint/prettier --check is read-only
+        if command == "npx" {
+            let tool = args.first().copied().unwrap_or("");
+            if tool == "tsc" && args.contains(&"--noEmit") {
+                return CommandClassification::ReadOnly;
+            }
+            return CommandClassification::Write;
+        }
+
+        if self.npm_read_only.contains(subcommand) {
+            return CommandClassification::ReadOnly;
+        }
+
+        // npm run <script> — classify by script name
+        if subcommand == "run" || subcommand == "run-script" {
+            let script = args.get(1).copied().unwrap_or("");
+            if self.npm_read_only_scripts.contains(script) {
+                return CommandClassification::ReadOnly;
+            }
+        }
+
+        if subcommand == "cache" && args.contains(&"clean") {
+            return CommandClassification::Destructive;
+        }
+
+        CommandClassification::Write
+    }
+
+    fn classify_xargs(&self, args: &[&str]) -> CommandClassification {
+        let mut i = 0;
+        while i < args.len() {
+            let arg = args[i];
+            if arg == "-I" || arg == "-L" || arg == "-n" || arg == "-P" || arg == "-d" {
+                i += 2;
+                continue;
+            }
+            if arg.starts_with('-') {
+                i += 1;
+                continue;
+            }
+            return self.classify_command_with_args(extract_command_name(arg), &args[i + 1..]);
+        }
+        CommandClassification::ReadOnly
     }
 }
 
@@ -157,35 +481,13 @@ fn contains_kernel_module_commands(command: &str) -> bool {
 // Classification
 // ---------------------------------------------------------------------------
 
-/// Classify a command as ReadOnly, Write, or Destructive.
+/// Classify a command using the built-in default lists.
 ///
-/// Splits on shell operators, handles quoting, command substitution, subshells,
-/// and redirects. Returns the maximum classification across all segments.
+/// This is a convenience wrapper around [`CommandClassifier::with_defaults`].
+/// For configurable classification, construct a [`CommandClassifier`] from a
+/// [`CommandClassifierConfig`] and call [`CommandClassifier::classify`] directly.
 pub fn classify(command: &str) -> CommandClassification {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return CommandClassification::ReadOnly;
-    }
-
-    let mut max_class = CommandClassification::ReadOnly;
-
-    // Check for output redirects in unquoted context
-    max_class = max_class.max(classify_redirects(trimmed));
-
-    // Split into segments and classify each
-    for segment in split_command_segments(trimmed) {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        let class = classify_single_segment(segment);
-        max_class = max_class.max(class);
-    }
-
-    // Check for command substitution, subshells, process substitution
-    max_class = max_class.max(classify_nested(trimmed));
-
-    max_class
+    CommandClassifier::with_defaults().classify(command)
 }
 
 /// Classify redirect operators found outside quotes.
@@ -262,24 +564,6 @@ fn classify_redirects(command: &str) -> CommandClassification {
     max_class
 }
 
-/// Extract and classify nested constructs: $(...), `...`, (...), >(...)
-fn classify_nested(command: &str) -> CommandClassification {
-    let mut max_class = CommandClassification::ReadOnly;
-
-    // Extract $(...) and >(...) contents — handle nesting via depth tracking
-    for inner in extract_parenthesized_contents(command) {
-        let inner_class = classify(&inner);
-        max_class = max_class.max(inner_class);
-    }
-
-    // Extract backtick contents
-    for inner in extract_backtick_contents(command) {
-        let inner_class = classify(&inner);
-        max_class = max_class.max(inner_class);
-    }
-
-    max_class
-}
 
 /// Extract contents of $(...), >(...), and bare (...) subshells, respecting quotes.
 fn extract_parenthesized_contents(command: &str) -> Vec<String> {
@@ -486,283 +770,15 @@ fn is_segment_boundary(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | ';' | '&' | '|' | '\n' | '(' | ')')
 }
 
-/// Classify a single simple command segment (no shell operators).
-fn classify_single_segment(segment: &str) -> CommandClassification {
-    let words: Vec<&str> = shell_words(segment);
-    if words.is_empty() {
-        return CommandClassification::ReadOnly;
-    }
-
-    let command_name = extract_command_name(words[0]);
-    let args = &words[1..];
-
-    classify_command_with_args(command_name, args)
-}
-
 /// Given a potentially path-qualified command, extract just the binary name.
 fn extract_command_name(word: &str) -> &str {
     // Handle /usr/bin/ls, ./script, etc.
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Classify based on command name and its arguments.
-fn classify_command_with_args(command: &str, args: &[&str]) -> CommandClassification {
-    // Context-sensitive commands first
-    match command {
-        "git" => return classify_git(args),
-        "cargo" => return classify_cargo(args),
-        "npm" | "npx" => return classify_npm(command, args),
-        "sed" => return classify_sed(args),
-        "python" | "python3" => return classify_python(args),
-        "node" => return classify_node(args),
-        "tee" => return classify_tee(args),
-        "xargs" => return classify_xargs(args),
-        _ => {}
-    }
-
-    // Simple read-only commands
-    if is_read_only_command(command) {
-        return CommandClassification::ReadOnly;
-    }
-
-    // Destructive commands
-    if is_destructive_command(command) {
-        return CommandClassification::Destructive;
-    }
-
-    // Known write commands
-    if is_write_command(command) {
-        return CommandClassification::Write;
-    }
-
-    // Unknown commands default to Write
-    CommandClassification::Write
-}
-
-fn is_read_only_command(command: &str) -> bool {
-    matches!(
-        command,
-        "cd"
-            | "ls"
-            | "cat"
-            | "head"
-            | "tail"
-            | "less"
-            | "more"
-            | "wc"
-            | "file"
-            | "find"
-            | "grep"
-            | "egrep"
-            | "fgrep"
-            | "rg"
-            | "ag"
-            | "awk"
-            | "gawk"
-            | "which"
-            | "whereis"
-            | "type"
-            | "echo"
-            | "printf"
-            | "pwd"
-            | "env"
-            | "printenv"
-            | "whoami"
-            | "id"
-            | "hostname"
-            | "uname"
-            | "date"
-            | "cal"
-            | "uptime"
-            | "df"
-            | "du"
-            | "free"
-            | "top"
-            | "htop"
-            | "ps"
-            | "stat"
-            | "readlink"
-            | "realpath"
-            | "basename"
-            | "dirname"
-            | "test"
-            | "["
-            | "true"
-            | "false"
-            | "diff"
-            | "cmp"
-            | "md5sum"
-            | "sha256sum"
-            | "sha1sum"
-            | "sha512sum"
-            | "xxd"
-            | "od"
-            | "strings"
-            | "tree"
-            | "bat"
-            | "jq"
-            | "yq"
-            | "sort"
-            | "uniq"
-            | "cut"
-            | "tr"
-            | "column"
-            | "comm"
-            | "join"
-            | "paste"
-            | "fold"
-            | "rev"
-            | "tac"
-            | "nl"
-            | "expand"
-            | "unexpand"
-            | "hexdump"
-            | "man"
-            | "help"
-            | "info"
-    )
-}
-
-fn is_write_command(command: &str) -> bool {
-    matches!(
-        command,
-        "touch"
-            | "mkdir"
-            | "cp"
-            | "mv"
-            | "chmod"
-            | "chown"
-            | "chgrp"
-            | "curl"
-            | "wget"
-            | "tar"
-            | "unzip"
-            | "zip"
-            | "gzip"
-            | "gunzip"
-            | "bzip2"
-            | "bunzip2"
-            | "xz"
-            | "unxz"
-            | "make"
-            | "cmake"
-            | "patch"
-            | "ln"
-    )
-}
-
-fn is_destructive_command(command: &str) -> bool {
-    matches!(
-        command,
-        "rm" | "rmdir" | "dd" | "mkfs" | "shred" | "truncate"
-    )
-}
-
 // ---------------------------------------------------------------------------
-// Context-sensitive classifiers
+// Non-configurable context-sensitive classifiers (argument-dependent logic)
 // ---------------------------------------------------------------------------
-
-fn classify_git(args: &[&str]) -> CommandClassification {
-    let subcommand = args.first().copied().unwrap_or("");
-
-    // Read-only git subcommands
-    let read_only = [
-        "status",
-        "log",
-        "diff",
-        "show",
-        "branch",
-        "tag",
-        "remote",
-        "rev-parse",
-        "ls-files",
-        "ls-tree",
-        "describe",
-        "shortlog",
-        "blame",
-        "bisect",
-        "reflog",
-        "stash list",
-        "config",
-        "help",
-        "version",
-    ];
-    if read_only.contains(&subcommand) {
-        return CommandClassification::ReadOnly;
-    }
-
-    // Destructive git subcommands
-    if subcommand == "clean" {
-        return CommandClassification::Destructive;
-    }
-    if subcommand == "reset" && args.contains(&"--hard") {
-        return CommandClassification::Destructive;
-    }
-    if subcommand == "push"
-        && args
-            .iter()
-            .any(|a| *a == "--force" || *a == "-f" || a.starts_with("--force-with-lease"))
-    {
-        return CommandClassification::Destructive;
-    }
-    if subcommand == "checkout" && args.contains(&".") {
-        return CommandClassification::Destructive;
-    }
-
-    // Write: add, commit, checkout (branch switch), merge, rebase, stash push/pop, pull, fetch, etc.
-    CommandClassification::Write
-}
-
-fn classify_cargo(args: &[&str]) -> CommandClassification {
-    let subcommand = args.first().copied().unwrap_or("");
-
-    let read_only = ["check", "test", "clippy", "doc", "bench", "metadata", "tree", "version", "help"];
-    if read_only.contains(&subcommand) {
-        return CommandClassification::ReadOnly;
-    }
-
-    if subcommand == "clean" {
-        return CommandClassification::Destructive;
-    }
-
-    // build, fmt, run, install, add, remove, update, publish, etc.
-    CommandClassification::Write
-}
-
-fn classify_npm(command: &str, args: &[&str]) -> CommandClassification {
-    let subcommand = args.first().copied().unwrap_or("");
-
-    // npx with tsc/eslint/prettier --check is read-only
-    if command == "npx" {
-        let tool = args.first().copied().unwrap_or("");
-        if tool == "tsc" && args.contains(&"--noEmit") {
-            return CommandClassification::ReadOnly;
-        }
-        // npx unknown tool → Write
-        return CommandClassification::Write;
-    }
-
-    let read_only_subcommands = ["test", "list", "ls", "view", "info", "outdated", "help", "version"];
-    if read_only_subcommands.contains(&subcommand) {
-        return CommandClassification::ReadOnly;
-    }
-
-    // npm run <script> — classify by script name
-    if subcommand == "run" || subcommand == "run-script" {
-        let script = args.get(1).copied().unwrap_or("");
-        let read_only_scripts = ["test", "lint", "check", "typecheck", "type-check", "validate"];
-        if read_only_scripts.contains(&script) {
-            return CommandClassification::ReadOnly;
-        }
-    }
-
-    if subcommand == "cache" && args.contains(&"clean") {
-        return CommandClassification::Destructive;
-    }
-
-    // install, run build, run dev, ci, update, etc.
-    CommandClassification::Write
-}
 
 fn classify_sed(args: &[&str]) -> CommandClassification {
     if args.iter().any(|a| *a == "-i" || a.starts_with("-i")) {
@@ -812,26 +828,6 @@ fn classify_tee(args: &[&str]) -> CommandClassification {
     }
 }
 
-fn classify_xargs(args: &[&str]) -> CommandClassification {
-    // xargs with an explicit command → classify that command
-    // Find the command after xargs flags
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i];
-        if arg == "-I" || arg == "-L" || arg == "-n" || arg == "-P" || arg == "-d" {
-            i += 2; // skip flag and its value
-            continue;
-        }
-        if arg.starts_with('-') {
-            i += 1;
-            continue;
-        }
-        // This is the command xargs will run
-        return classify_command_with_args(extract_command_name(arg), &args[i + 1..]);
-    }
-    // xargs with no explicit command defaults to echo → ReadOnly
-    CommandClassification::ReadOnly
-}
 
 // ---------------------------------------------------------------------------
 // Shell tokenization helpers
@@ -1574,5 +1570,117 @@ mod tests {
         assert_eq!(CommandClassification::ReadOnly.to_string(), "read_only");
         assert_eq!(CommandClassification::Write.to_string(), "write");
         assert_eq!(CommandClassification::Destructive.to_string(), "destructive");
+    }
+
+    // --- Custom config tests ---
+
+    #[test]
+    fn cfg01_custom_read_only_command() {
+        let mut config = CommandClassifierConfig::default();
+        config.read_only_commands.push("mytool".to_string());
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("mytool --flag"), CommandClassification::ReadOnly);
+    }
+
+    #[test]
+    fn cfg02_removed_from_read_only_defaults_to_write() {
+        let config = CommandClassifierConfig {
+            read_only_commands: vec!["cat".to_string()],
+            ..CommandClassifierConfig::default()
+        };
+        let classifier = CommandClassifier::new(config);
+        // "ls" was removed from read_only, so it defaults to Write
+        assert_eq!(classifier.classify("ls"), CommandClassification::Write);
+        // "cat" is still read-only
+        assert_eq!(classifier.classify("cat file"), CommandClassification::ReadOnly);
+    }
+
+    #[test]
+    fn cfg03_move_rm_to_write_list() {
+        let mut config = CommandClassifierConfig::default();
+        config.destructive_commands.retain(|c| c != "rm");
+        config.write_commands.push("rm".to_string());
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("rm file"), CommandClassification::Write);
+    }
+
+    #[test]
+    fn cfg04_custom_git_subcommands() {
+        let mut config = CommandClassifierConfig::default();
+        config.git_read_only_subcommands.push("stash".to_string());
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("git stash"), CommandClassification::ReadOnly);
+    }
+
+    #[test]
+    fn cfg05_custom_cargo_destructive() {
+        let mut config = CommandClassifierConfig::default();
+        config.cargo_destructive_subcommands.push("publish".to_string());
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("cargo publish"), CommandClassification::Destructive);
+    }
+
+    #[test]
+    fn cfg06_custom_npm_read_only_scripts() {
+        let mut config = CommandClassifierConfig::default();
+        config.npm_read_only_scripts.push("format".to_string());
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("npm run format"), CommandClassification::ReadOnly);
+    }
+
+    #[test]
+    fn cfg07_empty_lists_everything_defaults_to_write() {
+        let config = CommandClassifierConfig {
+            read_only_commands: vec![],
+            write_commands: vec![],
+            destructive_commands: vec![],
+            git_read_only_subcommands: vec![],
+            git_destructive_subcommands: vec![],
+            cargo_read_only_subcommands: vec![],
+            cargo_destructive_subcommands: vec![],
+            npm_read_only_subcommands: vec![],
+            npm_read_only_scripts: vec![],
+        };
+        let classifier = CommandClassifier::new(config);
+        assert_eq!(classifier.classify("ls"), CommandClassification::Write);
+        assert_eq!(classifier.classify("rm file"), CommandClassification::Write);
+        assert_eq!(classifier.classify("git status"), CommandClassification::Write);
+        assert_eq!(classifier.classify("cargo test"), CommandClassification::Write);
+    }
+
+    #[test]
+    fn cfg08_serde_roundtrip_toml() {
+        let config = CommandClassifierConfig::default();
+        let serialized = toml::to_string(&config).unwrap();
+        let deserialized: CommandClassifierConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(config.read_only_commands, deserialized.read_only_commands);
+        assert_eq!(config.write_commands, deserialized.write_commands);
+        assert_eq!(config.destructive_commands, deserialized.destructive_commands);
+        assert_eq!(config.git_read_only_subcommands, deserialized.git_read_only_subcommands);
+    }
+
+    #[test]
+    fn cfg09_partial_toml_missing_fields_get_defaults() {
+        let partial = r#"
+read_only_commands = ["ls", "cat"]
+"#;
+        let config: CommandClassifierConfig = toml::from_str(partial).unwrap();
+        assert_eq!(config.read_only_commands, vec!["ls", "cat"]);
+        // Other fields should be defaults
+        let defaults = CommandClassifierConfig::default();
+        assert_eq!(config.write_commands, defaults.write_commands);
+        assert_eq!(config.destructive_commands, defaults.destructive_commands);
+        assert_eq!(config.git_read_only_subcommands, defaults.git_read_only_subcommands);
+    }
+
+    #[test]
+    fn cfg10_classifier_with_defaults_matches_free_function() {
+        let classifier = CommandClassifier::with_defaults();
+        // Spot-check that the struct-based classifier matches the free function
+        assert_eq!(classifier.classify("ls -la"), classify("ls -la"));
+        assert_eq!(classifier.classify("rm -rf /tmp"), classify("rm -rf /tmp"));
+        assert_eq!(classifier.classify("git status"), classify("git status"));
+        assert_eq!(classifier.classify("cargo build"), classify("cargo build"));
+        assert_eq!(classifier.classify("npm test"), classify("npm test"));
     }
 }

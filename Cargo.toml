@@ -41,6 +41,8 @@ which = "7"
 glob = "0.3"
 regex = "1"
 walkdir = "2"
+toml = "0.8"
+dirs = "6"
 
 [patch.crates-io]
 vmm-sys-util = { path = "crates/vmm-sys-util-fork" }

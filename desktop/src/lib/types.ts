@@ -8,6 +8,7 @@ export interface SandboxConfig {
   external_modifications: ExternalModificationsSection;
   gitignore: GitignoreSection;
   claude_code: ClaudeCodeSection;
+  command_classifier: CommandClassifierSection;
 }
 
 export interface SandboxSection {
@@ -61,6 +62,59 @@ export interface ClaudeCodeSection {
   server_name: string;
   scope: string;
   disable_builtin_tools: boolean;
+}
+
+export interface CommandClassifierSection {
+  read_only_commands: string[];
+  write_commands: string[];
+  destructive_commands: string[];
+  git_read_only_subcommands: string[];
+  git_destructive_subcommands: string[];
+  cargo_read_only_subcommands: string[];
+  cargo_destructive_subcommands: string[];
+  npm_read_only_subcommands: string[];
+  npm_read_only_scripts: string[];
+}
+
+export function defaultCommandClassifier(): CommandClassifierSection {
+  return {
+    read_only_commands: [
+      "cd", "ls", "cat", "head", "tail", "less", "more", "wc", "file", "find",
+      "grep", "egrep", "fgrep", "rg", "ag", "awk", "gawk", "which", "whereis",
+      "type", "echo", "printf", "pwd", "env", "printenv", "whoami", "id",
+      "hostname", "uname", "date", "cal", "uptime", "df", "du", "free", "top",
+      "htop", "ps", "stat", "readlink", "realpath", "basename", "dirname",
+      "test", "[", "true", "false", "diff", "cmp", "md5sum", "sha256sum",
+      "sha1sum", "sha512sum", "xxd", "od", "strings", "tree", "bat", "jq",
+      "yq", "sort", "uniq", "cut", "tr", "column", "comm", "join", "paste",
+      "fold", "rev", "tac", "nl", "expand", "unexpand", "hexdump", "man",
+      "help", "info",
+    ],
+    write_commands: [
+      "touch", "mkdir", "cp", "mv", "chmod", "chown", "chgrp", "curl", "wget",
+      "tar", "unzip", "zip", "gzip", "gunzip", "bzip2", "bunzip2", "xz",
+      "unxz", "make", "cmake", "patch", "ln",
+    ],
+    destructive_commands: [
+      "rm", "rmdir", "dd", "mkfs", "shred", "truncate",
+    ],
+    git_read_only_subcommands: [
+      "status", "log", "diff", "show", "branch", "tag", "remote", "rev-parse",
+      "ls-files", "ls-tree", "describe", "shortlog", "blame", "bisect",
+      "reflog", "stash list", "config", "help", "version",
+    ],
+    git_destructive_subcommands: ["clean"],
+    cargo_read_only_subcommands: [
+      "check", "test", "clippy", "doc", "bench", "metadata", "tree", "version", "help",
+    ],
+    cargo_destructive_subcommands: ["clean"],
+    npm_read_only_subcommands: [
+      "test", "list", "ls", "view", "info", "outdated", "help", "version",
+    ],
+    npm_read_only_scripts: [
+      "test", "lint", "check", "typecheck", "type-check", "validate",
+    ],
+  };
 }
 
 export interface VmStatus {
@@ -162,5 +216,6 @@ export function defaultConfig(): SandboxConfig {
       scope: "user",
       disable_builtin_tools: true,
     },
+    command_classifier: defaultCommandClassifier(),
   };
 }

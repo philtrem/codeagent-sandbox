@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod command_classifier;
 pub mod command_waiter;
+pub mod config;
 pub mod control_bridge;
 pub mod error;
 pub mod event_bridge;

@@ -20,6 +20,8 @@ which = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
 
 codeagent-common = { path = "../common" }
 codeagent-interceptor = { path = "../interceptor" }

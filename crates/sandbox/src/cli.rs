@@ -52,6 +52,12 @@ pub struct CliArgs {
     /// Path to the virtiofsd binary (overrides auto-detection).
     #[arg(long)]
     pub virtiofsd_binary: Option<PathBuf>,
+
+    /// Path to a TOML configuration file.
+    /// If not specified, the platform default path is used
+    /// (`{config_dir}/CodeAgent/codeagent.toml`).
+    #[arg(long)]
+    pub config_file: Option<PathBuf>,
 }
 
 #[cfg(test)]

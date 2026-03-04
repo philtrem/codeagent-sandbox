@@ -18,7 +18,7 @@ use codeagent_stdio::protocol::{
 use codeagent_stdio::{Event, RequestHandler, StdioError};
 
 use crate::cli::CliArgs;
-use crate::command_classifier::{self, SanitizeResult};
+use crate::command_classifier::{self, CommandClassifier, CommandClassifierConfig, SanitizeResult};
 use crate::command_waiter::CommandWaiter;
 use crate::control_bridge;
 use crate::error::AgentError;
@@ -60,12 +60,15 @@ pub struct Orchestrator {
     /// Shared with the event bridge so MCP `Bash` tool can block
     /// until a VM command completes and collect its output.
     command_waiter: Arc<CommandWaiter>,
+    /// Pre-computed command classifier from config.
+    classifier: CommandClassifier,
 }
 
 impl Orchestrator {
     pub fn new(
         cli_args: CliArgs,
         event_sender: mpsc::UnboundedSender<Event>,
+        classifier_config: CommandClassifierConfig,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(SessionState::Idle)),
@@ -73,6 +76,7 @@ impl Orchestrator {
             event_sender,
             safeguard_receiver: Mutex::new(None),
             command_waiter: CommandWaiter::new(),
+            classifier: CommandClassifier::new(classifier_config),
         }
     }
 
@@ -953,7 +957,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         }
 
         // Classify for response metadata (informational — no gate)
-        let classification = command_classifier::classify(&args.command);
+        let classification = self.classifier.classify(&args.command);
 
         let (control_writer, control_handler, command_id) = {
             let state = self.state.lock().unwrap();

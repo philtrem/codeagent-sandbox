@@ -2,24 +2,26 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use codeagent_sandbox::cli::CliArgs;
+use codeagent_sandbox::config::load_config;
 use codeagent_sandbox::orchestrator::Orchestrator;
 
 #[tokio::main]
 async fn main() {
     let args = CliArgs::parse();
+    let config = load_config(args.config_file.as_deref());
 
     match args.protocol.as_str() {
-        "mcp" => run_mcp(args).await,
-        _ => run_stdio(args).await,
+        "mcp" => run_mcp(args, config).await,
+        _ => run_stdio(args, config).await,
     }
 }
 
-async fn run_stdio(args: CliArgs) {
+async fn run_stdio(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlConfig) {
     use codeagent_stdio::{Router, StdioServer};
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let working_dir = args.working_dirs[0].clone();
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier);
 
     let router = Router::new(working_dir, Box::new(orchestrator));
     let mut server = StdioServer::new(router, event_receiver);
@@ -34,7 +36,7 @@ async fn run_stdio(args: CliArgs) {
     }
 }
 
-async fn run_mcp(args: CliArgs) {
+async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlConfig) {
     use codeagent_mcp::{McpRouter, McpServer};
     use codeagent_stdio::protocol::SessionStartPayload;
     use codeagent_stdio::RequestHandler;
@@ -51,7 +53,7 @@ async fn run_mcp(args: CliArgs) {
             label: None,
         })
         .collect();
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier);
 
     // MCP mode auto-starts the session from CLI args since MCP has no
     // session.start concept — the client expects tools to be ready immediately.

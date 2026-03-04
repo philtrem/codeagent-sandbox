@@ -7,10 +7,12 @@ import {
   AlertCircle,
   Plus,
   X,
+  RotateCcw,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
+import { defaultCommandClassifier } from "../../lib/types";
 
 function Section({
   title,
@@ -227,6 +229,84 @@ function Select({
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+function CommandListEditor({
+  label,
+  items,
+  onChange,
+}: {
+  label: string;
+  items: string[];
+  onChange: (items: string[]) => void;
+}) {
+  const [inputValue, setInputValue] = useState("");
+
+  const addItem = () => {
+    const trimmed = inputValue.trim();
+    if (trimmed && !items.includes(trimmed)) {
+      onChange([...items, trimmed]);
+      setInputValue("");
+    }
+  };
+
+  const removeItem = (index: number) => {
+    onChange(items.filter((_, i) => i !== index));
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addItem();
+    }
+  };
+
+  return (
+    <div>
+      <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-secondary)]">
+        {label}
+      </label>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {items.map((item, index) => (
+          <span
+            key={`${item}-${index}`}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5 text-xs"
+          >
+            <code>{item}</code>
+            <button
+              onClick={() => removeItem(index)}
+              className="ml-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+              title={`Remove ${item}`}
+            >
+              <X size={10} />
+            </button>
+          </span>
+        ))}
+        {items.length === 0 && (
+          <span className="text-xs italic text-[var(--color-text-secondary)]">
+            No commands configured
+          </span>
+        )}
+      </div>
+      <div className="flex gap-1.5">
+        <input
+          type="text"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Add command..."
+          className="w-40 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs"
+        />
+        <button
+          onClick={addItem}
+          disabled={!inputValue.trim()}
+          className="flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+        >
+          <Plus size={10} /> Add
+        </button>
+      </div>
     </div>
   );
 }
@@ -500,6 +580,111 @@ export default function SandboxConfig() {
             { value: "trace", label: "Trace" },
           ]}
         />
+      </Section>
+
+      <Section title="Command Classification" defaultOpen={false}>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Configure which shell commands are classified as read-only, write, or
+          destructive. Sanitization rules (fork bombs, sudo, raw device access)
+          are hardcoded and cannot be changed here.
+        </p>
+        <div className="flex justify-end">
+          <button
+            onClick={() =>
+              updateSection("command_classifier", defaultCommandClassifier())
+            }
+            className="flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-tertiary)]"
+          >
+            <RotateCcw size={10} /> Reset to Defaults
+          </button>
+        </div>
+
+        <CommandListEditor
+          label="Read-Only Commands"
+          items={config.command_classifier.read_only_commands}
+          onChange={(items) =>
+            updateSection("command_classifier", { read_only_commands: items })
+          }
+        />
+        <CommandListEditor
+          label="Write Commands"
+          items={config.command_classifier.write_commands}
+          onChange={(items) =>
+            updateSection("command_classifier", { write_commands: items })
+          }
+        />
+        <CommandListEditor
+          label="Destructive Commands"
+          items={config.command_classifier.destructive_commands}
+          onChange={(items) =>
+            updateSection("command_classifier", {
+              destructive_commands: items,
+            })
+          }
+        />
+
+        <Section title="Git Subcommands" defaultOpen={false}>
+          <CommandListEditor
+            label="Read-Only"
+            items={config.command_classifier.git_read_only_subcommands}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                git_read_only_subcommands: items,
+              })
+            }
+          />
+          <CommandListEditor
+            label="Destructive"
+            items={config.command_classifier.git_destructive_subcommands}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                git_destructive_subcommands: items,
+              })
+            }
+          />
+        </Section>
+
+        <Section title="Cargo Subcommands" defaultOpen={false}>
+          <CommandListEditor
+            label="Read-Only"
+            items={config.command_classifier.cargo_read_only_subcommands}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                cargo_read_only_subcommands: items,
+              })
+            }
+          />
+          <CommandListEditor
+            label="Destructive"
+            items={config.command_classifier.cargo_destructive_subcommands}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                cargo_destructive_subcommands: items,
+              })
+            }
+          />
+        </Section>
+
+        <Section title="NPM Subcommands & Scripts" defaultOpen={false}>
+          <CommandListEditor
+            label="Read-Only Subcommands"
+            items={config.command_classifier.npm_read_only_subcommands}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                npm_read_only_subcommands: items,
+              })
+            }
+          />
+          <CommandListEditor
+            label="Read-Only Scripts (for npm run)"
+            items={config.command_classifier.npm_read_only_scripts}
+            onChange={(items) =>
+              updateSection("command_classifier", {
+                npm_read_only_scripts: items,
+              })
+            }
+          />
+        </Section>
       </Section>
     </div>
   );

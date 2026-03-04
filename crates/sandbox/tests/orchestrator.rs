@@ -3,6 +3,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use codeagent_sandbox::cli::CliArgs;
+use codeagent_sandbox::command_classifier::CommandClassifierConfig;
 use codeagent_sandbox::orchestrator::Orchestrator;
 use codeagent_stdio::protocol::{
     FsListPayload, FsReadPayload, SessionStartPayload, UndoHistoryPayload, UndoRollbackPayload,
@@ -24,6 +25,7 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     }
 }
 
@@ -46,7 +48,7 @@ fn setup() -> (Orchestrator, mpsc::UnboundedReceiver<Event>, TempDir, TempDir) {
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let args = make_args(working.path(), undo.path());
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
 
     (orchestrator, event_receiver, working, undo)
 }
@@ -271,7 +273,7 @@ fn ao_12_crash_recovery_event() {
 
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let args = make_args(working.path(), undo.path());
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
 
     let payload = make_start_payload(&working.path().display().to_string());
     let _ = orchestrator.session_start(payload);
@@ -603,7 +605,7 @@ fn ao_14_no_vm_components_falls_back_to_host_mode() {
     assert!(args.kernel_path.is_none());
     assert!(args.initrd_path.is_none());
 
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
     let payload = make_start_payload(&working.path().display().to_string());
 
     let result = orchestrator.session_start(payload).unwrap();
@@ -666,8 +668,9 @@ fn ao_16_undo_inside_working_dir_rejected() {
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     };
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
 
     let payload = make_start_payload(&working.path().display().to_string());
     let result = orchestrator.session_start(payload);
@@ -699,8 +702,9 @@ fn ao_17_working_inside_undo_dir_rejected() {
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     };
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
 
     let payload = make_start_payload(&working.display().to_string());
     let result = orchestrator.session_start(payload);
