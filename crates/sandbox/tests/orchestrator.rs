@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use codeagent_sandbox::cli::CliArgs;
 use codeagent_sandbox::command_classifier::CommandClassifierConfig;
-use codeagent_sandbox::orchestrator::Orchestrator;
+use codeagent_sandbox::orchestrator::{undo_subdir_name, Orchestrator};
 use codeagent_stdio::protocol::{
     FsListPayload, FsReadPayload, SessionStartPayload, UndoHistoryPayload, UndoRollbackPayload,
     WorkingDirectoryConfig,
@@ -262,10 +262,11 @@ fn ao_12_crash_recovery_event() {
     let undo = TempDir::new().unwrap();
 
     // Simulate an incomplete step by creating the WAL structure
-    let wal_dir = undo.path().join("0").join("wal").join("in_progress");
+    let subdir_name = undo_subdir_name(working.path());
+    let wal_dir = undo.path().join(&subdir_name).join("wal").join("in_progress");
     std::fs::create_dir_all(&wal_dir).unwrap();
     // Write version file so the interceptor doesn't treat it as fresh
-    let step_base = undo.path().join("0");
+    let step_base = undo.path().join(&subdir_name);
     std::fs::create_dir_all(step_base.join("steps")).unwrap();
     std::fs::write(step_base.join("version"), "1").unwrap();
     // Create empty WAL preimages dir
@@ -971,5 +972,94 @@ fn ao_19_no_barrier_on_fresh_session() {
         if matches!(event, Event::ExternalModification { .. }) {
             panic!("should not emit ExternalModification on a fresh session with no steps");
         }
+    }
+}
+
+// -----------------------------------------------------------------------
+// AO-20: undo_subdir_name produces stable hashes
+// -----------------------------------------------------------------------
+#[test]
+fn ao_20_stable_undo_subdir_name() {
+    let dir = TempDir::new().unwrap();
+    let name1 = undo_subdir_name(dir.path());
+    let name2 = undo_subdir_name(dir.path());
+    assert_eq!(name1, name2, "same path should produce same hash");
+    assert_eq!(name1.len(), 16, "hash should be 16 hex chars");
+    assert!(
+        name1.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash should be hex: {name1}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// AO-21: reordered directories map to the same undo subdirs
+// -----------------------------------------------------------------------
+#[test]
+fn ao_21_reordered_dirs_stable_mapping() {
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    let hash_a = undo_subdir_name(dir_a.path());
+    let hash_b = undo_subdir_name(dir_b.path());
+    assert_ne!(hash_a, hash_b, "different dirs should have different hashes");
+
+    // Session 1: dirs in order [a, b]
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = CliArgs {
+            working_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
+            undo_dir: undo.path().to_path_buf(),
+            ..make_args(dir_a.path(), undo.path())
+        };
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
+        let payload = SessionStartPayload {
+            working_directories: vec![
+                WorkingDirectoryConfig { path: dir_a.path().display().to_string(), label: None },
+                WorkingDirectoryConfig { path: dir_b.path().display().to_string(), label: None },
+            ],
+            network_policy: "disabled".to_string(),
+            vm_mode: "ephemeral".to_string(),
+            protocol_version: None,
+        };
+        let _ = orch.session_start(payload);
+
+        // Write via MCP to create undo steps
+        orch.write_file(WriteFileArgs {
+            path: "marker.txt".to_string(),
+            content: "from_a".to_string(),
+        }).unwrap();
+        let _ = orch.session_stop();
+    }
+
+    // Verify undo data landed in the hash-named directory
+    assert!(undo.path().join(&hash_a).join("steps").exists());
+
+    // Session 2: dirs in reversed order [b, a] — undo data should still match
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = CliArgs {
+            working_dirs: vec![dir_b.path().to_path_buf(), dir_a.path().to_path_buf()],
+            undo_dir: undo.path().to_path_buf(),
+            ..make_args(dir_b.path(), undo.path())
+        };
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default());
+        let payload = SessionStartPayload {
+            working_directories: vec![
+                WorkingDirectoryConfig { path: dir_b.path().display().to_string(), label: None },
+                WorkingDirectoryConfig { path: dir_a.path().display().to_string(), label: None },
+            ],
+            network_policy: "disabled".to_string(),
+            vm_mode: "ephemeral".to_string(),
+            protocol_version: None,
+        };
+        let result = orch.session_start(payload);
+        assert!(result.is_ok(), "session with reordered dirs should succeed");
+
+        // dir_a's undo history should be found (barrier placed).
+        // dir_a is at index 1 in this session (reversed order).
+        let history = orch.undo_history(UndoHistoryPayload { directory: Some("1".to_string()) }).unwrap();
+        let steps = history["steps"].as_array().unwrap();
+        assert!(!steps.is_empty(), "should find previous undo steps for dir_a");
     }
 }

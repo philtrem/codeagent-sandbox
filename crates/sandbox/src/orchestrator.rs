@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +25,19 @@ use crate::error::AgentError;
 use crate::qemu::{QemuConfig, QemuProcess};
 use crate::safeguard_bridge::PendingSafeguard;
 use crate::session::{Session, SessionState};
+
+/// Compute a stable subdirectory name for a working directory's undo data.
+///
+/// Uses the first 16 hex characters of a blake3 hash of the canonicalized,
+/// forward-slash-normalized path. This ensures the same working directory
+/// always maps to the same undo subdirectory regardless of ordering.
+pub fn undo_subdir_name(working_dir: &Path) -> String {
+    let canonical = std::fs::canonicalize(working_dir)
+        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let normalized = canonical.to_string_lossy().replace('\\', "/");
+    let hash = blake3::hash(normalized.as_bytes());
+    hash.to_hex()[..16].to_string()
+}
 
 /// Check that two paths do not contain each other.
 /// Both paths must exist (so canonicalization works).
@@ -147,8 +160,8 @@ impl Orchestrator {
         let mut interceptors = Vec::with_capacity(working_dirs.len());
         let mut undo_dirs = Vec::with_capacity(working_dirs.len());
 
-        for (index, working_dir) in working_dirs.iter().enumerate() {
-            let undo_dir = self.cli_args.undo_dir.join(index.to_string());
+        for working_dir in &working_dirs {
+            let undo_dir = self.cli_args.undo_dir.join(undo_subdir_name(working_dir));
             let interceptor = UndoInterceptor::new(working_dir.clone(), undo_dir.clone());
 
             // Run crash recovery

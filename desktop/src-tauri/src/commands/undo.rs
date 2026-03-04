@@ -157,9 +157,9 @@ pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
             continue;
         }
 
-        // Each per-working-directory subdirectory is named by its index (0, 1, 2, ...)
-        let name = entry.file_name();
-        if name.to_string_lossy().parse::<usize>().is_err() {
+        // Accept any subdirectory that contains a `steps/` dir (the real indicator
+        // of an undo directory). This handles both old numeric names and new hash-based names.
+        if !path.join("steps").is_dir() {
             continue;
         }
 
@@ -170,4 +170,28 @@ pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
     steps.sort_by(|a, b| b.step_id.cmp(&a.step_id));
 
     Ok(UndoHistoryData { steps, barriers })
+}
+
+/// Remove all undo history subdirectories under the given undo_dir.
+#[tauri::command]
+pub fn clear_undo_history(undo_dir: String) -> Result<(), String> {
+    let base = Path::new(&undo_dir);
+
+    if !base.exists() || !base.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(base).map_err(|e| format!("Failed to read undo dir: {e}"))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .map_err(|e| format!("Failed to remove {}: {e}", path.display()))?;
+        }
+    }
+
+    Ok(())
 }

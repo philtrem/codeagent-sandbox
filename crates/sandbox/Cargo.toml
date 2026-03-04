@@ -22,6 +22,7 @@ regex = { workspace = true }
 walkdir = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
+blake3 = { workspace = true }
 
 codeagent-common = { path = "../common" }
 codeagent-interceptor = { path = "../interceptor" }

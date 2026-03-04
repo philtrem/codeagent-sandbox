@@ -47,6 +47,7 @@ pub fn run() {
             system::ensure_directory,
             // Undo commands
             undo::read_undo_history,
+            undo::clear_undo_history,
             // VM MCP passthrough
             vm::send_mcp_request,
             // Terminal + Debug console

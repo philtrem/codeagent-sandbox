@@ -9,6 +9,7 @@ interface UndoHistoryState {
   error: string | null;
   fetch: (undoDir: string) => Promise<void>;
   rollback: (count: number, force: boolean) => Promise<string>;
+  clearHistory: (undoDir: string) => Promise<void>;
 }
 
 let requestIdCounter = 1000;
@@ -50,6 +51,11 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
       requestJson: request,
     });
     return response;
+  },
+
+  clearHistory: async (undoDir: string) => {
+    await invoke("clear_undo_history", { undoDir });
+    set({ data: null, error: null });
   },
 }));
 

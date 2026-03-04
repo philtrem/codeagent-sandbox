@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   FileText,
   Folder,
+  Trash2,
   X,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
@@ -233,11 +234,56 @@ function RollbackDialog({
   );
 }
 
+function ClearHistoryDialog({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-96 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-6 shadow-xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Clear Undo History</h3>
+          <button
+            onClick={onCancel}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+          This will permanently remove all undo history. You will not be able to
+          roll back any previous changes. This action cannot be undone.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-bg-tertiary)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="rounded bg-[var(--color-error)] px-4 py-2 text-sm text-white hover:opacity-90"
+          >
+            Clear All History
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function UndoHistory() {
   const { config } = useSandboxConfig();
   const vmStatus = useVmStore((s) => s.status);
   const { data, loading, error } = useUndoHistoryStore();
   const rollback = useUndoHistoryStore((s) => s.rollback);
+  const clearHistory = useUndoHistoryStore((s) => s.clearHistory);
   const fetchHistory = useUndoHistoryStore((s) => s.fetch);
   const addToast = useToastStore((s) => s.addToast);
 
@@ -247,6 +293,7 @@ export default function UndoHistory() {
   useUndoHistoryPolling(undoDir, vmRunning);
 
   const [pendingRollback, setPendingRollback] = useState<number | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const handleRollback = (count: number) => {
     setPendingRollback(count);
@@ -268,6 +315,16 @@ export default function UndoHistory() {
       }
     } catch (e) {
       addToast("error", `Rollback failed: ${e}`);
+    }
+  };
+
+  const confirmClear = async () => {
+    setShowClearConfirm(false);
+    try {
+      await clearHistory(undoDir);
+      addToast("success", "Undo history cleared");
+    } catch (e) {
+      addToast("error", `Failed to clear history: ${e}`);
     }
   };
 
@@ -295,7 +352,18 @@ export default function UndoHistory() {
 
   return (
     <div className="mx-auto max-w-2xl">
-      <h1 className="mb-6 text-xl font-bold">Undo History</h1>
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-xl font-bold">Undo History</h1>
+        {data && data.steps.length > 0 && (
+          <button
+            onClick={() => setShowClearConfirm(true)}
+            className="flex items-center gap-1.5 rounded border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
+          >
+            <Trash2 size={12} />
+            Clear History
+          </button>
+        )}
+      </div>
 
       {loading && !data && (
         <div className="text-sm text-[var(--color-text-secondary)]">
@@ -351,6 +419,13 @@ export default function UndoHistory() {
           hasBarriers={hasBarriersInRange(pendingRollback)}
           onConfirm={confirmRollback}
           onCancel={() => setPendingRollback(null)}
+        />
+      )}
+
+      {showClearConfirm && (
+        <ClearHistoryDialog
+          onConfirm={confirmClear}
+          onCancel={() => setShowClearConfirm(false)}
         />
       )}
     </div>
