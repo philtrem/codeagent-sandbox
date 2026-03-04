@@ -18,6 +18,7 @@ use codeagent_stdio::protocol::{
 use codeagent_stdio::{Event, RequestHandler, StdioError};
 
 use crate::cli::CliArgs;
+use crate::command_classifier::{self, SanitizeResult};
 use crate::command_waiter::CommandWaiter;
 use crate::control_bridge;
 use crate::error::AgentError;
@@ -944,6 +945,16 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
 
+        // Sanitize: reject inherently dangerous commands before they reach the VM
+        if let SanitizeResult::Rejected { reason } = command_classifier::sanitize(&args.command) {
+            return Err(McpError::InvalidParams {
+                message: format!("command rejected: {reason}"),
+            });
+        }
+
+        // Classify for response metadata (informational — no gate)
+        let classification = command_classifier::classify(&args.command);
+
         let (control_writer, control_handler, command_id) = {
             let state = self.state.lock().unwrap();
             let session = match &*state {
@@ -1027,6 +1038,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                     "command_id": command_id,
                     "exit_code": exit_code,
                     "output": output,
+                    "classification": classification.to_string(),
                 }))
             }
             Some(r) => {
@@ -1045,6 +1057,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                     "command_id": command_id,
                     "status": "timeout",
                     "output": output,
+                    "classification": classification.to_string(),
                 }))
             }
             None => Err(McpError::InternalError {

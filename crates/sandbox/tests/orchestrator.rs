@@ -312,8 +312,8 @@ fn ao_13_agent_execute_unavailable() {
 
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
-    EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs, ReadFileArgs,
-    UndoArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    ReadFileArgs, UndoArgs,
 };
 
 #[test]
@@ -707,4 +707,79 @@ fn ao_17_working_inside_undo_dir_rejected() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("overlaps"), "expected overlap error, got: {err}");
+}
+
+// -----------------------------------------------------------------------
+// BA-01: Sanitization rejection returns InvalidParams error
+// -----------------------------------------------------------------------
+#[test]
+fn ba_01_bash_sanitization_rejection() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Fork bomb should be rejected before reaching the VM
+    let result = orchestrator.bash(BashArgs {
+        command: ":(){ :|:& };:".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    // JSON-RPC 2.0 invalid params code
+    assert_eq!(rpc_err.code, -32602);
+    assert!(
+        rpc_err.message.contains("fork bomb"),
+        "expected fork bomb rejection, got: {}",
+        rpc_err.message
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-02: Sudo rejection
+// -----------------------------------------------------------------------
+#[test]
+fn ba_02_bash_sudo_rejected() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "sudo rm -rf /".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    assert!(
+        rpc_err.message.contains("privilege escalation"),
+        "expected privilege escalation rejection, got: {}",
+        rpc_err.message
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-03: Empty command rejection
+// -----------------------------------------------------------------------
+#[test]
+fn ba_03_bash_empty_command_rejected() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    assert!(
+        rpc_err.message.contains("empty command"),
+        "expected empty command rejection, got: {}",
+        rpc_err.message
+    );
 }
