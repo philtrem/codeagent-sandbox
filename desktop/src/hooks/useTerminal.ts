@@ -30,10 +30,10 @@ const COMMON_COMMANDS = [
   "ls", "cd", "cat", "echo", "mkdir", "rmdir", "rm", "cp", "mv", "touch",
   "pwd", "find", "grep", "head", "tail", "wc", "sort", "uniq", "chmod",
   "chown", "ps", "kill", "df", "du", "tar", "gzip", "gunzip", "curl",
-  "wget", "which", "whoami", "env", "export", "source", "history",
+  "wget", "which", "whoami", "env", "export", "source", "history", "clear",
   "sed", "awk", "cut", "tr", "tee", "xargs", "diff", "file", "stat",
   "ln", "readlink", "mount", "umount", "uname", "date", "sleep", "true",
-  "false", "test", "sh",
+  "false", "test", "sh", "bash",
 ];
 
 /**
@@ -97,7 +97,7 @@ const pathCache = new Map<string, { entries: string[]; timestamp: number }>();
 const PATH_CACHE_TTL_MS = 5000;
 
 /**
- * Fetch path completions from the VM using `find` (POSIX, works in busybox sh).
+ * Fetch path completions from the VM using bash `compgen`.
  *
  * Calls `execute_terminal_command` directly (bypassing the terminal store)
  * so the command doesn't appear in terminal output.
@@ -112,48 +112,27 @@ export async function getPathSuggestions(
 
   const { command, argPrefix } = parsed;
   const directoriesOnly = DIRECTORY_COMMANDS.has(command);
-  const typeFlag = directoriesOnly ? " -type d" : "";
+  const compgenFlag = directoriesOnly ? "-d" : "-f";
 
-  // Split argPrefix into directory and name parts
-  const lastSlash = argPrefix.lastIndexOf("/");
-  let searchDir: string;
-  let namePrefix: string;
-  let stripDotSlash: boolean;
-
-  if (lastSlash === -1) {
-    // Relative name in cwd: "sc" → find . -name 'sc*'
-    searchDir = ".";
-    namePrefix = argPrefix;
-    stripDotSlash = true;
-  } else {
-    // Path with directory: "/etc/p" → find /etc -name 'p*'
-    searchDir = argPrefix.slice(0, lastSlash) || "/";
-    namePrefix = argPrefix.slice(lastSlash + 1);
-    stripDotSlash = false;
-  }
-
-  const cacheKey = `${cwd}:${directoriesOnly}:${argPrefix}`;
+  const cacheKey = `${cwd}:${compgenFlag}:${argPrefix}`;
   const cached = pathCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < PATH_CACHE_TTL_MS) {
     return cached.entries.slice(0, limit);
   }
 
   try {
-    const nameFilter = namePrefix
-      ? ` -name ${shellQuote(namePrefix + "*")}`
-      : "";
-    const strip = stripDotSlash ? " | sed 's|^\\./||'" : "";
-    const shellCmd =
-      `cd ${shellQuote(cwd)} && find ${shellQuote(searchDir)}` +
-      ` -mindepth 1 -maxdepth 1${typeFlag}${nameFilter}` +
-      ` 2>/dev/null${strip} | sort | head -n ${limit}`;
-
+    const shellCmd = `cd ${shellQuote(cwd)} && compgen ${compgenFlag} -- ${shellQuote(argPrefix)}`;
     const result = await invoke<TerminalOutput>("execute_terminal_command", {
       command: shellCmd,
       timeout: 3,
     });
 
-    if (result.status !== "completed" || result.exit_code !== 0) return [];
+    // compgen returns exit code 1 when there are no matches
+    if (result.status !== "completed") return [];
+    if (result.exit_code !== 0 && result.exit_code !== 1) {
+      console.warn("[autocomplete] unexpected exit code:", result.exit_code, result.output);
+      return [];
+    }
 
     const entries = result.output
       .trim()
@@ -162,7 +141,8 @@ export async function getPathSuggestions(
 
     pathCache.set(cacheKey, { entries, timestamp: Date.now() });
     return entries.slice(0, limit);
-  } catch {
+  } catch (err) {
+    console.warn("[autocomplete] path suggestion failed:", err);
     return [];
   }
 }

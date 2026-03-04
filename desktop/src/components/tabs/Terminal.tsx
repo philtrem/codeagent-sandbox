@@ -104,6 +104,12 @@ function TerminalPanel() {
       return;
     }
 
+    // Clear stale suggestions immediately while debounce waits for new ones.
+    // This prevents Enter from accepting an outdated suggestion if the user
+    // types faster than the async fetch resolves.
+    setSuggestions([]);
+    setSelectedSuggestionIndex(-1);
+
     // Typing an argument — fetch path suggestions from the VM with debounce
     const timer = setTimeout(() => {
       const currentCwd = useTerminalStore.getState().cwd;
