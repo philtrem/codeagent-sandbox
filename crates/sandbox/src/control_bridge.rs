@@ -52,6 +52,10 @@ where
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!(
+                "{{\"level\":\"debug\",\"component\":\"control_reader\",\"message\":\"vm message: {}\"}}",
+                line.chars().take(200).collect::<String>()
+            );
             match parse_vm_message(&line) {
                 Ok(msg) => {
                     handler.handle_vm_message(msg).await;

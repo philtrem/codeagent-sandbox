@@ -65,6 +65,10 @@ fn forward_to_command_waiter(event: &HandlerEvent, waiter: &CommandWaiter) {
             exit_code,
             ..
         } => {
+            eprintln!(
+                "{{\"level\":\"debug\",\"component\":\"event_bridge\",\"message\":\"forwarding StepCompleted step_id={} exit_code={} to command_waiter\"}}",
+                step_id, exit_code
+            );
             waiter.mark_completed(*step_id as u64, *exit_code);
         }
         _ => {}

@@ -994,15 +994,29 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: "control channel closed".to_string(),
             })?;
 
-        // Block until the command completes or times out
+        // Block until the command completes or times out.
+        // Use block_in_place so tokio can spawn a replacement worker thread
+        // while this one is blocked on the Condvar — otherwise async tasks
+        // (control reader, event bridge, P9 server) may starve.
         let timeout = std::time::Duration::from_secs(
             args.timeout.unwrap_or(120) as u64,
         );
-        let result = self.command_waiter.wait_for_completion(command_id, timeout);
+        eprintln!(
+            "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"execute_command: waiting for command {} (timeout {}s)\"}}",
+            command_id,
+            timeout.as_secs()
+        );
+        let result = tokio::task::block_in_place(|| {
+            self.command_waiter.wait_for_completion(command_id, timeout)
+        });
 
         match result {
             Some(r) if r.exit_code.is_some() => {
                 let exit_code = r.exit_code.unwrap();
+                eprintln!(
+                    "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"execute_command: command {} completed with exit code {}\"}}",
+                    command_id, exit_code
+                );
                 let mut output = r.stdout;
                 if !r.stderr.is_empty() {
                     if !output.is_empty() {
@@ -1017,7 +1031,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 }))
             }
             Some(r) => {
-                // Timed out — return partial output
+                eprintln!(
+                    "{{\"level\":\"warn\",\"component\":\"mcp\",\"message\":\"execute_command: command {} timed out\"}}",
+                    command_id
+                );
                 let mut output = r.stdout;
                 if !r.stderr.is_empty() {
                     if !output.is_empty() {
