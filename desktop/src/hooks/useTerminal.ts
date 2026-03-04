@@ -16,6 +16,7 @@ interface TerminalState {
   commandHistory: string[];
   historyIndex: number;
   isRunning: boolean;
+  cwd: string;
 
   execute: (command: string, timeout?: number) => Promise<void>;
   clear: () => void;
@@ -24,14 +25,48 @@ interface TerminalState {
 
 let nextEntryId = 0;
 
+/** Check whether the command is a bare `cd` (possibly with a path argument). */
+function isCdCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return trimmed === "cd" || trimmed.startsWith("cd ");
+}
+
+/**
+ * Wrap a command so it runs inside the tracked working directory.
+ *
+ * For `cd` commands we append `&& pwd` so we can read back the new
+ * absolute path from the output.  For everything else we just prepend
+ * `cd <cwd> && `.
+ */
+function wrapCommand(command: string, cwd: string): { wrapped: string; expectsCwd: boolean } {
+  if (isCdCommand(command)) {
+    return {
+      wrapped: `cd ${shellQuote(cwd)} && ${command} && pwd`,
+      expectsCwd: true,
+    };
+  }
+  return {
+    wrapped: `cd ${shellQuote(cwd)} && ${command}`,
+    expectsCwd: false,
+  };
+}
+
+/** Minimal POSIX shell quoting (single-quote the path). */
+function shellQuote(path: string): string {
+  return `'${path.replace(/'/g, "'\\''")}'`;
+}
+
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   entries: [],
   commandHistory: [],
   historyIndex: -1,
   isRunning: false,
+  cwd: "/",
 
   execute: async (command: string, timeout?: number) => {
     const id = `entry-${nextEntryId++}`;
+    const { cwd } = get();
+
     const entry: TerminalEntry = {
       id,
       command,
@@ -48,24 +83,45 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       isRunning: true,
     }));
 
+    const { wrapped, expectsCwd } = wrapCommand(command, cwd);
+
     try {
       const result = await invoke<TerminalOutput>("execute_terminal_command", {
-        command,
+        command: wrapped,
         timeout: timeout ?? null,
       });
+
+      let output = result.output;
+      let newCwd = cwd;
+
+      // For cd commands, the last line of output is the new working directory
+      if (expectsCwd && result.status === "completed" && result.exit_code === 0) {
+        const lines = output.trimEnd().split("\n");
+        if (lines.length > 0) {
+          const lastLine = lines[lines.length - 1].trim();
+          // pwd output is always an absolute path
+          if (lastLine.startsWith("/")) {
+            newCwd = lastLine;
+            // Remove the pwd output line from displayed output
+            lines.pop();
+            output = lines.join("\n");
+          }
+        }
+      }
 
       set((state) => ({
         entries: state.entries.map((e) =>
           e.id === id
             ? {
                 ...e,
-                output: result.output,
+                output,
                 exitCode: result.exit_code,
                 status: result.status as TerminalEntry["status"],
               }
             : e,
         ),
         isRunning: false,
+        cwd: newCwd,
       }));
     } catch (err) {
       set((state) => ({

@@ -55,7 +55,7 @@ function ExitCodeBadge({ entry }: { entry: TerminalEntry }) {
 }
 
 function TerminalPanel() {
-  const { entries, isRunning, execute, clear } = useTerminalStore();
+  const { entries, isRunning, execute, clear, cwd } = useTerminalStore();
   const vmState = useVmStore((s) => s.status.state);
   const sandboxMode = useVmStore((s) => s.sandboxMode);
   const [input, setInput] = useState("");
@@ -124,8 +124,7 @@ function TerminalPanel() {
         {entries.map((entry) => (
           <div key={entry.id} className="mb-3">
             <div className="text-green-400">
-              <span className="text-gray-500">$ </span>
-              {entry.command}
+              <span className="text-gray-500">$ </span>{entry.command}
             </div>
             {entry.output && (
               <pre className="mt-1 whitespace-pre-wrap break-all text-gray-300">
@@ -142,6 +141,7 @@ function TerminalPanel() {
         onSubmit={handleSubmit}
         className="flex items-center border-t border-[var(--color-border)] bg-[#1a1a2e] px-3 py-2"
       >
+        <span className="mr-2 shrink-0 font-mono text-sm text-gray-500">{cwd}</span>
         <span className="mr-2 font-mono text-sm text-green-400">$</span>
         <input
           ref={inputRef}
