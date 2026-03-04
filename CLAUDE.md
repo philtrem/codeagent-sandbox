@@ -67,8 +67,9 @@ xtask/                              # Development task runner (NOT a workspace m
   Cargo.toml                       #   standalone crate, depends on clap
   src/main.rs                      #   CLI dispatch: build-guest subcommand
 guest/                              # Guest VM image build files
-  Dockerfile                       #   multi-stage: compile shim (musl), assemble initramfs
-  init.sh                          #   /init script for guest VM boot (mount + start shim)
+  Dockerfile                       #   multi-stage: compile shim + p9proxy (musl), assemble initramfs
+  init.sh                          #   /init script for guest VM boot (virtiofs or p9proxy mount,
+                                   #   sandbox user creation, start shim)
 crates/
   common/                          # codeagent-common — shared types and errors
     src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
@@ -192,8 +193,9 @@ crates/
                                    #   handle_remove, handle_flush, qid_from_path (FNV-1a hash)
         walk.rs                    #   handle_walk (path traversal + containment), is_contained(),
                                    #   logical_contains(), resolve_logical()
-        file.rs                    #   handle_lopen, handle_lcreate, handle_read, handle_write,
-                                   #   handle_fsync, open_with_flags (Linux O_* → Rust OpenOptions)
+        file.rs                    #   handle_lopen (skips open for dirs on Windows), handle_lcreate,
+                                   #   handle_read, handle_write, handle_fsync,
+                                   #   open_with_flags (Linux O_* → Rust OpenOptions)
         dir.rs                     #   handle_readdir (qid+offset+type+name packing), handle_mkdir,
                                    #   handle_unlinkat, handle_renameat, handle_statfs
         attr.rs                    #   handle_getattr, handle_setattr, FileAttributes struct
@@ -210,6 +212,13 @@ crates/
       wire_protocol.rs             #   P9-01..P9-05 wire format round-trip tests (61 tests)
       server_operations.rs         #   SO/WK/RO/WR/LK/RB integration tests (47 tests)
       windows_normalization.rs     #   WN-01..WN-07 Windows normalization tests (8 tests, most cfg(windows))
+  p9proxy/                          # codeagent-p9proxy — guest-side 9P proxy for virtio-serial
+    Cargo.toml                     #   [[bin]] name = "p9proxy", depends on libc (Unix only)
+    src/
+      main.rs                      #   bridges virtio-serial port to Unix socketpair for kernel
+                                   #   trans=fd 9P transport; forks before mount (child proxies
+                                   #   data, parent calls mount then exits); bidirectional copy
+                                   #   between socket and port via two threads
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
     Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
     src/
@@ -259,7 +268,8 @@ crates/
                                    #   main loop, message dispatch, cancel_all, reap_completed
       error.rs                     #   ShimError enum (Io, Json, ChannelClosed, CommandNotFound,
                                    #   MalformedMessage)
-      executor.rs                  #   spawn_command (sh -c, piped output, process groups on Unix),
+      executor.rs                  #   spawn_command (sh -c, piped output, process groups on Unix,
+                                   #   drops to uid/gid 1000 via setuid/setgid in pre_exec),
                                    #   cancel_command (SIGTERM/SIGKILL on Unix, child.kill on
                                    #   Windows), stream_output (buffered interval-based flushing),
                                    #   CommandHandle
@@ -785,7 +795,8 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `Shim` struct: tracks running commands in `HashMap<u64, CommandHandle>`,
     message dispatch, `reap_completed()`, `cancel_all()` on shutdown
   - `executor`: `spawn_command()` — `sh -c <command>` with piped stdout/stderr,
-    process groups on Unix (`setpgid`), sends `StepStarted` → `Output` → `StepCompleted`
+    process groups on Unix (`setpgid`), drops to uid/gid 1000 via setuid/setgid in
+    `pre_exec`, sends `StepStarted` → `Output` → `StepCompleted`
   - `cancel_command()`: `SIGTERM` → 5s wait → `SIGKILL` on Unix (process group);
     `child.kill()` on non-Unix; aborts output reader tasks on cancel
   - `stream_output()`: buffered interval-based flushing (`OutputBufferConfig`:
@@ -864,10 +875,11 @@ integration code are built. The remaining work is:
    operations + 8 Windows normalization + 50 unit).~~
 6. ~~**Guest image build** (`cargo xtask build-guest`) — complete. Docker multi-stage build
    (Rust Alpine builder + Alpine assembler) produces vmlinuz (Alpine linux-virt kernel) +
-   initrd.img (busybox-static + shim binary + virtio kernel modules + init script). The init
-   script auto-detects virtiofs (Unix hosts) or 9P-over-serial (Windows hosts) and mounts
-   working directories before starting the shim. Xtask crate at `xtask/` (standalone, not a
-   workspace member) provides the CLI. Requires Docker with BuildKit.~~
+   initrd.img (busybox-static + shim + p9proxy binaries + virtio kernel modules + init script).
+   The init script auto-detects virtiofs (Unix hosts) or 9P-over-virtio-serial via p9proxy
+   (Windows hosts), creates an unprivileged sandbox user (uid 1000), and mounts working
+   directories before starting the shim. Xtask crate at `xtask/` (standalone, not a workspace
+   member) provides the CLI. Requires Docker with BuildKit.~~
 7. ~~**macOS virtiofs support** (Phase 2) — complete. Vendored vmm-sys-util and virtiofsd forks
    with macOS compat layers. `InterceptedBackend` now works on all Unix platforms (Linux + macOS).
    The virtiofsd fork's `src/compat/` module handles all Linux→macOS API translations
