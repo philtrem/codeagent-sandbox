@@ -108,6 +108,18 @@ export interface UndoHistoryData {
   barriers: BarrierDetail[];
 }
 
+export interface TerminalOutput {
+  exit_code: number | null;
+  output: string;
+  status: "completed" | "timeout" | "error";
+}
+
+export interface DebugLogLine {
+  index: number;
+  timestamp: string;
+  line: string;
+}
+
 /** Default config matching Rust defaults. */
 export function defaultConfig(): SandboxConfig {
   return {

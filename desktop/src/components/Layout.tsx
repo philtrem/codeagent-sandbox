@@ -1,15 +1,17 @@
 import { useState } from "react";
-import { Settings, Monitor, Plug, History } from "lucide-react";
+import { Settings, Monitor, Plug, History, SquareTerminal } from "lucide-react";
 import SandboxConfig from "./tabs/SandboxConfig";
 import VmManager from "./tabs/VmManager";
 import ClaudeIntegration from "./tabs/ClaudeIntegration";
 import UndoHistory from "./tabs/UndoHistory";
+import Terminal from "./tabs/Terminal";
 
 const tabs = [
   { id: "config", label: "Configuration", icon: Settings },
   { id: "vm", label: "VM Manager", icon: Monitor },
   { id: "claude", label: "Claude Integration", icon: Plug },
   { id: "history", label: "Undo History", icon: History },
+  { id: "terminal", label: "Terminal", icon: SquareTerminal },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -42,11 +44,12 @@ export default function Layout() {
       </nav>
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto p-6">
+      <main className={`flex-1 ${activeTab === "terminal" ? "flex flex-col overflow-hidden" : "overflow-y-auto p-6"}`}>
         {activeTab === "config" && <SandboxConfig />}
         {activeTab === "vm" && <VmManager />}
         {activeTab === "claude" && <ClaudeIntegration />}
         {activeTab === "history" && <UndoHistory />}
+        {activeTab === "terminal" && <Terminal />}
       </main>
     </div>
   );

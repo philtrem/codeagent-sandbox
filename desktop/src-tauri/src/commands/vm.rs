@@ -3,8 +3,9 @@ use crate::paths;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Child;
-use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// VM status reported to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -14,11 +15,29 @@ pub struct VmStatus {
     pub error: Option<String>,
 }
 
+/// A single line from the sandbox process stderr.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugLogLine {
+    pub index: usize,
+    pub timestamp: String,
+    pub line: String,
+}
+
+/// Result of executing a terminal command.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalOutput {
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub status: String,
+}
+
 /// Shared state holding the sandbox child process and its I/O handles.
 pub struct VmState {
     pub process: Mutex<Option<Child>>,
     pub stdin: Mutex<Option<std::process::ChildStdin>>,
     pub stdout: Mutex<Option<BufReader<std::process::ChildStdout>>>,
+    pub debug_log: Arc<Mutex<Vec<DebugLogLine>>>,
+    pub stderr_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Default for VmState {
@@ -27,9 +46,14 @@ impl Default for VmState {
             process: Mutex::new(None),
             stdin: Mutex::new(None),
             stdout: Mutex::new(None),
+            debug_log: Arc::new(Mutex::new(Vec::new())),
+            stderr_handle: Mutex::new(None),
         }
     }
 }
+
+/// Atomic counter for terminal command request IDs.
+static TERMINAL_REQUEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Check that a guest image file exists and is non-empty (0-byte files are invalid).
 fn is_valid_guest_image(path: &std::path::Path) -> bool {
@@ -269,9 +293,10 @@ pub fn start_vm(
 
     let pid = child.id();
 
-    // Extract stdin/stdout before storing the Child
+    // Extract stdin/stdout/stderr before storing the Child
     let child_stdin = child.stdin.take();
     let child_stdout = child.stdout.take().map(BufReader::new);
+    let child_stderr = child.stderr.take();
 
     // Write PID file for persistence
     if let Some(pid_path) = paths::pid_file_path() {
@@ -290,6 +315,35 @@ pub fn start_vm(
     }
     if let Ok(mut guard) = state.stdout.lock() {
         *guard = child_stdout;
+    }
+
+    // Spawn a background thread to capture stderr and emit events
+    if let Some(stderr) = child_stderr {
+        let app_handle = app.clone();
+        let debug_log = Arc::clone(&state.debug_log);
+
+        let handle = std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            let mut index = 0usize;
+            for line in reader.lines().map_while(Result::ok) {
+                let entry = DebugLogLine {
+                    index,
+                    timestamp: chrono::Local::now().to_rfc3339(),
+                    line: line.clone(),
+                };
+                if let Ok(mut log) = debug_log.lock() {
+                    log.push(entry.clone());
+                    if log.len() > 10_000 {
+                        log.drain(..1000);
+                    }
+                }
+                let _ = app_handle.emit("vm-debug-log", &entry);
+                index += 1;
+            }
+        });
+        if let Ok(mut guard) = state.stderr_handle.lock() {
+            *guard = Some(handle);
+        }
     }
 
     // Register MCP server in Claude Code config if integration is enabled
@@ -317,6 +371,15 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
         let mut guard = state.process.lock().map_err(|e| e.to_string())?;
         guard.take()
     };
+
+    // Clean up debug log buffer and stderr reader thread
+    if let Ok(mut log) = state.debug_log.lock() {
+        log.clear();
+    }
+    if let Ok(mut guard) = state.stderr_handle.lock() {
+        // The thread exits when stderr closes (process killed)
+        guard.take();
+    }
 
     // Unregister MCP server and restore Claude's built-in tools
     super::claude::unregister_mcp_server();
@@ -439,4 +502,137 @@ pub fn send_mcp_request(
     }
 
     Ok(line.trim().to_string())
+}
+
+/// Fetch debug log lines since a given index.
+#[tauri::command]
+pub fn get_debug_log(
+    since_index: usize,
+    state: State<'_, VmState>,
+) -> Result<Vec<DebugLogLine>, String> {
+    let log = state.debug_log.lock().map_err(|e| e.to_string())?;
+    Ok(log
+        .iter()
+        .filter(|l| l.index >= since_index)
+        .cloned()
+        .collect())
+}
+
+/// Clear the debug log buffer.
+#[tauri::command]
+pub fn clear_debug_log(state: State<'_, VmState>) -> Result<(), String> {
+    let mut log = state.debug_log.lock().map_err(|e| e.to_string())?;
+    log.clear();
+    Ok(())
+}
+
+/// Execute a shell command in the VM via the MCP execute_command tool.
+#[tauri::command]
+pub fn execute_terminal_command(
+    command: String,
+    timeout: Option<u32>,
+    state: State<'_, VmState>,
+) -> Result<TerminalOutput, String> {
+    let request_id = TERMINAL_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("term-{request_id}"),
+        "method": "tools/call",
+        "params": {
+            "name": "execute_command",
+            "arguments": {
+                "command": command,
+                "timeout": timeout.unwrap_or(120),
+            }
+        }
+    });
+
+    let request_str = request.to_string();
+
+    // Reuse the same stdin/stdout logic as send_mcp_request
+    let mut stdin_guard = state.stdin.lock().map_err(|e| e.to_string())?;
+    let stdin = stdin_guard
+        .as_mut()
+        .ok_or_else(|| "Sandbox process is not running".to_string())?;
+
+    stdin
+        .write_all(request_str.as_bytes())
+        .map_err(|e| format!("Failed to write to sandbox stdin: {e}"))?;
+    stdin
+        .write_all(b"\n")
+        .map_err(|e| format!("Failed to write newline: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("Failed to flush stdin: {e}"))?;
+    drop(stdin_guard);
+
+    let mut stdout_guard = state.stdout.lock().map_err(|e| e.to_string())?;
+    let stdout = stdout_guard
+        .as_mut()
+        .ok_or_else(|| "Sandbox process stdout unavailable".to_string())?;
+
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read from sandbox stdout: {e}"))?;
+
+    if line.is_empty() {
+        return Err("Sandbox process closed stdout".into());
+    }
+
+    parse_terminal_response(&line)
+}
+
+/// Parse a JSON-RPC response from execute_command into a TerminalOutput.
+fn parse_terminal_response(response: &str) -> Result<TerminalOutput, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(response).map_err(|e| format!("Invalid JSON response: {e}"))?;
+
+    if let Some(error) = parsed.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error");
+        return Ok(TerminalOutput {
+            exit_code: None,
+            output: message.to_string(),
+            status: "error".into(),
+        });
+    }
+
+    let content = parsed
+        .pointer("/result/content")
+        .and_then(|c| c.as_array());
+
+    let text = content
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    // The execute_command tool returns JSON with command_id, exit_code, output
+    if let Ok(result) = serde_json::from_str::<serde_json::Value>(text) {
+        let exit_code = result.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
+        let output = result
+            .get("output")
+            .and_then(|o| o.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = if result.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+            "timeout"
+        } else {
+            "completed"
+        };
+        Ok(TerminalOutput {
+            exit_code,
+            output,
+            status: status.into(),
+        })
+    } else {
+        Ok(TerminalOutput {
+            exit_code: None,
+            output: text.to_string(),
+            status: "completed".into(),
+        })
+    }
 }

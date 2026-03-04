@@ -49,6 +49,10 @@ pub fn run() {
             undo::read_undo_history,
             // VM MCP passthrough
             vm::send_mcp_request,
+            // Terminal + Debug console
+            vm::get_debug_log,
+            vm::clear_debug_log,
+            vm::execute_terminal_command,
         ])
         .manage(vm::VmState::default())
         .build(tauri::generate_context!())
