@@ -61,7 +61,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   commandHistory: [],
   historyIndex: -1,
   isRunning: false,
-  cwd: "/",
+  cwd: "/mnt/working",
 
   execute: async (command: string, timeout?: number) => {
     const id = `entry-${nextEntryId++}`;
