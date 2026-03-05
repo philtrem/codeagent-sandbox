@@ -275,6 +275,7 @@ crates/
                                    #   readiness polling, stop, pid)
     tests/
       orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (40 tests)
+      undo_history.rs              #   UH-01..UH-14 undo history integration tests (14 tests)
       fs_watcher.rs                #   FW-01..FW-12 filesystem watcher integration tests (12 tests)
   shim/                             # codeagent-shim — VM-side command executor binary
     Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
@@ -815,7 +816,8 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
     command classifier config tests (10 tests) + TOML config loading tests (5 tests) +
     integration tests AO-01..AO-15 + MCP-01..MCP-13 (40 tests) +
-    FW-01..FW-12 filesystem watcher tests (12 tests) = 152 total tests
+    UH-01..UH-14 undo history tests (14 tests) +
+    FW-01..FW-12 filesystem watcher tests (12 tests) = 166 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -1007,8 +1009,9 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config + watcher tests (152 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config + watcher + undo history tests (166 tests)
 cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (40 tests)
+cargo test -p codeagent-sandbox --test undo_history                    # UH undo history integration tests only (14 tests)
 cargo test -p codeagent-sandbox --test fs_watcher                      # FW filesystem watcher tests only (12 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
