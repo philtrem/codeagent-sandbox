@@ -345,10 +345,17 @@ impl P9Server {
                     Err(e) => return encode_error(tag, p9_error_to_errno(&e)),
                 };
 
-                // Interceptor pre-hook.
-                if let Some(ref interceptor) = self.interceptor {
-                    if interceptor.pre_setattr(&path).is_err() {
-                        return encode_error(tag, crate::error::errno::EACCES);
+                // Only invoke the interceptor when the setattr changes attributes
+                // beyond just atime. Atime-only updates are triggered by read
+                // operations and should not create undo steps.
+                let atime_only_mask = P9_SETATTR_ATIME | P9_SETATTR_ATIME_SET;
+                let modifies_beyond_atime = request.valid & !atime_only_mask != 0;
+
+                if modifies_beyond_atime {
+                    if let Some(ref interceptor) = self.interceptor {
+                        if interceptor.pre_setattr(&path).is_err() {
+                            return encode_error(tag, crate::error::errno::EACCES);
+                        }
                     }
                 }
 

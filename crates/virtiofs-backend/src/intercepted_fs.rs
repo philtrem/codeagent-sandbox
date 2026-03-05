@@ -486,10 +486,17 @@ impl FileSystem for InterceptedFs {
         valid: SetattrValid,
     ) -> io::Result<(Attr, Duration)> {
         let _guard = InFlightGuard::new(&self.in_flight);
-        if let Ok(path) = self.resolve_path(inode) {
-            self.interceptor
-                .pre_setattr(&path)
-                .map_err(Self::interceptor_error_to_io)?;
+        // Only invoke the interceptor when the setattr changes attributes
+        // beyond just atime. Atime-only updates are triggered by read
+        // operations and should not create undo steps.
+        let atime_only_mask = SetattrValid::ATIME | SetattrValid::ATIME_NOW;
+        let modifies_beyond_atime = !(valid - atime_only_mask).is_empty();
+        if modifies_beyond_atime {
+            if let Ok(path) = self.resolve_path(inode) {
+                self.interceptor
+                    .pre_setattr(&path)
+                    .map_err(Self::interceptor_error_to_io)?;
+            }
         }
         self.inner.setattr(ctx, inode, attr, handle, valid)
     }
