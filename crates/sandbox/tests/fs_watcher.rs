@@ -7,17 +7,7 @@ use tokio::sync::mpsc;
 use codeagent_sandbox::config::FileWatcherConfig;
 use codeagent_sandbox::fs_watcher::{self, FsWatcherConfig};
 use codeagent_sandbox::recent_writes::RecentBackendWrites;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
-use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_stdio::Event;
-
-/// Helper: create a minimal UndoInterceptor for a temp directory pair.
-fn make_interceptor(working: &std::path::Path, undo: &std::path::Path) -> Arc<UndoInterceptor> {
-    Arc::new(UndoInterceptor::new(
-        working.to_path_buf(),
-        undo.to_path_buf(),
-    ))
-}
 
 /// Helper: drain events from the receiver with a short timeout.
 async fn collect_events(rx: &mut mpsc::UnboundedReceiver<Event>, timeout: Duration) -> Vec<Event> {
@@ -37,19 +27,12 @@ async fn collect_events(rx: &mut mpsc::UnboundedReceiver<Event>, timeout: Durati
 }
 
 // -----------------------------------------------------------------------
-// FW-01: watcher detects external file creation and emits event
+// FW-01: watcher detects external file creation and emits event (no barrier)
 // -----------------------------------------------------------------------
 #[tokio::test]
 async fn fw_01_external_creation_detected() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
-
-    // Create a step so that barriers can be created
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.path().join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.path().join("seed.txt"));
-    interceptor.close_step(1).unwrap();
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -63,7 +46,6 @@ async fn fw_01_external_creation_detected() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -92,6 +74,16 @@ async fn fw_01_external_creation_detected() {
         !external_events.is_empty(),
         "expected ExternalModification event for external file creation"
     );
+
+    // Verify no barriers are created (barriers only at session boundaries)
+    for event in &external_events {
+        if let Event::ExternalModification { barrier_id, .. } = event {
+            assert_eq!(
+                *barrier_id, None,
+                "watcher should not create barriers during a session"
+            );
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -101,13 +93,6 @@ async fn fw_01_external_creation_detected() {
 async fn fw_02_backend_writes_suppressed() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
-
-    // Create a step so barriers can be created
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.path().join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.path().join("seed.txt"));
-    interceptor.close_step(1).unwrap();
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -121,7 +106,6 @@ async fn fw_02_backend_writes_suppressed() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes.clone(),
         event_sender,
         config,
@@ -158,7 +142,6 @@ async fn fw_02_backend_writes_suppressed() {
 async fn fw_03_disabled_watcher_returns_none() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::default());
     let (event_sender, _event_receiver) = mpsc::unbounded_channel();
@@ -171,7 +154,6 @@ async fn fw_03_disabled_watcher_returns_none() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -186,13 +168,6 @@ async fn fw_03_disabled_watcher_returns_none() {
 async fn fw_04_excluded_patterns_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
-
-    // Create a step
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.path().join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.path().join("seed.txt"));
-    interceptor.close_step(1).unwrap();
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -206,7 +181,6 @@ async fn fw_04_excluded_patterns_filtered() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -242,18 +216,10 @@ async fn fw_04_excluded_patterns_filtered() {
 async fn fw_05_undo_dir_changes_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
-
-    // Create a step
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.path().join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.path().join("seed.txt"));
-    interceptor.close_step(1).unwrap();
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
-    // Also watch the undo dir (in a real setup, the undo dir prefix is filtered)
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
@@ -263,7 +229,6 @@ async fn fw_05_undo_dir_changes_filtered() {
     let _handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -271,10 +236,8 @@ async fn fw_05_undo_dir_changes_filtered() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // The undo dir writes happen naturally when interceptor operates,
-    // but any writes inside the undo dir should be filtered.
-    // This test just verifies no spurious events from the undo dir leak through.
-
+    // Writes inside the undo dir should be filtered out by the undo dir prefix check.
+    // This test verifies no spurious events from the undo dir leak through.
     let events = collect_events(&mut event_receiver, Duration::from_secs(1)).await;
 
     let external_events: Vec<_> = events
@@ -288,15 +251,13 @@ async fn fw_05_undo_dir_changes_filtered() {
 }
 
 // -----------------------------------------------------------------------
-// FW-06: no events when there are no completed steps (no barrier possible)
+// FW-06: external modification events emitted without barriers
 // -----------------------------------------------------------------------
 #[tokio::test]
-async fn fw_06_no_events_without_completed_steps() {
+async fn fw_06_external_modification_events_have_no_barrier() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
 
-    // NO steps created — barriers can't be placed
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
@@ -309,7 +270,6 @@ async fn fw_06_no_events_without_completed_steps() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -319,7 +279,7 @@ async fn fw_06_no_events_without_completed_steps() {
 
     std::fs::write(working.path().join("external.txt"), "hello").unwrap();
 
-    let events = collect_events(&mut event_receiver, Duration::from_secs(2)).await;
+    let events = collect_events(&mut event_receiver, Duration::from_secs(3)).await;
 
     if let Some(h) = handle {
         h.abort();
@@ -330,25 +290,28 @@ async fn fw_06_no_events_without_completed_steps() {
         .filter(|e| matches!(e, Event::ExternalModification { .. }))
         .collect();
     assert!(
-        external_events.is_empty(),
-        "should not emit ExternalModification when no steps exist"
+        !external_events.is_empty(),
+        "should emit ExternalModification for external writes"
     );
+
+    // All events should have barrier_id: None (no barriers during sessions)
+    for event in &external_events {
+        if let Event::ExternalModification { barrier_id, .. } = event {
+            assert_eq!(
+                *barrier_id, None,
+                "watcher should never create barriers (only session boundaries do)"
+            );
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
-// FW-07: RecentBackendWrites TTL expiry allows detection
+// FW-07: RecentBackendWrites TTL expiry allows detection (event, no barrier)
 // -----------------------------------------------------------------------
 #[tokio::test]
 async fn fw_07_ttl_expiry_allows_detection() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
-
-    // Create a step
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.path().join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.path().join("seed.txt"));
-    interceptor.close_step(1).unwrap();
 
     // Very short TTL
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_millis(50)));
@@ -363,7 +326,6 @@ async fn fw_07_ttl_expiry_allows_detection() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes.clone(),
         event_sender,
         config,
@@ -399,27 +361,13 @@ async fn fw_07_ttl_expiry_allows_detection() {
 }
 
 // -----------------------------------------------------------------------
-// FW-08: multiple working dirs — changes grouped correctly
+// FW-08: multiple working dirs — changes detected
 // -----------------------------------------------------------------------
 #[tokio::test]
 async fn fw_08_multiple_working_dirs() {
     let working1 = TempDir::new().unwrap();
     let working2 = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-
-    let interceptor1 = make_interceptor(working1.path(), &undo.path().join("dir1"));
-    let interceptor2 = make_interceptor(working2.path(), &undo.path().join("dir2"));
-
-    // Create steps in both interceptors
-    interceptor1.open_step(1).unwrap();
-    std::fs::write(working1.path().join("seed1.txt"), "seed").unwrap();
-    let _ = interceptor1.pre_write(&working1.path().join("seed1.txt"));
-    interceptor1.close_step(1).unwrap();
-
-    interceptor2.open_step(1).unwrap();
-    std::fs::write(working2.path().join("seed2.txt"), "seed").unwrap();
-    let _ = interceptor2.pre_write(&working2.path().join("seed2.txt"));
-    interceptor2.close_step(1).unwrap();
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -433,7 +381,6 @@ async fn fw_08_multiple_working_dirs() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working1.path().to_path_buf(), working2.path().to_path_buf()],
         vec![undo.path().join("dir1"), undo.path().join("dir2")],
-        vec![interceptor1, interceptor2],
         recent_writes,
         event_sender,
         config,
@@ -517,12 +464,16 @@ read_only_commands = ["ls"]
 // -----------------------------------------------------------------------
 #[test]
 fn fw_12_write_tracking_interceptor_records() {
+    use codeagent_interceptor::undo_interceptor::UndoInterceptor;
     use codeagent_interceptor::write_interceptor::WriteInterceptor;
     use codeagent_sandbox::recent_writes::WriteTrackingInterceptor;
 
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
+    let interceptor = Arc::new(UndoInterceptor::new(
+        working.path().to_path_buf(),
+        undo.path().to_path_buf(),
+    ));
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
     let tracking = WriteTrackingInterceptor::new(interceptor.clone(), recent_writes.clone());
