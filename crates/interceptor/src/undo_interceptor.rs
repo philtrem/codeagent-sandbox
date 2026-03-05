@@ -302,18 +302,23 @@ impl UndoInterceptor {
 
     /// Close the current step, promoting WAL to steps/.
     ///
-    /// If the step captured no filesystem operations (empty manifest), the step
-    /// is silently discarded instead of being promoted. This prevents read-only
-    /// commands from polluting the undo history and avoids consuming a step ID.
+    /// Non-empty steps (those with filesystem operations) are assigned a
+    /// sequential step ID from an internal counter, decoupled from the
+    /// caller-provided ID. This ensures that read-only commands (which
+    /// produce empty steps) don't create gaps in the undo history numbering.
     ///
-    /// Non-empty steps are assigned a sequential step ID from an internal
-    /// counter, decoupled from the caller-provided ID. This ensures that
-    /// read-only commands (which produce empty steps) don't create gaps in
-    /// the undo history numbering.
+    /// Empty steps are still promoted (not discarded) because the two-channel
+    /// architecture has a race condition: P9 filesystem operations can arrive
+    /// before the control channel's StepStarted message is processed, leaving
+    /// the manifest empty even for genuine write commands. Discarding such
+    /// steps would silently lose undo tracking. The UI layer filters empty
+    /// steps from display instead.
     ///
     /// Returns the list of step IDs that were evicted due to resource limits.
-    pub fn close_step(&self, _id: StepId) -> Result<Vec<StepId>> {
-        // Check whether the step has any manifest entries before promoting.
+    pub fn close_step(&self, id: StepId) -> Result<Vec<StepId>> {
+        // For non-empty steps, allocate a sequential ID so that read-only
+        // commands don't create gaps in the displayed numbering. Empty steps
+        // keep the caller-provided ID (they're hidden by the UI anyway).
         let is_empty = {
             let inner = self.inner.lock().unwrap();
             inner
@@ -322,33 +327,16 @@ impl UndoInterceptor {
                 .is_none_or(|m| m.entries.is_empty())
         };
 
-        if is_empty {
-            // Discard empty step — no filesystem operations were intercepted.
-            // The step ID counter is not consumed.
-            let wal_dir = self.wal_in_progress_dir();
-            if wal_dir.exists() {
-                fs::remove_dir_all(&wal_dir)?;
-            }
-            self.step_tracker.cancel_step()?;
-            let mut inner = self.inner.lock().unwrap();
-            inner.touched_paths.clear();
-            inner.current_manifest = None;
-            inner.current_step_data_size = 0;
-            inner.step_unprotected = false;
-            return Ok(vec![]);
-        }
-
-        // Allocate a sequential step ID for the undo history, independent of
-        // the caller-provided command ID.
-        let final_id = {
-            let mut counter = self.next_step_id.lock().unwrap();
-            let id = *counter;
-            *counter += 1;
+        let final_id = if is_empty {
             id
+        } else {
+            let mut counter = self.next_step_id.lock().unwrap();
+            let allocated = *counter;
+            *counter += 1;
+            allocated
         };
 
-        // Update the manifest's step_id to the final allocated ID before
-        // writing it to disk.
+        // Update the manifest's step_id to the final ID before writing.
         {
             let mut inner = self.inner.lock().unwrap();
             if let Some(ref mut manifest) = inner.current_manifest {
@@ -372,7 +360,7 @@ impl UndoInterceptor {
         }
 
         // Close the active step (tracked by the caller-provided ID) and
-        // record the final sequential ID in the completed list.
+        // record the final ID in the completed list.
         self.step_tracker.cancel_step()?;
         self.step_tracker.add_completed_step(final_id);
 
