@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use codeagent_common::{
-    BarrierInfo, CodeAgentError, ExternalModificationPolicy, ResourceLimitsConfig, Result,
-    RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId, SymlinkPolicy,
+    BarrierInfo, BarrierReason, CodeAgentError, ExternalModificationPolicy, ResourceLimitsConfig,
+    Result, RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
+    SymlinkPolicy,
 };
 
 use crate::barrier::BarrierTracker;
@@ -405,6 +406,7 @@ impl UndoInterceptor {
     pub fn notify_external_modification(
         &self,
         affected_paths: Vec<PathBuf>,
+        reason: BarrierReason,
     ) -> Result<Option<BarrierInfo>> {
         match self.policy {
             ExternalModificationPolicy::Barrier => {
@@ -412,7 +414,8 @@ impl UndoInterceptor {
                 let after_step_id = completed.last().copied().unwrap_or(0);
 
                 let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
-                let barrier = barrier_tracker.create_barrier(after_step_id, affected_paths);
+                let barrier =
+                    barrier_tracker.create_barrier(after_step_id, affected_paths, reason);
                 barrier_tracker.save(&self.undo_dir)?;
                 Ok(Some(barrier))
             }

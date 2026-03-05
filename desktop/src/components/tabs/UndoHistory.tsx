@@ -347,11 +347,16 @@ function SessionGroupedSteps({
     return { filteredSteps: filtered, originalIndices: indices };
   }, [data.steps]);
 
-  // Find the session boundary: the barrier with the highest after_step_id
-  // marks where the current session started. Steps above it are current session.
+  // Find the session boundary: the session_start barrier with the highest
+  // after_step_id marks where the current session started. Steps above it
+  // are current session. Watcher barriers (external_modification) are ignored
+  // for session boundary detection.
   const sessionBoundary = useMemo(() => {
-    if (data.barriers.length === 0) return null;
-    return data.barriers.reduce((max, b) =>
+    const sessionBarriers = data.barriers.filter(
+      (b) => b.reason === "session_start",
+    );
+    if (sessionBarriers.length === 0) return null;
+    return sessionBarriers.reduce((max, b) =>
       b.after_step_id > max.after_step_id ? b : max,
     );
   }, [data.barriers]);

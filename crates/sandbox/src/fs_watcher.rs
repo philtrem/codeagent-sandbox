@@ -7,7 +7,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use codeagent_common::BarrierId;
+use codeagent_common::{BarrierId, BarrierReason};
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
@@ -283,8 +283,9 @@ fn process_pending_paths(
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
 
-        let barrier_id: Option<BarrierId> =
-            match interceptor.notify_external_modification(external_paths) {
+        let barrier_id: Option<BarrierId> = match interceptor
+            .notify_external_modification(external_paths, BarrierReason::ExternalModification)
+        {
                 Ok(Some(barrier)) => Some(barrier.barrier_id),
                 _ => None,
             };

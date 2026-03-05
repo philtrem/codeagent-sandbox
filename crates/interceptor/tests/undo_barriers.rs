@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use codeagent_common::{CodeAgentError, ExternalModificationPolicy};
+use codeagent_common::{BarrierReason, CodeAgentError, ExternalModificationPolicy};
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_test_support::fixtures;
 use codeagent_test_support::snapshot::assert_tree_eq;
@@ -31,7 +31,7 @@ fn eb_01_external_modification_creates_barrier() {
         PathBuf::from("Cargo.toml"),
     ];
     let result = interceptor
-        .notify_external_modification(affected.clone())
+        .notify_external_modification(affected.clone(), BarrierReason::ExternalModification)
         .unwrap();
 
     assert!(result.is_some());
@@ -58,7 +58,7 @@ fn eb_02_rollback_blocked_by_barrier() {
 
     // External modification after step 1 (barrier blocks rollback of step 1)
     interceptor
-        .notify_external_modification(vec![PathBuf::from("README.md")])
+        .notify_external_modification(vec![PathBuf::from("README.md")], BarrierReason::ExternalModification)
         .unwrap();
 
     let after_step1 = ws.snapshot();
@@ -117,7 +117,7 @@ fn eb_03_force_rollback_crosses_barrier() {
 
     // External modification after step 1
     interceptor
-        .notify_external_modification(vec![PathBuf::from("config.toml")])
+        .notify_external_modification(vec![PathBuf::from("config.toml")], BarrierReason::ExternalModification)
         .unwrap();
 
     // Force rollback should succeed
@@ -156,7 +156,7 @@ fn eb_04_barriers_queryable_with_correct_data() {
     // Create a barrier
     let paths = vec![PathBuf::from("externally_edited.txt")];
     interceptor
-        .notify_external_modification(paths.clone())
+        .notify_external_modification(paths.clone(), BarrierReason::ExternalModification)
         .unwrap();
 
     // Query barriers
@@ -223,7 +223,7 @@ fn eb_06_multiple_barriers_all_reported() {
 
     // Barrier after step 1
     interceptor
-        .notify_external_modification(vec![PathBuf::from("file_a.txt")])
+        .notify_external_modification(vec![PathBuf::from("file_a.txt")], BarrierReason::ExternalModification)
         .unwrap();
 
     // Step 2
@@ -233,7 +233,7 @@ fn eb_06_multiple_barriers_all_reported() {
 
     // Barrier after step 2
     interceptor
-        .notify_external_modification(vec![PathBuf::from("file_b.txt")])
+        .notify_external_modification(vec![PathBuf::from("file_b.txt")], BarrierReason::ExternalModification)
         .unwrap();
 
     // Step 3
@@ -305,7 +305,7 @@ fn eb_08_warn_policy_no_barrier() {
 
     // External modification under Warn policy — no barrier
     let result = interceptor
-        .notify_external_modification(vec![PathBuf::from("external.txt")])
+        .notify_external_modification(vec![PathBuf::from("external.txt")], BarrierReason::ExternalModification)
         .unwrap();
     assert!(result.is_none());
 

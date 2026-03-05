@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use codeagent_common::{SafeguardConfig, SafeguardDecision};
+use codeagent_common::{BarrierReason, SafeguardConfig, SafeguardDecision};
 use codeagent_control::InFlightTracker;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
@@ -190,8 +190,10 @@ impl Orchestrator {
             // Place a barrier if previous session steps exist, preventing accidental
             // rollback across session boundaries where untracked changes may have occurred.
             if !interceptor.is_undo_disabled() && !interceptor.completed_steps().is_empty() {
-                if let Ok(Some(barrier)) =
-                    interceptor.notify_external_modification(vec![working_dir.clone()])
+                if let Ok(Some(barrier)) = interceptor.notify_external_modification(
+                    vec![working_dir.clone()],
+                    BarrierReason::SessionStart,
+                )
                 {
                     let _ = self.event_sender.send(Event::ExternalModification {
                         affected_paths: vec![working_dir.to_string_lossy().into_owned()],

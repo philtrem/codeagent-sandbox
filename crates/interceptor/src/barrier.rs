@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use chrono::Utc;
-use codeagent_common::{BarrierId, BarrierInfo, Result, StepId};
+use codeagent_common::{BarrierId, BarrierInfo, BarrierReason, Result, StepId};
 
 /// Tracks undo barriers created by external modification detection.
 ///
@@ -69,12 +69,14 @@ impl BarrierTracker {
         &mut self,
         after_step_id: StepId,
         affected_paths: Vec<std::path::PathBuf>,
+        reason: BarrierReason,
     ) -> BarrierInfo {
         let barrier = BarrierInfo {
             barrier_id: self.next_barrier_id,
             after_step_id,
             timestamp: Utc::now(),
             affected_paths,
+            reason,
         };
         self.next_barrier_id += 1;
         self.barriers.push(barrier.clone());
@@ -115,19 +117,20 @@ mod tests {
     #[test]
     fn create_barrier_assigns_monotonic_ids() {
         let mut tracker = BarrierTracker::new();
-        let b1 = tracker.create_barrier(1, vec![]);
-        let b2 = tracker.create_barrier(2, vec![]);
-        let b3 = tracker.create_barrier(3, vec![]);
+        let b1 = tracker.create_barrier(1, vec![], BarrierReason::ExternalModification);
+        let b2 = tracker.create_barrier(2, vec![], BarrierReason::ExternalModification);
+        let b3 = tracker.create_barrier(3, vec![], BarrierReason::SessionStart);
         assert_eq!(b1.barrier_id, 1);
         assert_eq!(b2.barrier_id, 2);
         assert_eq!(b3.barrier_id, 3);
+        assert_eq!(b3.reason, BarrierReason::SessionStart);
     }
 
     #[test]
     fn barriers_blocking_rollback_filters_correctly() {
         let mut tracker = BarrierTracker::new();
-        tracker.create_barrier(1, vec![]);
-        tracker.create_barrier(3, vec![]);
+        tracker.create_barrier(1, vec![], BarrierReason::ExternalModification);
+        tracker.create_barrier(3, vec![], BarrierReason::ExternalModification);
 
         // Rolling back steps [3, 4] should be blocked by barrier after step 3
         let blocking = tracker.barriers_blocking_rollback(&[3, 4]);
@@ -146,9 +149,9 @@ mod tests {
     #[test]
     fn remove_barriers_for_steps() {
         let mut tracker = BarrierTracker::new();
-        tracker.create_barrier(1, vec![]);
-        tracker.create_barrier(2, vec![]);
-        tracker.create_barrier(3, vec![]);
+        tracker.create_barrier(1, vec![], BarrierReason::ExternalModification);
+        tracker.create_barrier(2, vec![], BarrierReason::ExternalModification);
+        tracker.create_barrier(3, vec![], BarrierReason::ExternalModification);
 
         tracker.remove_barriers_for_steps(&[1, 3]);
         let remaining = tracker.barriers();
@@ -165,8 +168,9 @@ mod tests {
         tracker.create_barrier(
             5,
             vec![std::path::PathBuf::from("src/main.rs")],
+            BarrierReason::SessionStart,
         );
-        tracker.create_barrier(10, vec![]);
+        tracker.create_barrier(10, vec![], BarrierReason::ExternalModification);
         tracker.save(undo_dir).unwrap();
 
         let loaded = BarrierTracker::load(undo_dir);
@@ -174,7 +178,9 @@ mod tests {
         assert_eq!(barriers.len(), 2);
         assert_eq!(barriers[0].after_step_id, 5);
         assert_eq!(barriers[0].affected_paths.len(), 1);
+        assert_eq!(barriers[0].reason, BarrierReason::SessionStart);
         assert_eq!(barriers[1].after_step_id, 10);
+        assert_eq!(barriers[1].reason, BarrierReason::ExternalModification);
         assert_eq!(loaded.next_barrier_id, 3);
     }
 

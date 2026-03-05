@@ -61,6 +61,17 @@ pub enum SymlinkPolicy {
     ReadWrite,
 }
 
+/// Why a barrier was created.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarrierReason {
+    /// Placed at session start to prevent cross-session rollback.
+    SessionStart,
+    /// An external modification was detected during the session.
+    #[default]
+    ExternalModification,
+}
+
 /// A marker in the undo history that prevents rollback from crossing it.
 ///
 /// Barriers are created when external modifications are detected in the working
@@ -74,6 +85,9 @@ pub struct BarrierInfo {
     pub after_step_id: StepId,
     pub timestamp: DateTime<Utc>,
     pub affected_paths: Vec<PathBuf>,
+    /// Why this barrier was created.
+    #[serde(default)]
+    pub reason: BarrierReason,
 }
 
 /// Result of a successful rollback operation.
@@ -284,12 +298,30 @@ mod tests {
             after_step_id: 42,
             timestamp: Utc::now(),
             affected_paths: vec![PathBuf::from("src/main.rs"), PathBuf::from("Cargo.toml")],
+            reason: BarrierReason::SessionStart,
         };
         let json = serde_json::to_string_pretty(&info).unwrap();
         let deserialized: BarrierInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(info.barrier_id, deserialized.barrier_id);
         assert_eq!(info.after_step_id, deserialized.after_step_id);
         assert_eq!(info.affected_paths, deserialized.affected_paths);
+        assert_eq!(deserialized.reason, BarrierReason::SessionStart);
+    }
+
+    #[test]
+    fn barrier_info_deserialize_without_reason_defaults_to_external() {
+        let json = r#"{"barrier_id":1,"after_step_id":5,"timestamp":"2024-01-01T00:00:00Z","affected_paths":[]}"#;
+        let deserialized: BarrierInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.reason, BarrierReason::ExternalModification);
+    }
+
+    #[test]
+    fn barrier_reason_serde_round_trip() {
+        for variant in [BarrierReason::SessionStart, BarrierReason::ExternalModification] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: BarrierReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, deserialized);
+        }
     }
 
     #[test]

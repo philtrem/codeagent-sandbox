@@ -155,6 +155,7 @@ export interface BarrierDetail {
   after_step_id: number;
   timestamp: string;
   affected_paths: string[];
+  reason: "session_start" | "external_modification";
 }
 
 export interface UndoHistoryData {

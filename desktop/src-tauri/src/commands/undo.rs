@@ -28,6 +28,7 @@ pub struct BarrierDetail {
     pub after_step_id: u64,
     pub timestamp: String,
     pub affected_paths: Vec<String>,
+    pub reason: String,
 }
 
 /// The full undo history data returned to the frontend.
@@ -123,6 +124,10 @@ fn read_interceptor_dir(
                     after_step_id: b["after_step_id"].as_u64().unwrap_or(0),
                     timestamp: b["timestamp"].as_str().unwrap_or("").to_string(),
                     affected_paths,
+                    reason: b["reason"]
+                        .as_str()
+                        .unwrap_or("external_modification")
+                        .to_string(),
                 });
             }
         }
