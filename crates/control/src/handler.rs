@@ -19,6 +19,8 @@ pub trait StepManager: Send + Sync {
     fn open_step(&self, id: StepId) -> codeagent_common::Result<()>;
     fn close_step(&self, id: StepId) -> codeagent_common::Result<Vec<StepId>>;
     fn current_step(&self) -> Option<StepId>;
+    /// Store the command string associated with the current step in the manifest.
+    fn set_step_command(&self, _id: StepId, _command: String) {}
 }
 
 /// Configuration for quiescence and ambient step timeouts.
@@ -182,6 +184,8 @@ impl<S: StepManager + 'static> ControlChannelHandler<S> {
                     });
                     return;
                 }
+
+                self.step_manager.set_step_command(step_id, command.clone());
 
                 {
                     let mut state = self.state.lock().await;

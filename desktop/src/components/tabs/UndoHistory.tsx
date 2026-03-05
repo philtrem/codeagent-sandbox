@@ -362,24 +362,25 @@ function SessionGroupedSteps({
   }, [data.barriers]);
 
   const { currentSteps, previousSteps, currentOriginalIndices, previousOriginalIndices } = useMemo(() => {
+    const allCurrent = {
+      currentSteps: filteredSteps,
+      previousSteps: [] as UndoStepDetail[],
+      currentOriginalIndices: originalIndices,
+      previousOriginalIndices: [] as number[],
+    };
     if (!sessionBoundary) {
-      return {
-        currentSteps: filteredSteps,
-        previousSteps: [] as UndoStepDetail[],
-        currentOriginalIndices: originalIndices,
-        previousOriginalIndices: [] as number[],
-      };
+      return allCurrent;
     }
     const splitIndex = filteredSteps.findIndex(
       (s) => s.step_id <= sessionBoundary.after_step_id,
     );
     if (splitIndex === -1) {
-      return {
-        currentSteps: filteredSteps,
-        previousSteps: [] as UndoStepDetail[],
-        currentOriginalIndices: originalIndices,
-        previousOriginalIndices: [] as number[],
-      };
+      return allCurrent;
+    }
+    // If the split would put everything into "previous" with nothing in
+    // "current", skip the grouping entirely — show all steps as current.
+    if (splitIndex === 0) {
+      return allCurrent;
     }
     return {
       currentSteps: filteredSteps.slice(0, splitIndex),
@@ -490,12 +491,16 @@ export default function UndoHistory() {
     }
   };
 
-  // Check if barriers exist in the range being rolled back
+  // Check if session-start barriers exist in the range being rolled back.
+  // Only session_start barriers prompt the user — external_modification barriers
+  // are enforced by the backend and reported as errors if encountered.
   const hasBarriersInRange = (count: number): boolean => {
     if (!data) return false;
     const stepsToRollBack = data.steps.slice(0, count);
     const stepIds = new Set(stepsToRollBack.map((s) => s.step_id));
-    return data.barriers.some((b) => stepIds.has(b.after_step_id));
+    return data.barriers.some(
+      (b) => b.reason === "session_start" && stepIds.has(b.after_step_id),
+    );
   };
 
   if (!vmRunning && !undoDir) {

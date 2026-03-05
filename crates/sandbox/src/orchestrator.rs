@@ -206,6 +206,17 @@ impl Orchestrator {
             undo_dirs.push(undo_dir);
         }
 
+        // Compute the next command ID from the highest existing step ID across all
+        // interceptors. This prevents step ID collisions when a session is restarted
+        // — without this, IDs would reset to 1 and overwrite previous session steps.
+        let max_existing_step_id = interceptors
+            .iter()
+            .flat_map(|i| i.completed_steps())
+            .filter(|id| *id > 0)
+            .max()
+            .unwrap_or(0) as u64;
+        let initial_command_id = max_existing_step_id + 1;
+
         // Create RecentBackendWrites tracker and spawn filesystem watcher.
         let recent_writes_ttl =
             std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
@@ -261,7 +272,7 @@ impl Orchestrator {
                         control_reader_handle: vm_session_parts.control_reader_handle,
                         control_writer_handle: vm_session_parts.control_writer_handle,
                         socket_dir: vm_session_parts.socket_dir,
-                        next_command_id: Arc::new(AtomicU64::new(1)),
+                        next_command_id: Arc::new(AtomicU64::new(initial_command_id)),
                         fs_watcher_handle,
                         recent_writes: Some(recent_writes),
                     };
@@ -279,7 +290,7 @@ impl Orchestrator {
                     });
                     let session = Self::create_non_vm_session(
                         interceptors, working_dirs.clone(), undo_dirs, payload,
-                        fs_watcher_handle, Some(recent_writes),
+                        fs_watcher_handle, Some(recent_writes), initial_command_id,
                     );
                     *state = SessionState::Active(Box::new(session));
                     ("unavailable", "none")
@@ -304,7 +315,7 @@ impl Orchestrator {
             });
             let session = Self::create_non_vm_session(
                 interceptors, working_dirs.clone(), undo_dirs, payload,
-                fs_watcher_handle, Some(recent_writes),
+                fs_watcher_handle, Some(recent_writes), initial_command_id,
             );
             *state = SessionState::Active(Box::new(session));
             ("unavailable", "none")
@@ -332,6 +343,7 @@ impl Orchestrator {
         payload: SessionStartPayload,
         fs_watcher_handle: Option<tokio::task::JoinHandle<()>>,
         recent_writes: Option<Arc<RecentBackendWrites>>,
+        initial_command_id: u64,
     ) -> Session {
         Session {
             interceptors,
@@ -350,7 +362,7 @@ impl Orchestrator {
             control_reader_handle: None,
             control_writer_handle: None,
             socket_dir: None,
-            next_command_id: Arc::new(AtomicU64::new(1)),
+            next_command_id: Arc::new(AtomicU64::new(initial_command_id)),
             fs_watcher_handle,
             recent_writes,
         }
@@ -1201,6 +1213,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 message: e.to_string(),
             })?;
 
+        interceptor.set_step_command(format!("write_file {}", args.path));
+
         let existed_before = target.exists();
 
         if existed_before {
@@ -1330,6 +1344,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             .map_err(|e| McpError::InternalError {
                 message: e.to_string(),
             })?;
+
+        interceptor.set_step_command(format!("edit_file {}", args.path));
 
         let _ = interceptor.pre_write(&target);
 

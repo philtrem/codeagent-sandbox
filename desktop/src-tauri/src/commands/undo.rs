@@ -171,8 +171,10 @@ pub fn read_undo_history(undo_dir: String) -> Result<UndoHistoryData, String> {
         read_interceptor_dir(&path, &mut steps, &mut barriers)?;
     }
 
-    // Sort by step_id descending (newest first)
-    steps.sort_by(|a, b| b.step_id.cmp(&a.step_id));
+    // Sort by timestamp descending (newest first). Timestamp sorting is more
+    // robust than step_id sorting because step IDs are monotonic within a session
+    // but earlier sessions may have lower IDs interleaved on disk.
+    steps.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(UndoHistoryData { steps, barriers })
 }

@@ -30,4 +30,8 @@ impl StepManager for StepManagerAdapter {
     fn current_step(&self) -> Option<StepId> {
         self.interceptor.current_step()
     }
+
+    fn set_step_command(&self, _id: StepId, command: String) {
+        self.interceptor.set_step_command(command);
+    }
 }
