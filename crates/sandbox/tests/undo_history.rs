@@ -23,7 +23,7 @@ use codeagent_sandbox::config::FileWatcherConfig;
 use codeagent_sandbox::orchestrator::{undo_subdir_name, Orchestrator};
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
-    EditFileArgs, UndoArgs, WriteFileArgs,
+    EditFileArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_stdio::protocol::{
     SessionStartPayload, UndoHistoryPayload, WorkingDirectoryConfig,
@@ -847,4 +847,74 @@ fn uh_14_three_session_cumulative_history() {
     assert!(working.path().join("s1.txt").exists());
     assert!(working.path().join("s2.txt").exists());
     assert!(working.path().join("s3.txt").exists());
+}
+
+// -----------------------------------------------------------------------
+// UH-15: MCP read_file does NOT produce an undo step
+// -----------------------------------------------------------------------
+#[test]
+fn uh_15_read_file_does_not_produce_step() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    // Create a file to read
+    fs::write(working.path().join("readme.txt"), "hello world").unwrap();
+
+    let (orchestrator, _rx) = create_orchestrator(working.path(), undo.path());
+    let _ = orchestrator.session_start(make_start_payload(
+        &working.path().display().to_string(),
+    ));
+
+    // Read the file via MCP
+    let result = orchestrator.read_file(ReadFileArgs {
+        path: "readme.txt".to_string(),
+    });
+    assert!(result.is_ok(), "read_file should succeed");
+
+    // No steps should exist on disk — read operations are not tracked
+    let steps = read_steps_from_disk(undo.path());
+    assert!(
+        steps.is_empty(),
+        "read_file should not produce any undo steps, got {} steps",
+        steps.len()
+    );
+}
+
+// -----------------------------------------------------------------------
+// UH-16: Write then read — only the write produces a step
+// -----------------------------------------------------------------------
+#[test]
+fn uh_16_write_then_read_only_write_produces_step() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    let (orchestrator, _rx) = create_orchestrator(working.path(), undo.path());
+    let _ = orchestrator.session_start(make_start_payload(
+        &working.path().display().to_string(),
+    ));
+
+    // Write a file
+    orchestrator
+        .write_file(WriteFileArgs {
+            path: "data.txt".to_string(),
+            content: "data".to_string(),
+        })
+        .unwrap();
+
+    // Read the file back
+    let _ = orchestrator.read_file(ReadFileArgs {
+        path: "data.txt".to_string(),
+    });
+
+    // Only the write should produce a step
+    let steps = read_steps_from_disk(undo.path());
+    assert_eq!(
+        steps.len(),
+        1,
+        "only the write_file should produce a step, not the read"
+    );
+    assert!(
+        steps[0].2 > 0,
+        "the write step should have file entries"
+    );
 }
