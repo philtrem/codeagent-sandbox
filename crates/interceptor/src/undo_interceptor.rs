@@ -294,36 +294,8 @@ impl UndoInterceptor {
 
     /// Close the current step, promoting WAL to steps/.
     ///
-    /// If the step touched no files (empty manifest) and is not unprotected,
-    /// the step is silently discarded instead of being promoted to disk.
     /// Returns the list of step IDs that were evicted due to resource limits.
     pub fn close_step(&self, id: StepId) -> Result<Vec<StepId>> {
-        // Check whether this step touched any files. If not, discard it instead
-        // of promoting to disk — read-only commands produce empty manifests that
-        // are meaningless to the undo log.
-        let is_empty = {
-            let inner = self.inner.lock().unwrap();
-            inner
-                .current_manifest
-                .as_ref()
-                .map(|m| m.entries.is_empty() && !inner.step_unprotected)
-                .unwrap_or(false)
-        };
-
-        if is_empty {
-            let wal_dir = self.wal_in_progress_dir();
-            if wal_dir.exists() {
-                fs::remove_dir_all(&wal_dir)?;
-            }
-            self.step_tracker.cancel_step()?;
-            let mut inner = self.inner.lock().unwrap();
-            inner.touched_paths.clear();
-            inner.current_manifest = None;
-            inner.current_step_data_size = 0;
-            inner.step_unprotected = false;
-            return Ok(vec![]);
-        }
-
         // Write the manifest before promotion, including unprotected flag
         {
             let inner = self.inner.lock().unwrap();

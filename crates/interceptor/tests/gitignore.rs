@@ -19,8 +19,7 @@ fn read_step_manifest(ws: &TempWorkspace, step_id: u64) -> StepManifest {
 }
 
 // ---------------------------------------------------------------------------
-// GI-01: Ignored file is NOT captured on pre_write — step is discarded entirely
-// because only ignored files were touched (empty manifest).
+// GI-01: Ignored file is NOT captured on pre_write
 // ---------------------------------------------------------------------------
 #[test]
 fn gi_01_ignored_file_not_captured_on_pre_write() {
@@ -39,16 +38,11 @@ fn gi_01_ignored_file_not_captured_on_pre_write() {
     ops.write_file(&log_file, b"new log content");
     interceptor.close_step(1).unwrap();
 
-    // The step should be discarded (not promoted to disk) because the only file
-    // was gitignored, resulting in an empty manifest.
-    let step_dir = ws.undo_dir.join("steps").join("1");
+    // Step is promoted to disk but the manifest has no entries
+    let manifest = read_step_manifest(&ws, 1);
     assert!(
-        !step_dir.exists(),
-        "empty step should not be promoted to disk"
-    );
-    assert!(
-        interceptor.completed_steps().is_empty(),
-        "discarded step should not appear in completed steps"
+        manifest.entries.is_empty(),
+        "ignored file should not appear in manifest"
     );
 }
 

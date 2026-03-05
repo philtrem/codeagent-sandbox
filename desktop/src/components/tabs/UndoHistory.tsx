@@ -331,15 +331,14 @@ function SessionGroupedSteps({
 }) {
   const [showPrevious, setShowPrevious] = useState(false);
 
-  // Filter out empty ambient steps before any grouping.
-  // We filter the raw steps but keep the original indices for rollback counting,
-  // so we build an index map from filtered position → original position.
+  // Filter out steps that affected no files (read-only commands, empty ambient
+  // steps). We keep the original indices for correct rollback counting.
   const { filteredSteps, originalIndices } = useMemo(() => {
     const filtered: UndoStepDetail[] = [];
     const indices: number[] = [];
     for (let i = 0; i < data.steps.length; i++) {
       const s = data.steps[i];
-      if (s.file_count > 0 || s.command !== null) {
+      if (s.file_count > 0) {
         filtered.push(s);
         indices.push(i);
       }
@@ -434,7 +433,7 @@ function SessionGroupedSteps({
 
       {hiddenCount > 0 && (
         <div className="text-center text-xs text-[var(--color-text-secondary)]">
-          {hiddenCount} empty ambient step{hiddenCount !== 1 ? "s" : ""} hidden
+          {hiddenCount} read-only step{hiddenCount !== 1 ? "s" : ""} hidden
         </div>
       )}
     </div>

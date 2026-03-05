@@ -34,7 +34,7 @@ fn try_create_symlink(target: &Path, link: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// SY-01: Ignore policy — post_symlink is a no-op, step discarded as empty
+// SY-01: Ignore policy — post_symlink is a no-op
 // ---------------------------------------------------------------------------
 #[test]
 fn sy_01_ignore_policy_post_symlink_is_noop() {
@@ -59,17 +59,16 @@ fn sy_01_ignore_policy_post_symlink_is_noop() {
     interceptor.post_symlink(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    // Empty step is discarded — not promoted to disk
-    let step_dir = ws.undo_dir.join("steps").join("1");
+    // Step is promoted but manifest should have no entries for the symlink
+    let manifest = read_step_manifest(&ws, 1);
     assert!(
-        !step_dir.exists(),
-        "Ignore policy: empty step should not be promoted to disk"
+        manifest.entries.is_empty(),
+        "Ignore policy: symlink should not appear in manifest"
     );
-    assert!(interceptor.completed_steps().is_empty());
 }
 
 // ---------------------------------------------------------------------------
-// SY-02: Ignore policy — pre_link is a no-op, step discarded as empty
+// SY-02: Ignore policy — pre_link is a no-op
 // ---------------------------------------------------------------------------
 #[test]
 fn sy_02_ignore_policy_pre_link_is_noop() {
@@ -89,13 +88,12 @@ fn sy_02_ignore_policy_pre_link_is_noop() {
     interceptor.pre_link(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    // Empty step is discarded — not promoted to disk
-    let step_dir = ws.undo_dir.join("steps").join("1");
+    // Step is promoted but manifest should have no entries
+    let manifest = read_step_manifest(&ws, 1);
     assert!(
-        !step_dir.exists(),
-        "Ignore policy: empty step should not be promoted to disk"
+        manifest.entries.is_empty(),
+        "Ignore policy: link should not appear in manifest"
     );
-    assert!(interceptor.completed_steps().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -277,13 +275,12 @@ fn sy_07_default_policy_is_ignore() {
     interceptor.post_symlink(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    // Empty step is discarded — not promoted to disk
-    let step_dir = ws.undo_dir.join("steps").join("1");
+    // Step is promoted but manifest should have no symlink entries
+    let manifest = read_step_manifest(&ws, 1);
     assert!(
-        !step_dir.exists(),
-        "default policy (Ignore): empty step should not be promoted to disk"
+        manifest.entries.is_empty(),
+        "default policy (Ignore): symlink should not appear in manifest"
     );
-    assert!(interceptor.completed_steps().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -312,11 +309,10 @@ fn sy_08_ignore_policy_ensure_preimage_skips_symlinks() {
     interceptor.pre_write(&link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    // Empty step is discarded — not promoted to disk
-    let step_dir = ws.undo_dir.join("steps").join("1");
+    // Step is promoted but manifest should have no entries for the symlink
+    let manifest = read_step_manifest(&ws, 1);
     assert!(
-        !step_dir.exists(),
-        "Ignore policy: empty step should not be promoted to disk"
+        manifest.entries.is_empty(),
+        "Ignore policy: symlink should not appear in manifest"
     );
-    assert!(interceptor.completed_steps().is_empty());
 }
