@@ -20,9 +20,12 @@ use codeagent_stdio::{Event, RequestHandler, StdioError};
 use crate::cli::CliArgs;
 use crate::command_classifier::{self, CommandClassifier, CommandClassifierConfig, SanitizeResult};
 use crate::command_waiter::CommandWaiter;
+use crate::config::FileWatcherConfig;
 use crate::control_bridge;
 use crate::error::AgentError;
+use crate::fs_watcher;
 use crate::qemu::{QemuConfig, QemuProcess};
+use crate::recent_writes::RecentBackendWrites;
 use crate::safeguard_bridge::PendingSafeguard;
 use crate::session::{Session, SessionState};
 
@@ -75,6 +78,8 @@ pub struct Orchestrator {
     command_waiter: Arc<CommandWaiter>,
     /// Pre-computed command classifier from config.
     classifier: CommandClassifier,
+    /// Filesystem watcher configuration from TOML config.
+    file_watcher_config: FileWatcherConfig,
 }
 
 impl Orchestrator {
@@ -82,6 +87,7 @@ impl Orchestrator {
         cli_args: CliArgs,
         event_sender: mpsc::UnboundedSender<Event>,
         classifier_config: CommandClassifierConfig,
+        file_watcher_config: FileWatcherConfig,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(SessionState::Idle)),
@@ -90,6 +96,7 @@ impl Orchestrator {
             safeguard_receiver: Mutex::new(None),
             command_waiter: CommandWaiter::new(),
             classifier: CommandClassifier::new(classifier_config),
+            file_watcher_config,
         }
     }
 
@@ -197,6 +204,32 @@ impl Orchestrator {
             undo_dirs.push(undo_dir);
         }
 
+        // Create RecentBackendWrites tracker and spawn filesystem watcher.
+        let recent_writes_ttl =
+            std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
+        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl));
+
+        let watcher_config = {
+            let mut config = fs_watcher::FsWatcherConfig {
+                debounce: std::time::Duration::from_millis(self.file_watcher_config.debounce_ms),
+                exclude_patterns: fs_watcher::FsWatcherConfig::default().exclude_patterns,
+                enabled: self.file_watcher_config.enabled,
+            };
+            config
+                .exclude_patterns
+                .extend(self.file_watcher_config.exclude_patterns.clone());
+            config
+        };
+
+        let fs_watcher_handle = fs_watcher::spawn_fs_watcher(
+            working_dirs.clone(),
+            undo_dirs.clone(),
+            interceptors.clone(),
+            recent_writes.clone(),
+            self.event_sender.clone(),
+            watcher_config,
+        );
+
         // Determine VM availability and launch if configured
         let (resolved_kernel, resolved_initrd) = self.resolve_guest_images();
         let vm_available = resolved_kernel.is_some() && resolved_initrd.is_some();
@@ -204,6 +237,7 @@ impl Orchestrator {
             match self.launch_vm(
                 &working_dirs,
                 &interceptors,
+                &recent_writes,
                 resolved_kernel.unwrap(),
                 resolved_initrd.unwrap(),
             ) {
@@ -226,6 +260,8 @@ impl Orchestrator {
                         control_writer_handle: vm_session_parts.control_writer_handle,
                         socket_dir: vm_session_parts.socket_dir,
                         next_command_id: Arc::new(AtomicU64::new(1)),
+                        fs_watcher_handle,
+                        recent_writes: Some(recent_writes),
                     };
 
                     *state = SessionState::Active(Box::new(session));
@@ -241,6 +277,7 @@ impl Orchestrator {
                     });
                     let session = Self::create_non_vm_session(
                         interceptors, working_dirs.clone(), undo_dirs, payload,
+                        fs_watcher_handle, Some(recent_writes),
                     );
                     *state = SessionState::Active(Box::new(session));
                     ("unavailable", "none")
@@ -265,6 +302,7 @@ impl Orchestrator {
             });
             let session = Self::create_non_vm_session(
                 interceptors, working_dirs.clone(), undo_dirs, payload,
+                fs_watcher_handle, Some(recent_writes),
             );
             *state = SessionState::Active(Box::new(session));
             ("unavailable", "none")
@@ -290,6 +328,8 @@ impl Orchestrator {
         working_dirs: Vec<PathBuf>,
         undo_dirs: Vec<PathBuf>,
         payload: SessionStartPayload,
+        fs_watcher_handle: Option<tokio::task::JoinHandle<()>>,
+        recent_writes: Option<Arc<RecentBackendWrites>>,
     ) -> Session {
         Session {
             interceptors,
@@ -309,6 +349,8 @@ impl Orchestrator {
             control_writer_handle: None,
             socket_dir: None,
             next_command_id: Arc::new(AtomicU64::new(1)),
+            fs_watcher_handle,
+            recent_writes,
         }
     }
 
@@ -317,6 +359,7 @@ impl Orchestrator {
         &self,
         working_dirs: &[PathBuf],
         interceptors: &[Arc<UndoInterceptor>],
+        recent_writes: &Arc<RecentBackendWrites>,
         kernel_path: PathBuf,
         initrd_path: PathBuf,
     ) -> Result<VmSessionParts, AgentError> {
@@ -336,12 +379,18 @@ impl Orchestrator {
         #[cfg(unix)]
         {
             use crate::fs_backend::{FilesystemBackend, InterceptedBackend};
+            use crate::recent_writes::WriteTrackingInterceptor;
             for (index, working_dir) in working_dirs.iter().enumerate() {
                 let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
+                let tracking_interceptor: Arc<dyn codeagent_interceptor::write_interceptor::WriteInterceptor> =
+                    Arc::new(WriteTrackingInterceptor::new(
+                        interceptors[index].clone(),
+                        recent_writes.clone(),
+                    ));
                 let mut backend = InterceptedBackend::new(
                     working_dir.clone(),
                     fs_socket.clone(),
-                    interceptors[index].clone(),
+                    tracking_interceptor,
                     in_flight_tracker.clone(),
                 );
                 backend.start()?;
@@ -353,12 +402,18 @@ impl Orchestrator {
         #[cfg(target_os = "windows")]
         {
             use crate::fs_backend::{FilesystemBackend, P9Backend};
+            use crate::recent_writes::WriteTrackingInterceptor;
             for (index, working_dir) in working_dirs.iter().enumerate() {
                 let fs_socket = socket_dir.join(format!("p9fs{index}.addr"));
+                let tracking_interceptor: Arc<dyn codeagent_interceptor::write_interceptor::WriteInterceptor> =
+                    Arc::new(WriteTrackingInterceptor::new(
+                        interceptors[index].clone(),
+                        recent_writes.clone(),
+                    ));
                 let mut backend = P9Backend::new(
                     working_dir.clone(),
                     fs_socket.clone(),
-                    interceptors[index].clone(),
+                    tracking_interceptor,
                     in_flight_tracker.clone(),
                 );
                 backend.start()?;
@@ -523,6 +578,11 @@ impl Orchestrator {
         match &mut *state {
             SessionState::Idle => Err(AgentError::SessionNotActive),
             SessionState::Active(session) => {
+                // Stop filesystem watcher
+                if let Some(handle) = session.fs_watcher_handle.take() {
+                    handle.abort();
+                }
+
                 // Stop background tasks
                 if let Some(handle) = session.control_reader_handle.take() {
                     handle.abort();
@@ -676,6 +736,15 @@ impl Orchestrator {
     fn agent_error_to_mcp(err: AgentError) -> McpError {
         McpError::InternalError {
             message: err.to_string(),
+        }
+    }
+
+    /// Get the recent writes tracker from the active session, if available.
+    fn recent_writes(&self) -> Option<Arc<RecentBackendWrites>> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            SessionState::Active(session) => session.recent_writes.clone(),
+            _ => None,
         }
     }
 
@@ -1159,6 +1228,11 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             message: e.to_string(),
         })?;
 
+        // Record the write so the filesystem watcher doesn't treat it as external.
+        if let Some(rw) = self.recent_writes() {
+            rw.record(&target);
+        }
+
         if !existed_before {
             let _ = interceptor.post_create(&target);
         }
@@ -1260,6 +1334,11 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         std::fs::write(&target, &new_content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
+
+        // Record the write so the filesystem watcher doesn't treat it as external.
+        if let Some(rw) = self.recent_writes() {
+            rw.record(&target);
+        }
 
         interceptor
             .close_step(step_id)

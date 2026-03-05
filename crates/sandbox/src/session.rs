@@ -8,6 +8,8 @@ use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::recent_writes::RecentBackendWrites;
+
 use codeagent_common::SafeguardDecision;
 use codeagent_control::{ControlChannelHandler, InFlightTracker};
 
@@ -77,4 +79,12 @@ pub struct Session {
 
     /// Atomic counter for generating command IDs for `agent.execute`.
     pub next_command_id: Arc<AtomicU64>,
+
+    // --- Filesystem watcher fields ---
+
+    /// Background task running the filesystem watcher.
+    pub fs_watcher_handle: Option<JoinHandle<()>>,
+
+    /// Shared tracker for paths recently written by this sandbox's backends.
+    pub recent_writes: Option<Arc<RecentBackendWrites>>,
 }

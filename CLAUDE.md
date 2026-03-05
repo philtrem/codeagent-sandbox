@@ -228,19 +228,21 @@ crates/
                                    #   --protocol, --log-level, --qemu-binary, --kernel-path,
                                    #   --initrd-path, --rootfs-path, --memory-mb, --cpus,
                                    #   --virtiofsd-binary, --config-file
-      config.rs                    #   SandboxTomlConfig, load_config(), default_config_dir/file_path;
-                                   #   loads TOML from --config-file or platform default
+      config.rs                    #   SandboxTomlConfig (command_classifier + file_watcher sections),
+                                   #   FileWatcherConfig (enabled, debounce_ms, recent_write_ttl_ms,
+                                   #   exclude_patterns), load_config(), default_config_dir/file_path
       command_classifier.rs        #   CommandClassifierConfig (serde, 9 Vec<String> fields),
                                    #   CommandClassifier (HashSet-based O(1) lookup), classify(),
                                    #   sanitize(); configurable allowlists for read-only/write/
                                    #   destructive commands + git/cargo/npm subcommand lists
-      error.rs                     #   AgentError enum (10 variants: SessionNotActive,
+      error.rs                     #   AgentError enum (11 variants: SessionNotActive,
                                    #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
                                    #   QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed,
-                                   #   NotImplemented, Undo, Io)
+                                   #   FileWatcherFailed, NotImplemented, Undo, Io)
       session.rs                   #   SessionState enum (Idle | Active), Session struct with
                                    #   optional VM fields (qemu_process, fs_backends,
-                                   #   in_flight_tracker, control_writer, task handles, socket_dir)
+                                   #   in_flight_tracker, control_writer, task handles, socket_dir),
+                                   #   fs_watcher_handle, recent_writes
       orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
                                    #   McpHandler (10 methods), session lifecycle, undo delegation,
                                    #   direct host fs access, safeguard confirm/configure,
@@ -254,6 +256,12 @@ crates/
       control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
                                    #   spawn_control_reader (socket reader → ControlChannelHandler),
                                    #   serialize_host_message
+      recent_writes.rs             #   RecentBackendWrites (Mutex<HashMap<PathBuf, Instant>> + TTL),
+                                   #   WriteTrackingInterceptor (WriteInterceptor decorator that
+                                   #   records mutated paths for watcher suppression)
+      fs_watcher.rs                #   FsWatcherConfig, spawn_fs_watcher() — notify crate v8,
+                                   #   debounced event processing, RecentBackendWrites filtering,
+                                   #   exclude patterns, undo dir filtering, barrier creation
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns external
                                    #   virtiofsd process (no interception),
@@ -266,7 +274,8 @@ crates/
                                    #   virtconsole for 9P transport), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
     tests/
-      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (33 tests)
+      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (40 tests)
+      fs_watcher.rs                #   FW-01..FW-12 filesystem watcher integration tests (12 tests)
   shim/                             # codeagent-shim — VM-side command executor binary
     Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
     src/
@@ -529,9 +538,10 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   cargo/npm subcommand lists) are configurable via `CommandClassifierConfig` loaded from
   `codeagent.toml`. Sanitization checks (fork bombs, `sudo`, device access, shell expansion
   attacks) are hardcoded and not user-configurable — these are security-critical.
-- **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
-  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd), toml (config loading),
+- **Dependencies** (all permissively licensed): blake3, filetime, ignore, notify (v8, CC0,
+  cross-platform filesystem watching), serde (+derive), serde_json, tempfile, thiserror,
+  tokio (rt, macros, sync, time, io-util), xattr (Linux only), zstd, chrono (+serde),
+  which (binary resolution for QEMU/virtiofsd), toml (config loading),
   dirs (platform config directory). **Unix-only** (virtiofs
   backend): virtiofsd (Apache-2.0/BSD-3, via local fork), vhost-user-backend, vhost, vm-memory,
   log; vmm-sys-util (via local fork with macOS support). **Dev-only**: proptest (model-based
@@ -804,7 +814,8 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
     or platform default (`{config_dir}/CodeAgent/codeagent.toml`), falls back to built-in defaults
   - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
     command classifier config tests (10 tests) + TOML config loading tests (5 tests) +
-    integration tests AO-01..AO-15 + MCP-01..MCP-13 (33 tests) = 137 total tests
+    integration tests AO-01..AO-15 + MCP-01..MCP-13 (40 tests) +
+    FW-01..FW-12 filesystem watcher tests (12 tests) = 152 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -910,6 +921,29 @@ integration code are built. The remaining work is:
 They verify that POSIX syscalls arriving via FUSE trigger the correct `WriteInterceptor`
 method calls. Will become runnable when QEMU/KVM infrastructure is available in CI.
 
+- **External Modification Detection (Filesystem Watcher)** — complete
+  - `notify` crate v8 for cross-platform filesystem watching
+  - `RecentBackendWrites`: `Mutex<HashMap<PathBuf, Instant>>` with configurable TTL (default 5s)
+    for tracking sandbox-originated writes. Normalized path comparison (forward slashes,
+    case-insensitive on Windows).
+  - `WriteTrackingInterceptor`: decorator over `Arc<dyn WriteInterceptor>` that records
+    mutated paths on all 13 `WriteInterceptor` methods. Injected between `UndoInterceptor`
+    and filesystem backends (InterceptedBackend/P9Backend) at the sandbox level.
+  - `FsWatcherConfig`: debounce duration (default 2s), exclude patterns, enabled flag.
+  - `spawn_fs_watcher()`: creates `notify::RecommendedWatcher`, bridges sync callbacks to
+    tokio via `spawn_blocking`, debounced event accumulation, filters against
+    `RecentBackendWrites` + undo dir prefixes + configurable exclude patterns, groups by
+    working directory, calls `interceptor.notify_external_modification()`, emits
+    `Event::ExternalModification`.
+  - `FileWatcherConfig` in `SandboxTomlConfig` for TOML configuration (enabled, debounce_ms,
+    recent_write_ttl_ms, exclude_patterns).
+  - Watcher failure is non-fatal: emits `Event::Warning` and continues without watching.
+  - MCP `write_file`/`edit_file` record paths to `RecentBackendWrites` after writing.
+  - Default exclude patterns: `.git/objects`, `.git/logs`, `.git/refs`, `node_modules`.
+  - 12 integration tests (FW-01..FW-12) covering: external detection, backend suppression,
+    disabled watcher, exclude patterns, undo dir filtering, no-steps guard, TTL expiry,
+    multi-dir grouping, config deserialization, defaults, WriteTrackingInterceptor recording.
+
 - **Desktop App (Phases 1-4)** — complete
   - Tauri v2 + React 19 + TypeScript + Tailwind CSS 4 + Zustand stack in `desktop/`
   - Standalone `desktop/src-tauri/Cargo.toml` (excluded from workspace, not a member)
@@ -973,8 +1007,9 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config tests (137 tests)
-cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (33 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config + watcher tests (152 tests)
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (40 tests)
+cargo test -p codeagent-sandbox --test fs_watcher                      # FW filesystem watcher tests only (12 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
 cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)

@@ -19,6 +19,32 @@ use crate::command_classifier::CommandClassifierConfig;
 #[serde(default)]
 pub struct SandboxTomlConfig {
     pub command_classifier: CommandClassifierConfig,
+    pub file_watcher: FileWatcherConfig,
+}
+
+/// Configuration for the filesystem watcher, loaded from TOML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileWatcherConfig {
+    /// Whether the watcher is enabled (default: true).
+    pub enabled: bool,
+    /// Debounce duration in milliseconds (default: 2000).
+    pub debounce_ms: u64,
+    /// TTL for recent backend write records in milliseconds (default: 5000).
+    pub recent_write_ttl_ms: u64,
+    /// Additional path substring patterns to exclude from watching.
+    pub exclude_patterns: Vec<String>,
+}
+
+impl Default for FileWatcherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debounce_ms: 2000,
+            recent_write_ttl_ms: 5000,
+            exclude_patterns: vec![],
+        }
+    }
 }
 
 /// Return the platform-default config directory for CodeAgent.

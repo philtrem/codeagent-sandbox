@@ -21,7 +21,7 @@ async fn run_stdio(args: CliArgs, config: codeagent_sandbox::config::SandboxToml
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let working_dir = args.working_dirs[0].clone();
-    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier);
+    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
 
     let router = Router::new(working_dir, Box::new(orchestrator));
     let mut server = StdioServer::new(router, event_receiver);
@@ -53,7 +53,7 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
             label: None,
         })
         .collect();
-    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier);
+    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
 
     // MCP mode auto-starts the session from CLI args since MCP has no
     // session.start concept — the client expects tools to be ready immediately.
