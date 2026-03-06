@@ -463,16 +463,12 @@ export default function UndoHistory() {
     }
   };
 
-  // Check if session-start barriers exist in the range being rolled back.
-  // Only session_start barriers prompt the user — external_modification barriers
-  // are enforced by the backend and reported as errors if encountered.
+  // Check if any barriers exist in the range being rolled back.
   const hasBarriersInRange = (count: number): boolean => {
     if (!data) return false;
     const stepsToRollBack = data.steps.slice(0, count);
     const stepIds = new Set(stepsToRollBack.map((s) => s.step_id));
-    return data.barriers.some(
-      (b) => b.reason === "session_start" && stepIds.has(b.after_step_id),
-    );
+    return data.barriers.some((b) => stepIds.has(b.after_step_id));
   };
 
   if (!vmRunning && !undoDir) {
