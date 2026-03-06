@@ -305,19 +305,44 @@ impl UndoInterceptor {
 
     /// Close the current step, promoting WAL to steps/.
     ///
-    /// All steps are assigned a sequential step ID from an internal monotonic
-    /// counter, decoupled from the caller-provided ID. This ensures unique
-    /// IDs even after rollback (which removes steps but doesn't reset the
-    /// counter).
+    /// Steps that touched no files (read-only commands) are silently discarded:
+    /// the WAL is cleaned up, no step ID is consumed, and nothing is persisted.
+    /// This keeps step IDs contiguous for the user-visible history.
     ///
-    /// Empty steps are still promoted (not discarded) because the two-channel
-    /// architecture has a race condition: P9 filesystem operations can arrive
-    /// before the control channel's StepStarted message is processed, leaving
-    /// the manifest empty even for genuine write commands. Discarding such
-    /// steps would silently lose undo tracking.
+    /// Non-empty steps are assigned a sequential step ID from an internal
+    /// monotonic counter, decoupled from the caller-provided ID. This ensures
+    /// unique IDs even after rollback (which removes steps but doesn't reset
+    /// the counter).
     ///
     /// Returns the list of step IDs that were evicted due to resource limits.
     pub fn close_step(&self, _id: StepId) -> Result<Vec<StepId>> {
+        // Check if the step has any manifest entries (files touched).
+        let is_empty = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .current_manifest
+                .as_ref()
+                .is_none_or(|m| m.entries.is_empty())
+        };
+
+        if is_empty {
+            // Discard empty step: cancel without adding to completed list,
+            // clean up WAL, and don't consume a step ID.
+            self.step_tracker.cancel_step()?;
+            {
+                let mut inner = self.inner.lock().unwrap();
+                inner.touched_paths.clear();
+                inner.current_manifest = None;
+                inner.current_step_data_size = 0;
+                inner.step_unprotected = false;
+            }
+            let wal_dir = self.wal_in_progress_dir();
+            if wal_dir.exists() {
+                let _ = fs::remove_dir_all(&wal_dir);
+            }
+            return Ok(vec![]);
+        }
+
         let final_id = {
             let mut counter = self.next_step_id.lock().unwrap();
             let allocated = *counter;

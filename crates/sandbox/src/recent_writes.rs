@@ -27,9 +27,20 @@ impl RecentBackendWrites {
     }
 
     /// Record that the sandbox just wrote to `path`.
+    ///
+    /// Also records the parent directory because filesystem watchers report
+    /// mtime changes on parent directories when children are created/removed,
+    /// and we need to suppress those too.
     pub fn record(&self, path: &Path) {
         let canonical = normalize_path(path);
-        self.entries.lock().unwrap().insert(canonical, Instant::now());
+        let now = Instant::now();
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(parent) = canonical.parent() {
+            if !parent.as_os_str().is_empty() {
+                entries.insert(parent.to_path_buf(), now);
+            }
+        }
+        entries.insert(canonical, now);
     }
 
     /// Returns true if `path` was written by the sandbox within the TTL window.
@@ -205,7 +216,8 @@ mod tests {
         let rw = RecentBackendWrites::new(Duration::from_secs(10));
         rw.record(Path::new("/tmp/a"));
         rw.prune_expired();
-        assert_eq!(rw.len(), 1);
+        // record() stores both the path and its parent directory.
+        assert_eq!(rw.len(), 2);
     }
 
     #[cfg(target_os = "windows")]
@@ -228,5 +240,13 @@ mod tests {
     fn default_ttl_is_5s() {
         let rw = RecentBackendWrites::default();
         assert_eq!(rw.ttl, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn parent_directory_recorded() {
+        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        rw.record(Path::new("/workspace/subdir/file.txt"));
+        assert!(rw.was_recent(Path::new("/workspace/subdir/file.txt")));
+        assert!(rw.was_recent(Path::new("/workspace/subdir")));
     }
 }

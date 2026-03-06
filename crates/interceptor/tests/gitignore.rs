@@ -38,11 +38,13 @@ fn gi_01_ignored_file_not_captured_on_pre_write() {
     ops.write_file(&log_file, b"new log content");
     interceptor.close_step(1).unwrap();
 
-    // Step is promoted to disk but the manifest has no entries
-    let manifest = read_step_manifest(&ws, 1);
+    // Step had no non-ignored files so it is silently discarded — no step
+    // directory should exist on disk and no step ID should be consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
     assert!(
-        manifest.entries.is_empty(),
-        "ignored file should not appear in manifest"
+        interceptor.completed_steps().is_empty(),
+        "no completed steps should be recorded"
     );
 }
 
