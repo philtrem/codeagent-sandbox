@@ -237,6 +237,7 @@ impl Orchestrator {
         let fs_watcher_handle = fs_watcher::spawn_fs_watcher(
             working_dirs.clone(),
             undo_dirs.clone(),
+            interceptors.clone(),
             recent_writes.clone(),
             self.event_sender.clone(),
             watcher_config,

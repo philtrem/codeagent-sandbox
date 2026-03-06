@@ -7,6 +7,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use codeagent_common::BarrierReason;
+use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
 use crate::recent_writes::RecentBackendWrites;
@@ -38,15 +40,13 @@ impl Default for FsWatcherConfig {
 }
 
 /// Spawn a filesystem watcher that monitors working directories for external
-/// changes and emits `ExternalModification` events when detected.
-///
-/// Barriers are NOT created here — they belong only at session boundaries
-/// (placed in `do_session_start`). The watcher only detects and reports.
+/// changes, creates undo barriers, and emits `ExternalModification` events.
 ///
 /// Returns `None` if the watcher fails to initialize (non-fatal).
 pub fn spawn_fs_watcher(
     working_dirs: Vec<PathBuf>,
     undo_dirs: Vec<PathBuf>,
+    interceptors: Vec<Arc<UndoInterceptor>>,
     recent_writes: Arc<RecentBackendWrites>,
     event_sender: mpsc::UnboundedSender<Event>,
     config: FsWatcherConfig,
@@ -101,6 +101,7 @@ pub fn spawn_fs_watcher(
             bridge_rx,
             debounce,
             working_dirs: &working_dirs,
+            interceptors: &interceptors,
             recent_writes: &recent_writes,
             event_sender: &event_sender,
             undo_dir_prefixes: &undo_dir_prefixes,
@@ -144,6 +145,7 @@ struct WatcherLoopParams<'a> {
     bridge_rx: std::sync::mpsc::Receiver<Vec<PathBuf>>,
     debounce: Duration,
     working_dirs: &'a [PathBuf],
+    interceptors: &'a [Arc<UndoInterceptor>],
     recent_writes: &'a RecentBackendWrites,
     event_sender: &'a mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &'a [String],
@@ -151,12 +153,13 @@ struct WatcherLoopParams<'a> {
 }
 
 /// Main watcher loop: reads batched events from the bridge channel, debounces
-/// them, filters against recent backend writes, and emits events.
+/// them, filters against recent backend writes, creates barriers, and emits events.
 async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
     let WatcherLoopParams {
         bridge_rx,
         debounce,
         working_dirs,
+        interceptors,
         recent_writes,
         event_sender,
         undo_dir_prefixes,
@@ -202,6 +205,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
                 process_pending_paths(
                     &mut pending_paths,
                     working_dirs,
+                    interceptors,
                     recent_writes,
                     event_sender,
                     undo_dir_prefixes,
@@ -215,17 +219,19 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
     }
 }
 
-/// Process accumulated paths: filter, group by working dir, emit events.
+/// Process accumulated paths: filter, group by working dir, create barriers,
+/// and emit events.
 fn process_pending_paths(
     pending_paths: &mut HashSet<PathBuf>,
     working_dirs: &[PathBuf],
+    interceptors: &[Arc<UndoInterceptor>],
     recent_writes: &RecentBackendWrites,
     event_sender: &mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &[String],
     exclude_patterns: &[String],
 ) {
-    // Collect external paths (not from backend, not excluded).
-    let mut affected: Vec<PathBuf> = Vec::new();
+    // Group external paths by working directory index.
+    let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
 
     for path in pending_paths.drain() {
         let path_str = path.to_string_lossy().replace('\\', "/");
@@ -251,25 +257,45 @@ fn process_pending_paths(
             continue;
         }
 
-        // Verify the path belongs to a watched working directory.
-        if working_dirs.iter().any(|wd| path.starts_with(wd)) {
-            affected.push(path);
+        // Find which working directory this path belongs to.
+        for (index, working_dir) in working_dirs.iter().enumerate() {
+            if path.starts_with(working_dir) {
+                per_dir[index].push(path);
+                break;
+            }
         }
     }
 
-    if affected.is_empty() {
-        return;
+    // Create barriers and emit events for each working directory with external changes.
+    for (index, external_paths) in per_dir.into_iter().enumerate() {
+        if external_paths.is_empty() {
+            continue;
+        }
+
+        let interceptor = &interceptors[index];
+
+        // Skip if undo is disabled or there are no completed steps to protect.
+        if interceptor.is_undo_disabled() || interceptor.completed_steps().is_empty() {
+            continue;
+        }
+
+        let affected_strings: Vec<String> = external_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        let barrier_id = match interceptor
+            .notify_external_modification(external_paths, BarrierReason::ExternalModification)
+        {
+            Ok(Some(barrier)) => Some(barrier.barrier_id),
+            _ => None,
+        };
+
+        let _ = event_sender.send(Event::ExternalModification {
+            affected_paths: affected_strings,
+            barrier_id,
+        });
     }
-
-    let affected_strings: Vec<String> = affected
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-
-    let _ = event_sender.send(Event::ExternalModification {
-        affected_paths: affected_strings,
-        barrier_id: None,
-    });
 }
 
 #[cfg(test)]
