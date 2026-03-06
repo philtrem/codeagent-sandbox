@@ -170,6 +170,7 @@ pub struct ClaudeCodeSection {
     pub server_name: String,
     pub scope: String,
     pub disable_builtin_tools: bool,
+    pub auto_allow_write_tools: bool,
 }
 
 impl Default for ClaudeCodeSection {
@@ -179,6 +180,7 @@ impl Default for ClaudeCodeSection {
             server_name: "codeagent-sandbox".into(),
             scope: "user".into(),
             disable_builtin_tools: true,
+            auto_allow_write_tools: false,
         }
     }
 }

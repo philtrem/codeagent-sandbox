@@ -196,9 +196,66 @@ pub fn remove_claude_code_denied_tools(tools: Vec<String>) -> Result<(), String>
     write_json_file(&path, &value)
 }
 
+// --- Claude Code: allowed tools (settings.json permissions.allow) ---
+
+#[tauri::command]
+pub fn set_claude_code_allowed_tools(server_name: String, tools: Vec<String>) -> Result<(), String> {
+    let path = claude_code_settings_path()
+        .ok_or("Could not determine Claude Code settings path")?;
+    let mut value = read_json_file(&path);
+    let obj = value.as_object_mut().unwrap();
+    let permissions = obj
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    let allow = permissions
+        .as_object_mut()
+        .ok_or("permissions is not an object")?
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(arr) = allow.as_array_mut() {
+        for tool in &tools {
+            let entry = format!("MCP({server_name}:{tool})");
+            if !arr.iter().any(|v| v.as_str() == Some(&entry)) {
+                arr.push(serde_json::Value::String(entry));
+            }
+        }
+    }
+    write_json_file(&path, &value)
+}
+
+#[tauri::command]
+pub fn remove_claude_code_allowed_tools(server_name: String) -> Result<(), String> {
+    let path = claude_code_settings_path()
+        .ok_or("Could not determine Claude Code settings path")?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut value = read_json_file(&path);
+    if let Some(arr) = value
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut())
+    {
+        let prefix = format!("MCP({server_name}:");
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !s.starts_with(&prefix))
+                .unwrap_or(true)
+        });
+    }
+    write_json_file(&path, &value)
+}
+
 // --- Denied tools list ---
 
 const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
+
+// --- Allowed MCP tools lists ---
+
+const READ_TOOLS: &[&str] = &[
+    "read_file", "list_directory", "glob", "grep",
+    "get_undo_history", "get_session_status", "get_working_directory",
+];
+const WRITE_TOOLS: &[&str] = &["Bash", "write_file", "edit_file", "undo"];
 
 // --- Lifecycle helpers (called from start_vm, stop_vm, and exit handler) ---
 
@@ -275,6 +332,14 @@ pub fn register_mcp_server(
         let tools: Vec<String> = DENIED_TOOLS.iter().map(|s| (*s).into()).collect();
         let _ = set_claude_code_denied_tools(tools);
     }
+
+    // Always allow read tools; conditionally allow write tools
+    let server_name = config.claude_code.server_name.clone();
+    let mut tools: Vec<String> = READ_TOOLS.iter().map(|s| (*s).into()).collect();
+    if config.claude_code.auto_allow_write_tools {
+        tools.extend(WRITE_TOOLS.iter().map(|s| String::from(*s)));
+    }
+    let _ = set_claude_code_allowed_tools(server_name, tools);
 }
 
 /// Unregister the MCP server from Claude Code config and restore built-in tools.
@@ -303,6 +368,9 @@ pub fn unregister_mcp_server() {
             }
         }
     }
+
+    // Claude Code: remove our allow entries from settings.json
+    let _ = remove_claude_code_allowed_tools(config.claude_code.server_name.clone());
 
     // Claude Code: remove our deny entries from settings.json
     if let Some(path) = claude_code_settings_path() {

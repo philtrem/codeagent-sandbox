@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Terminal,
   ShieldOff,
+  ShieldCheck,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { useToastStore } from "../../hooks/useToastStore";
@@ -136,6 +137,18 @@ export default function ClaudeIntegration() {
         if (config.claude_code.disable_builtin_tools) {
           await invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
         }
+        // Set allowed tools (read always; write if toggled)
+        const allowTools = [
+          "read_file", "list_directory", "glob", "grep",
+          "get_undo_history", "get_session_status", "get_working_directory",
+          ...(config.claude_code.auto_allow_write_tools
+            ? ["Bash", "write_file", "edit_file", "undo"]
+            : []),
+        ];
+        await invoke("set_claude_code_allowed_tools", {
+          serverName: config.claude_code.server_name,
+          tools: allowTools,
+        });
         addToast("warning", "Restart Claude Code for changes to take effect.");
       } else {
         await invoke("remove_claude_code_config", {
@@ -143,6 +156,9 @@ export default function ClaudeIntegration() {
           scope: config.claude_code.scope,
         });
         await invoke("remove_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
+        await invoke("remove_claude_code_allowed_tools", {
+          serverName: config.claude_code.server_name,
+        });
         addToast("warning", "Restart Claude Code for changes to take effect.");
       }
       detect();
@@ -272,6 +288,56 @@ export default function ClaudeIntegration() {
           </label>
           <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
             Prevents Claude from using its own filesystem tools, ensuring all operations go through the sandbox.
+          </p>
+        </div>
+
+        <div className="mt-3">
+          <label className="flex items-center gap-2 text-sm">
+            <button
+              role="switch"
+              aria-checked={config.claude_code.auto_allow_write_tools}
+              onClick={async () => {
+                const next = !config.claude_code.auto_allow_write_tools;
+                updateSection("claude_code", { auto_allow_write_tools: next });
+                if (isVmRunning && config.claude_code.enabled) {
+                  try {
+                    // Remove existing allow entries and re-add with correct set
+                    await invoke("remove_claude_code_allowed_tools", {
+                      serverName: config.claude_code.server_name,
+                    });
+                    const tools = [
+                      "read_file", "list_directory", "glob", "grep",
+                      "get_undo_history", "get_session_status", "get_working_directory",
+                      ...(next ? ["Bash", "write_file", "edit_file", "undo"] : []),
+                    ];
+                    await invoke("set_claude_code_allowed_tools", {
+                      serverName: config.claude_code.server_name,
+                      tools,
+                    });
+                  } catch (e) {
+                    addToast("error", `Failed to update allowed tools: ${e}`);
+                  }
+                }
+              }}
+              className={`relative h-5 w-9 rounded-full transition-colors ${
+                config.claude_code.auto_allow_write_tools
+                  ? "bg-[var(--color-accent)]"
+                  : "bg-[var(--color-bg-tertiary)]"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                  config.claude_code.auto_allow_write_tools ? "translate-x-4" : ""
+                }`}
+              />
+            </button>
+            <span className="flex items-center gap-1">
+              <ShieldCheck size={14} />
+              Auto-allow write tools
+            </span>
+          </label>
+          <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+            Skip confirmation prompts for write and execute operations.
           </p>
         </div>
 

@@ -36,6 +36,8 @@ pub fn run() {
             claude::generate_claude_code_cli_command,
             claude::set_claude_code_denied_tools,
             claude::remove_claude_code_denied_tools,
+            claude::set_claude_code_allowed_tools,
+            claude::remove_claude_code_allowed_tools,
             // System commands
             system::get_platform,
             system::get_cpu_count,

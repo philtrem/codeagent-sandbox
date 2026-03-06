@@ -62,6 +62,7 @@ export interface ClaudeCodeSection {
   server_name: string;
   scope: string;
   disable_builtin_tools: boolean;
+  auto_allow_write_tools: boolean;
 }
 
 export interface CommandClassifierSection {
@@ -216,6 +217,7 @@ export function defaultConfig(): SandboxConfig {
       server_name: "codeagent-sandbox",
       scope: "user",
       disable_builtin_tools: true,
+      auto_allow_write_tools: false,
     },
     command_classifier: defaultCommandClassifier(),
   };
