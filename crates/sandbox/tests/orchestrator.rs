@@ -790,6 +790,53 @@ fn ba_03_bash_empty_command_rejected() {
     );
 }
 
+// -----------------------------------------------------------------------
+// BA-04: Host-only bash execution works without VM
+// -----------------------------------------------------------------------
+#[test]
+fn ba_04_bash_host_only() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "echo hello".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_ok(), "host-only bash should succeed: {:?}", result.err());
+
+    let value = result.unwrap();
+    assert!(
+        value["host_only"].as_bool().unwrap_or(false),
+        "response should include host_only flag"
+    );
+    assert_eq!(value["exit_code"].as_i64().unwrap(), 0);
+    let output = value["output"].as_str().unwrap();
+    assert!(
+        output.contains("hello"),
+        "expected 'hello' in output, got: {output}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-05: Host-only bash still rejects sanitization failures
+// -----------------------------------------------------------------------
+#[test]
+fn ba_05_bash_host_sanitize() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Fork bomb should be rejected before host execution
+    let result = orchestrator.bash(BashArgs {
+        command: ":(){ :|:& };:".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err(), "sanitization should still apply in host-only mode");
+}
+
 // ── MCP write_file undo tracking tests ──
 
 /// write_file creating a new file should produce an undo step that,
@@ -890,6 +937,109 @@ fn mcp_16_write_file_creates_parent_dirs_undo() {
     assert!(
         !working.path().join("a").exists(),
         "created parent directories should be removed after undo"
+    );
+}
+
+// -----------------------------------------------------------------------
+// MCP-17: write_file error cancels the step so subsequent operations work
+// -----------------------------------------------------------------------
+#[test]
+fn mcp_17_write_file_error_cancels_step() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Create a directory so writing a file at that path fails.
+    std::fs::create_dir_all(working.path().join("blocker")).unwrap();
+
+    let result = orchestrator.write_file(WriteFileArgs {
+        path: "blocker".to_string(),
+        content: "should fail".to_string(),
+    });
+    assert!(result.is_err(), "writing to a directory path should fail");
+
+    // A subsequent write_file should succeed (step was cleaned up, not left open).
+    let result = orchestrator.write_file(WriteFileArgs {
+        path: "ok.txt".to_string(),
+        content: "works".to_string(),
+    });
+    assert!(result.is_ok(), "subsequent write should succeed after error cleanup");
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("ok.txt")).unwrap(),
+        "works"
+    );
+}
+
+// -----------------------------------------------------------------------
+// MCP-18: edit_file error cancels the step so subsequent operations work
+// -----------------------------------------------------------------------
+#[test]
+fn mcp_18_edit_file_error_cancels_step() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Create a file, then make target path a directory to cause write failure.
+    std::fs::write(working.path().join("target.txt"), "original").unwrap();
+
+    // edit_file reads the file, validates, then writes. We need the write to fail.
+    // Make the file read-only so write fails on Windows (on Unix we need a different approach).
+    #[cfg(windows)]
+    {
+        let target = working.path().join("target.txt");
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        let result = orchestrator.edit_file(EditFileArgs {
+            path: "target.txt".to_string(),
+            old_string: "original".to_string(),
+            new_string: "modified".to_string(),
+            replace_all: false,
+        });
+        assert!(result.is_err(), "writing to read-only file should fail");
+
+        // Restore permissions for cleanup.
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&target, perms).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    {
+        // On Unix, remove write permission from the parent directory to prevent write.
+        use std::os::unix::fs::PermissionsExt;
+        let target = working.path().join("target.txt");
+        let parent = target.parent().unwrap();
+        let original_perms = std::fs::metadata(parent).unwrap().permissions();
+        let mut no_write = original_perms.clone();
+        no_write.set_mode(0o555);
+        std::fs::set_permissions(parent, no_write).unwrap();
+
+        let result = orchestrator.edit_file(EditFileArgs {
+            path: "target.txt".to_string(),
+            old_string: "original".to_string(),
+            new_string: "modified".to_string(),
+            replace_all: false,
+        });
+        assert!(result.is_err(), "writing to read-only dir should fail");
+
+        // Restore permissions for cleanup.
+        std::fs::set_permissions(parent, original_perms).unwrap();
+    }
+
+    // A subsequent edit should succeed (step was cleaned up, not left open).
+    let result = orchestrator.edit_file(EditFileArgs {
+        path: "target.txt".to_string(),
+        old_string: "original".to_string(),
+        new_string: "modified".to_string(),
+        replace_all: false,
+    });
+    assert!(result.is_ok(), "subsequent edit should succeed after error cleanup");
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("target.txt")).unwrap(),
+        "modified"
     );
 }
 
