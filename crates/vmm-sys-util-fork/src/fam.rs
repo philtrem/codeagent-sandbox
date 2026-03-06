@@ -241,7 +241,7 @@ impl<T: Default + FamStruct> FamStructWrapper<T> {
     /// # Arguments
     ///
     /// * `entries` - The slice of [`FamStruct::Entry`](trait.FamStruct.html#associatedtype.Entry)
-    ///               entries.
+    ///   entries.
     ///
     /// # Errors
     ///
@@ -450,7 +450,7 @@ impl<T: Default + FamStruct> FamStructWrapper<T> {
     /// # Arguments
     ///
     /// * `f` - The function used to evaluate whether an entry will be kept or not.
-    ///         When `f` returns `true` the entry is kept.
+    ///   When `f` returns `true` the entry is kept.
     pub fn retain<P>(&mut self, mut f: P)
     where
         P: FnMut(&T::Entry) -> bool,

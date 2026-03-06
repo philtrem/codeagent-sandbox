@@ -280,7 +280,7 @@ async fn sl08_resource_cleanup_on_stop() {
 
     // Query session status to discover socket paths
     let (msg, id) = session_status();
-    let status_resp = client.request(&msg, &id, COMMAND_TIMEOUT).await.unwrap();
+    let _status_resp = client.request(&msg, &id, COMMAND_TIMEOUT).await.unwrap();
 
     let (msg, id) = session_stop();
     client.request(&msg, &id, SHUTDOWN_TIMEOUT).await.ok();
