@@ -273,6 +273,16 @@ impl UndoInterceptor {
     /// Open a new undo step.
     pub fn open_step(&self, id: StepId) -> Result<()> {
         self.check_undo_enabled()?;
+
+        // Create WAL directory BEFORE marking the step as active in the
+        // tracker. If filesystem setup fails, the tracker remains clean and
+        // subsequent open_step calls won't fail with StepAlreadyActive.
+        let wal_dir = self.wal_in_progress_dir();
+        if wal_dir.exists() {
+            fs::remove_dir_all(&wal_dir)?;
+        }
+        fs::create_dir_all(wal_dir.join("preimages"))?;
+
         self.step_tracker.open_step(id)?;
 
         let mut inner = self.inner.lock().unwrap();
@@ -281,13 +291,6 @@ impl UndoInterceptor {
         inner.safeguard_tracker.reset();
         inner.current_step_data_size = 0;
         inner.step_unprotected = false;
-
-        // Create WAL directory for this step
-        let wal_dir = self.wal_in_progress_dir();
-        if wal_dir.exists() {
-            fs::remove_dir_all(&wal_dir)?;
-        }
-        fs::create_dir_all(wal_dir.join("preimages"))?;
 
         Ok(())
     }
@@ -302,34 +305,20 @@ impl UndoInterceptor {
 
     /// Close the current step, promoting WAL to steps/.
     ///
-    /// Non-empty steps (those with filesystem operations) are assigned a
-    /// sequential step ID from an internal counter, decoupled from the
-    /// caller-provided ID. This ensures that read-only commands (which
-    /// produce empty steps) don't create gaps in the undo history numbering.
+    /// All steps are assigned a sequential step ID from an internal monotonic
+    /// counter, decoupled from the caller-provided ID. This ensures unique
+    /// IDs even after rollback (which removes steps but doesn't reset the
+    /// counter).
     ///
     /// Empty steps are still promoted (not discarded) because the two-channel
     /// architecture has a race condition: P9 filesystem operations can arrive
     /// before the control channel's StepStarted message is processed, leaving
     /// the manifest empty even for genuine write commands. Discarding such
-    /// steps would silently lose undo tracking. The UI layer filters empty
-    /// steps from display instead.
+    /// steps would silently lose undo tracking.
     ///
     /// Returns the list of step IDs that were evicted due to resource limits.
-    pub fn close_step(&self, id: StepId) -> Result<Vec<StepId>> {
-        // For non-empty steps, allocate a sequential ID so that read-only
-        // commands don't create gaps in the displayed numbering. Empty steps
-        // keep the caller-provided ID (they're hidden by the UI anyway).
-        let is_empty = {
-            let inner = self.inner.lock().unwrap();
-            inner
-                .current_manifest
-                .as_ref()
-                .is_none_or(|m| m.entries.is_empty())
-        };
-
-        let final_id = if is_empty {
-            id
-        } else {
+    pub fn close_step(&self, _id: StepId) -> Result<Vec<StepId>> {
+        let final_id = {
             let mut counter = self.next_step_id.lock().unwrap();
             let allocated = *counter;
             *counter += 1;
@@ -349,18 +338,10 @@ impl UndoInterceptor {
             }
         }
 
-        // Promote WAL to steps/{final_id}/
-        let wal_dir = self.wal_in_progress_dir();
-        let step_dir = self.step_dir(final_id);
-        if wal_dir.exists() {
-            if step_dir.exists() {
-                fs::remove_dir_all(&step_dir)?;
-            }
-            fs::rename(&wal_dir, &step_dir)?;
-        }
-
-        // Close the active step (tracked by the caller-provided ID) and
-        // record the final ID in the completed list.
+        // Close the active step and clear inner state BEFORE filesystem
+        // promotion. If fs::rename fails, the step is recorded as completed
+        // in the tracker (so subsequent open_step calls succeed) but missing
+        // on disk — the next session won't find it, which is a harmless loss.
         self.step_tracker.cancel_step()?;
         self.step_tracker.add_completed_step(final_id);
 
@@ -370,6 +351,25 @@ impl UndoInterceptor {
             inner.current_manifest = None;
             inner.current_step_data_size = 0;
             inner.step_unprotected = false;
+        }
+
+        // Promote WAL to steps/{final_id}/
+        let wal_dir = self.wal_in_progress_dir();
+        let step_dir = self.step_dir(final_id);
+        if wal_dir.exists() {
+            if step_dir.exists() {
+                if let Err(error) = fs::remove_dir_all(&step_dir) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"component\":\"undo\",\"message\":\"failed to remove old step dir {}: {error}\"}}",
+                        step_dir.display()
+                    );
+                }
+            }
+            if let Err(error) = fs::rename(&wal_dir, &step_dir) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"component\":\"undo\",\"message\":\"failed to promote WAL to step {final_id}: {error}\"}}",
+                );
+            }
         }
 
         // Run eviction after step promotion
@@ -645,16 +645,16 @@ impl UndoInterceptor {
     }
 
     /// Roll back the current in-progress step and cancel it.
-    /// Used when a safeguard denies the current operation — undoes all
-    /// operations already applied in this step.
-    fn rollback_current_step(&self) -> Result<()> {
+    /// Used when an error occurs mid-step or when a safeguard denies the
+    /// current operation — undoes all operations already applied in this step.
+    pub fn rollback_current_step(&self) -> Result<()> {
         let wal_dir = self.wal_in_progress_dir();
 
         // Write manifest and clear inner state
         {
             let mut inner = self.inner.lock().unwrap();
             if let Some(ref manifest) = inner.current_manifest {
-                manifest.write_to(&wal_dir)?;
+                let _ = manifest.write_to(&wal_dir);
             }
             inner.touched_paths.clear();
             inner.current_manifest = None;
@@ -663,16 +663,23 @@ impl UndoInterceptor {
             inner.step_unprotected = false;
         }
 
-        // Roll back using the WAL data
+        // Best-effort rollback using the WAL data. Even if this fails the step
+        // must be cancelled so subsequent operations are not blocked.
+        let mut rollback_error = None;
         if wal_dir.exists() {
-            rollback::rollback_step(&wal_dir, &self.working_root, self.symlink_policy)?;
-            fs::remove_dir_all(&wal_dir)?;
+            if let Err(e) = rollback::rollback_step(&wal_dir, &self.working_root, self.symlink_policy) {
+                rollback_error = Some(e);
+            }
+            let _ = fs::remove_dir_all(&wal_dir);
         }
 
-        // Cancel the step (not completed, just discarded)
+        // Always cancel the step so the interceptor is ready for the next one.
         self.step_tracker.cancel_step()?;
 
-        Ok(())
+        match rollback_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Process a safeguard event: call the handler and act on the decision.
