@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 use codeagent_common::SafeguardConfig;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
@@ -80,6 +80,9 @@ pub struct Session {
     /// Atomic counter for generating command IDs for `agent.execute`.
     pub next_command_id: Arc<AtomicU64>,
 
+    /// Monotonic counter for API step IDs (write_file/edit_file synthetic steps).
+    pub next_api_step_id: Arc<AtomicI64>,
+
     // --- Filesystem watcher fields ---
 
     /// Background task running the filesystem watcher.
@@ -87,4 +90,9 @@ pub struct Session {
 
     /// Shared tracker for paths recently written by this sandbox's backends.
     pub recent_writes: Option<Arc<RecentBackendWrites>>,
+
+    // --- Safeguard bridge fields ---
+
+    /// Background task consuming safeguard events from interceptors.
+    pub safeguard_bridge_handle: Option<JoinHandle<()>>,
 }
