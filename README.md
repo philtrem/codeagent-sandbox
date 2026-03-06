@@ -58,7 +58,7 @@ The desktop app and the sandbox binary are **separate executables**. The app spa
 
 ### Claude Code integration
 
-When started from the desktop app, the sandbox automatically registers itself as an MCP server in Claude Code's configuration and blocks Claude Code's built-in filesystem tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) so all operations go through the sandbox. On stop or app exit, the registration is removed and built-in tools are restored.
+When started from the desktop app, the sandbox automatically registers itself as an MCP server in Claude Code's configuration and blocks Claude Code's built-in filesystem and execution tools (Read, Edit, Write, Glob, Grep, Bash) so all operations go through the sandbox. Tools like NotebookEdit remain available natively. On stop or app exit, the registration is removed and built-in tools are restored.
 
 ## Testing
 

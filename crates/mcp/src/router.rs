@@ -194,7 +194,7 @@ impl McpRouter {
              All file paths must be relative to that sandbox directory.\n\n\
              Sandbox root: {}\n\n\
              Use ONLY this server's tools for ALL file and command operations. \
-             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash) have been \
              disabled — do not attempt to use them.",
             root_dir.display()
         );
@@ -222,7 +222,7 @@ impl McpRouter {
              All file paths must be relative to that sandbox directory.\n\n\
              Sandbox roots:\n{}\n\n\
              Use ONLY this server's tools for ALL file and command operations. \
-             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash) have been \
              disabled — do not attempt to use them.",
             dir_list.join("\n")
         );

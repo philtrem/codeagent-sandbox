@@ -198,7 +198,7 @@ pub fn remove_claude_code_denied_tools(tools: Vec<String>) -> Result<(), String>
 
 // --- Denied tools list ---
 
-const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit"];
+const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
 
 // --- Lifecycle helpers (called from start_vm, stop_vm, and exit handler) ---
 

@@ -112,7 +112,7 @@ export default function ClaudeIntegration() {
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
 
-  const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash", "NotebookEdit"];
+  const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
 
   // MCP registration is handled by the backend on VM start/stop.
   // The toggle saves the preference; immediate effect only if the VM is running.
