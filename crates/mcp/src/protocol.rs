@@ -166,6 +166,10 @@ fn default_undo_count() -> u32 {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GetUndoHistoryArgs {}
 
+/// Arguments for the `discard_undo_history` tool (no required fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscardUndoHistoryArgs {}
+
 /// Arguments for the `edit_file` tool.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EditFileArgs {

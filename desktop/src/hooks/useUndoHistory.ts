@@ -9,7 +9,7 @@ interface UndoHistoryState {
   error: string | null;
   fetch: (undoDir: string) => Promise<void>;
   rollback: (count: number, force: boolean) => Promise<string>;
-  clearHistory: (undoDir: string) => Promise<void>;
+  clearHistory: (undoDir: string, vmRunning: boolean) => Promise<void>;
 }
 
 let requestIdCounter = 1000;
@@ -53,8 +53,25 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
     return response;
   },
 
-  clearHistory: async (undoDir: string) => {
-    await invoke("clear_undo_history", { undoDir });
+  clearHistory: async (undoDir: string, vmRunning: boolean) => {
+    if (vmRunning) {
+      // Send MCP discard to the running sandbox — this properly resets
+      // both in-memory state and on-disk undo directories.
+      const id = requestIdCounter++;
+      const request = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "discard_undo_history",
+          arguments: {},
+        },
+      });
+      await invoke<string>("send_mcp_request", { requestJson: request });
+    } else {
+      // VM not running — clean up on-disk files directly.
+      await invoke("clear_undo_history", { undoDir });
+    }
     set({ data: null, error: null });
   },
 }));

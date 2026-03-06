@@ -146,20 +146,28 @@ function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="flex items-center gap-2 px-2 py-1">
-      <div className="h-px flex-1 bg-[var(--color-warning)]" />
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1 text-xs text-[var(--color-warning)]"
-      >
-        <Shield size={12} />
-        Barrier (after step {barrier.after_step_id})
-        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-      </button>
-      <div className="h-px flex-1 bg-[var(--color-warning)]" />
+    <div className="px-2 py-1">
+      <div className="flex items-center gap-2">
+        <div className="h-px flex-1 bg-[var(--color-warning)]" />
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1 text-xs text-[var(--color-warning)]"
+        >
+          <Shield size={12} />
+          Barrier (after step {barrier.after_step_id})
+          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        </button>
+        <div className="h-px flex-1 bg-[var(--color-warning)]" />
+      </div>
       {expanded && barrier.affected_paths.length > 0 && (
-        <div className="text-xs text-[var(--color-text-secondary)]">
-          {barrier.affected_paths.join(", ")}
+        <div className="mt-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2">
+          <div className="space-y-0.5">
+            {barrier.affected_paths.map((path) => (
+              <div key={path} className="truncate text-xs font-mono text-[var(--color-text-secondary)]">
+                {path}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -448,7 +456,7 @@ export default function UndoHistory() {
   const confirmClear = async () => {
     setShowClearConfirm(false);
     try {
-      await clearHistory(undoDir);
+      await clearHistory(undoDir, vmRunning);
       addToast("success", "Undo history cleared");
     } catch (e) {
       addToast("error", `Failed to clear history: ${e}`);

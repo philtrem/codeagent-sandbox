@@ -46,6 +46,7 @@ async fn fw_01_external_creation_detected() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes,
         event_sender,
         config,
@@ -75,12 +76,12 @@ async fn fw_01_external_creation_detected() {
         "expected ExternalModification event for external file creation"
     );
 
-    // Verify no barrier is created (informational event only)
+    // With no interceptors provided, no barrier should be created
     for event in &external_events {
         if let Event::ExternalModification { barrier_id, .. } = event {
             assert!(
                 barrier_id.is_none(),
-                "watcher should not create barriers"
+                "watcher without interceptors should not create barriers"
             );
         }
     }
@@ -106,6 +107,7 @@ async fn fw_02_backend_writes_suppressed() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes.clone(),
         event_sender,
         config,
@@ -154,6 +156,7 @@ async fn fw_03_disabled_watcher_returns_none() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes,
         event_sender,
         config,
@@ -181,6 +184,7 @@ async fn fw_04_excluded_patterns_filtered() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes,
         event_sender,
         config,
@@ -229,6 +233,7 @@ async fn fw_05_undo_dir_changes_filtered() {
     let _handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes,
         event_sender,
         config,
@@ -270,6 +275,7 @@ async fn fw_06_events_emitted_without_completed_steps() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes,
         event_sender,
         config,
@@ -316,6 +322,7 @@ async fn fw_07_ttl_expiry_allows_detection() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
+        vec![],
         recent_writes.clone(),
         event_sender,
         config,
@@ -371,6 +378,7 @@ async fn fw_08_multiple_working_dirs() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working1.path().to_path_buf(), working2.path().to_path_buf()],
         vec![undo.path().join("dir1"), undo.path().join("dir2")],
+        vec![],
         recent_writes,
         event_sender,
         config,

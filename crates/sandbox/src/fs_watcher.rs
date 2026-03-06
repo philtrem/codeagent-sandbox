@@ -7,6 +7,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use codeagent_common::BarrierReason;
+use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
 use crate::recent_writes::RecentBackendWrites;
@@ -44,6 +46,7 @@ impl Default for FsWatcherConfig {
 pub fn spawn_fs_watcher(
     working_dirs: Vec<PathBuf>,
     undo_dirs: Vec<PathBuf>,
+    interceptors: Vec<Arc<UndoInterceptor>>,
     recent_writes: Arc<RecentBackendWrites>,
     event_sender: mpsc::UnboundedSender<Event>,
     config: FsWatcherConfig,
@@ -98,6 +101,7 @@ pub fn spawn_fs_watcher(
             bridge_rx,
             debounce,
             working_dirs: &working_dirs,
+            interceptors: &interceptors,
             recent_writes: &recent_writes,
             event_sender: &event_sender,
             undo_dir_prefixes: &undo_dir_prefixes,
@@ -128,12 +132,15 @@ fn build_watcher(
 }
 
 /// Check if a notify event represents a mutation (create/modify/remove/rename).
+/// Metadata-only changes (access time updates from reads) are excluded.
 fn is_mutation_event(event: &notify::Event) -> bool {
+    use notify::event::ModifyKind;
     use notify::EventKind;
-    matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
+    match event.kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(kind) => !matches!(kind, ModifyKind::Metadata(_)),
+        _ => false,
+    }
 }
 
 /// Grouped parameters for `run_watcher_loop` to satisfy clippy's argument limit.
@@ -141,6 +148,7 @@ struct WatcherLoopParams<'a> {
     bridge_rx: std::sync::mpsc::Receiver<Vec<PathBuf>>,
     debounce: Duration,
     working_dirs: &'a [PathBuf],
+    interceptors: &'a [Arc<UndoInterceptor>],
     recent_writes: &'a RecentBackendWrites,
     event_sender: &'a mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &'a [String],
@@ -154,6 +162,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         bridge_rx,
         debounce,
         working_dirs,
+        interceptors,
         recent_writes,
         event_sender,
         undo_dir_prefixes,
@@ -199,6 +208,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
                 process_pending_paths(
                     &mut pending_paths,
                     working_dirs,
+                    interceptors,
                     recent_writes,
                     event_sender,
                     undo_dir_prefixes,
@@ -216,6 +226,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
 fn process_pending_paths(
     pending_paths: &mut HashSet<PathBuf>,
     working_dirs: &[PathBuf],
+    interceptors: &[Arc<UndoInterceptor>],
     recent_writes: &RecentBackendWrites,
     event_sender: &mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &[String],
@@ -257,8 +268,8 @@ fn process_pending_paths(
         }
     }
 
-    // Emit informational events for each working directory with external changes.
-    for external_paths in per_dir {
+    // Create barriers and emit events for each working directory with external changes.
+    for (index, external_paths) in per_dir.into_iter().enumerate() {
         if external_paths.is_empty() {
             continue;
         }
@@ -268,9 +279,22 @@ fn process_pending_paths(
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
 
+        // Create a barrier on the interceptor if one exists for this directory.
+        let barrier_id = if let Some(interceptor) = interceptors.get(index) {
+            match interceptor.notify_external_modification(
+                external_paths,
+                BarrierReason::ExternalModification,
+            ) {
+                Ok(Some(barrier)) => Some(barrier.barrier_id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let _ = event_sender.send(Event::ExternalModification {
             affected_paths: affected_strings,
-            barrier_id: None,
+            barrier_id,
         });
     }
 }
@@ -301,6 +325,37 @@ mod tests {
             attrs: Default::default(),
         };
         assert!(!is_mutation_event(&access_event));
+    }
+
+    #[test]
+    fn metadata_only_events_ignored() {
+        use notify::{Event as NotifyEvent, EventKind, event::{MetadataKind, ModifyKind}};
+
+        let metadata_event = NotifyEvent {
+            kind: EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            paths: vec![PathBuf::from("/tmp/test")],
+            attrs: Default::default(),
+        };
+        assert!(!is_mutation_event(&metadata_event));
+
+        let access_time_event = NotifyEvent {
+            kind: EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+            paths: vec![PathBuf::from("/tmp/test")],
+            attrs: Default::default(),
+        };
+        assert!(!is_mutation_event(&access_time_event));
+    }
+
+    #[test]
+    fn data_modify_events_detected() {
+        use notify::{Event as NotifyEvent, EventKind, event::{DataChange, ModifyKind}};
+
+        let data_event = NotifyEvent {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/tmp/test")],
+            attrs: Default::default(),
+        };
+        assert!(is_mutation_event(&data_event));
     }
 
     #[test]

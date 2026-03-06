@@ -92,6 +92,12 @@ fn read_interceptor_dir(
             }
 
             let file_count = files.len();
+
+            // Skip steps with no affected files (read-only commands like `ls`).
+            if file_count == 0 {
+                continue;
+            }
+
             steps.push(UndoStepDetail {
                 step_id,
                 timestamp,

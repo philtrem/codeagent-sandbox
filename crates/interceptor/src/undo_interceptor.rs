@@ -355,8 +355,15 @@ impl UndoInterceptor {
 
         // Promote WAL to steps/{final_id}/
         let wal_dir = self.wal_in_progress_dir();
+        let steps_parent = self.undo_dir.join("steps");
         let step_dir = self.step_dir(final_id);
         if wal_dir.exists() {
+            // Ensure parent directory exists (may have been removed externally).
+            if let Err(error) = fs::create_dir_all(&steps_parent) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"component\":\"undo\",\"message\":\"failed to create steps dir: {error}\"}}",
+                );
+            }
             if step_dir.exists() {
                 if let Err(error) = fs::remove_dir_all(&step_dir) {
                     eprintln!(
@@ -464,7 +471,10 @@ impl UndoInterceptor {
         match self.policy {
             ExternalModificationPolicy::Barrier => {
                 let completed = self.step_tracker.completed_steps();
-                let after_step_id = completed.last().copied().unwrap_or(0);
+                // No barrier needed if there are no completed steps to protect.
+                let Some(&after_step_id) = completed.last() else {
+                    return Ok(None);
+                };
 
                 let mut barrier_tracker = self.barrier_tracker.lock().unwrap();
                 let barrier =

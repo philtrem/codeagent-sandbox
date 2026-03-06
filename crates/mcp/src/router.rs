@@ -5,9 +5,9 @@ use crate::error::McpError;
 use crate::parser::extract_missing_field;
 use crate::path_validation::validate_path;
 use crate::protocol::{
-    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, JsonRpcRequest,
-    JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams, ToolCallResult,
-    ToolDefinition, UndoArgs, WriteFileArgs,
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    JsonRpcRequest, JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams,
+    ToolCallResult, ToolDefinition, UndoArgs, WriteFileArgs,
 };
 
 /// Trait abstracting the handling of MCP tool invocations.
@@ -26,6 +26,10 @@ pub trait McpHandler: Send + Sync {
     fn undo(&self, args: UndoArgs) -> Result<serde_json::Value, McpError>;
     fn get_undo_history(&self, args: GetUndoHistoryArgs) -> Result<serde_json::Value, McpError>;
     fn get_session_status(&self) -> Result<serde_json::Value, McpError>;
+    fn discard_undo_history(
+        &self,
+        args: DiscardUndoHistoryArgs,
+    ) -> Result<serde_json::Value, McpError>;
 }
 
 /// Returns the server capabilities advertised in the `initialize` response.
@@ -158,6 +162,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "get_session_status".to_string(),
             description: "Query current session state".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "discard_undo_history".to_string(),
+            description: "Discard all undo history, resetting the undo log. Cannot be undone.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -357,6 +369,12 @@ impl McpRouter {
             }
             "get_session_status" => {
                 let value = self.handler.get_session_status()?;
+                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
+            }
+            "discard_undo_history" => {
+                let args =
+                    parse_tool_args::<DiscardUndoHistoryArgs>(tool_params.arguments)?;
+                let value = self.handler.discard_undo_history(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "get_working_directory" => {

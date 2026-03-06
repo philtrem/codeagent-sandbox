@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use codeagent_mcp::protocol::{
-    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
     JsonRpcNotification, ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
@@ -61,6 +61,10 @@ impl McpHandler for StubMcpHandler {
 
     fn get_session_status(&self) -> Result<Value, McpError> {
         Ok(json!({ "state": "idle" }))
+    }
+
+    fn discard_undo_history(&self, _args: DiscardUndoHistoryArgs) -> Result<Value, McpError> {
+        Ok(json!({}))
     }
 }
 
@@ -280,7 +284,7 @@ async fn mc01_tools_list_returns_seven_tools() {
 
     let resp = harness.send_request(2, "tools/list", json!({})).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Bash"));
@@ -289,6 +293,7 @@ async fn mc01_tools_list_returns_seven_tools() {
     assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"undo"));
     assert!(names.contains(&"get_undo_history"));
+    assert!(names.contains(&"discard_undo_history"));
     assert!(names.contains(&"get_working_directory"));
     assert!(names.contains(&"get_session_status"));
 }
@@ -599,6 +604,11 @@ impl McpHandler for UndoMcpHandler {
 
     fn get_session_status(&self) -> Result<Value, McpError> {
         Ok(json!({ "state": "active" }))
+    }
+
+    fn discard_undo_history(&self, _args: DiscardUndoHistoryArgs) -> Result<Value, McpError> {
+        self.interceptor.discard().map_err(to_internal)?;
+        Ok(json!({}))
     }
 }
 

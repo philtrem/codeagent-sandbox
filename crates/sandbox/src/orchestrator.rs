@@ -11,8 +11,8 @@ use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
 use codeagent_mcp::protocol::{
-    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
-    ReadFileArgs, UndoArgs, WriteFileArgs,
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_stdio::protocol::{
     AgentExecutePayload, AgentPromptPayload, FsListPayload, FsReadPayload,
@@ -268,6 +268,7 @@ impl Orchestrator {
         let fs_watcher_handle = fs_watcher::spawn_fs_watcher(
             working_dirs.clone(),
             undo_dirs.clone(),
+            interceptors.clone(),
             recent_writes.clone(),
             self.event_sender.clone(),
             watcher_config,
@@ -988,6 +989,22 @@ impl Orchestrator {
     }
 }
 
+/// Strip a `cd '<cwd>' && ` or `cd "<cwd>" && ` prefix from a command string.
+///
+/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working' && ` to
+/// commands even though the sandbox already sets the working directory via the
+/// `cwd` field. This strips the redundant prefix for cleaner display and
+/// execution.
+fn strip_cwd_prefix(command: &str, cwd: &str) -> String {
+    for quote in ['\'', '"'] {
+        let prefix = format!("cd {quote}{cwd}{quote} && ");
+        if let Some(rest) = command.strip_prefix(&prefix) {
+            return rest.to_string();
+        }
+    }
+    command.to_string()
+}
+
 /// Parts of a session that come from VM launch.
 struct VmSessionParts {
     qemu_process: Option<QemuProcess>,
@@ -1305,13 +1322,16 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // (so it expects the StepStarted response from the VM) and get the
         // serializable HostMessage back. Uses block_in_place because send_exec
         // is async (may close an ambient step).
+        let cwd = "/mnt/working";
+        let command = strip_cwd_prefix(&args.command, cwd);
+
         let host_msg = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(
                 control_handler.send_exec(
                     command_id,
-                    args.command.clone(),
+                    command,
                     None,
-                    Some("/mnt/working".to_string()),
+                    Some(cwd.to_string()),
                 ),
             )
         });
@@ -1704,5 +1724,28 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     fn get_session_status(&self) -> Result<serde_json::Value, McpError> {
         self.do_session_status()
             .map_err(Self::agent_error_to_mcp)
+    }
+
+    fn discard_undo_history(
+        &self,
+        _args: DiscardUndoHistoryArgs,
+    ) -> Result<serde_json::Value, McpError> {
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Active(s) => s,
+            SessionState::Idle => {
+                return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive))
+            }
+        };
+
+        for interceptor in &session.interceptors {
+            interceptor
+                .discard()
+                .map_err(|e| McpError::InternalError {
+                    message: e.to_string(),
+                })?;
+        }
+
+        Ok(json!({}))
     }
 }
