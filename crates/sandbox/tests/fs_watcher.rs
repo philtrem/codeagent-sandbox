@@ -7,27 +7,7 @@ use tokio::sync::mpsc;
 use codeagent_sandbox::config::FileWatcherConfig;
 use codeagent_sandbox::fs_watcher::{self, FsWatcherConfig};
 use codeagent_sandbox::recent_writes::RecentBackendWrites;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
-use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_stdio::Event;
-
-/// Helper: create a minimal UndoInterceptor for a temp directory pair.
-fn make_interceptor(working: &std::path::Path, undo: &std::path::Path) -> Arc<UndoInterceptor> {
-    Arc::new(UndoInterceptor::new(
-        working.to_path_buf(),
-        undo.to_path_buf(),
-    ))
-}
-
-/// Helper: create an interceptor with one completed step so barriers can be placed.
-fn make_interceptor_with_step(working: &std::path::Path, undo: &std::path::Path) -> Arc<UndoInterceptor> {
-    let interceptor = make_interceptor(working, undo);
-    interceptor.open_step(1).unwrap();
-    std::fs::write(working.join("seed.txt"), "seed").unwrap();
-    let _ = interceptor.pre_write(&working.join("seed.txt"));
-    interceptor.close_step(1).unwrap();
-    interceptor
-}
 
 /// Helper: drain events from the receiver with a short timeout.
 async fn collect_events(rx: &mut mpsc::UnboundedReceiver<Event>, timeout: Duration) -> Vec<Event> {
@@ -47,13 +27,12 @@ async fn collect_events(rx: &mut mpsc::UnboundedReceiver<Event>, timeout: Durati
 }
 
 // -----------------------------------------------------------------------
-// FW-01: watcher detects external file creation and creates barrier
+// FW-01: watcher detects external file creation (no barrier)
 // -----------------------------------------------------------------------
 #[tokio::test]
 async fn fw_01_external_creation_detected() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor_with_step(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -67,7 +46,6 @@ async fn fw_01_external_creation_detected() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -97,12 +75,12 @@ async fn fw_01_external_creation_detected() {
         "expected ExternalModification event for external file creation"
     );
 
-    // Verify a barrier was created
+    // Verify no barrier is created (informational event only)
     for event in &external_events {
         if let Event::ExternalModification { barrier_id, .. } = event {
             assert!(
-                barrier_id.is_some(),
-                "watcher should create a barrier when completed steps exist"
+                barrier_id.is_none(),
+                "watcher should not create barriers"
             );
         }
     }
@@ -115,7 +93,6 @@ async fn fw_01_external_creation_detected() {
 async fn fw_02_backend_writes_suppressed() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor_with_step(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -129,7 +106,6 @@ async fn fw_02_backend_writes_suppressed() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes.clone(),
         event_sender,
         config,
@@ -166,7 +142,6 @@ async fn fw_02_backend_writes_suppressed() {
 async fn fw_03_disabled_watcher_returns_none() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::default());
     let (event_sender, _event_receiver) = mpsc::unbounded_channel();
@@ -179,7 +154,6 @@ async fn fw_03_disabled_watcher_returns_none() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -194,7 +168,6 @@ async fn fw_03_disabled_watcher_returns_none() {
 async fn fw_04_excluded_patterns_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor_with_step(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -208,7 +181,6 @@ async fn fw_04_excluded_patterns_filtered() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -244,7 +216,6 @@ async fn fw_04_excluded_patterns_filtered() {
 async fn fw_05_undo_dir_changes_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor_with_step(working.path(), undo.path());
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -258,7 +229,6 @@ async fn fw_05_undo_dir_changes_filtered() {
     let _handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -281,15 +251,13 @@ async fn fw_05_undo_dir_changes_filtered() {
 }
 
 // -----------------------------------------------------------------------
-// FW-06: no events when there are no completed steps (no barrier possible)
+// FW-06: external changes detected even without completed undo steps
 // -----------------------------------------------------------------------
 #[tokio::test]
-async fn fw_06_no_events_without_completed_steps() {
+async fn fw_06_events_emitted_without_completed_steps() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor(working.path(), undo.path());
 
-    // NO steps created — barriers can't be placed, so no event is emitted
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
@@ -302,7 +270,6 @@ async fn fw_06_no_events_without_completed_steps() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes,
         event_sender,
         config,
@@ -323,8 +290,8 @@ async fn fw_06_no_events_without_completed_steps() {
         .filter(|e| matches!(e, Event::ExternalModification { .. }))
         .collect();
     assert!(
-        external_events.is_empty(),
-        "should not emit ExternalModification when no steps exist"
+        !external_events.is_empty(),
+        "external changes should be detected regardless of undo step state"
     );
 }
 
@@ -335,7 +302,6 @@ async fn fw_06_no_events_without_completed_steps() {
 async fn fw_07_ttl_expiry_allows_detection() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = make_interceptor_with_step(working.path(), undo.path());
 
     // Very short TTL
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_millis(50)));
@@ -350,7 +316,6 @@ async fn fw_07_ttl_expiry_allows_detection() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working.path().to_path_buf()],
         vec![undo.path().to_path_buf()],
-        vec![interceptor],
         recent_writes.clone(),
         event_sender,
         config,
@@ -386,16 +351,13 @@ async fn fw_07_ttl_expiry_allows_detection() {
 }
 
 // -----------------------------------------------------------------------
-// FW-08: multiple working dirs — changes grouped and barriers created
+// FW-08: multiple working dirs — changes detected in both
 // -----------------------------------------------------------------------
 #[tokio::test]
 async fn fw_08_multiple_working_dirs() {
     let working1 = TempDir::new().unwrap();
     let working2 = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-
-    let interceptor1 = make_interceptor_with_step(working1.path(), &undo.path().join("dir1"));
-    let interceptor2 = make_interceptor_with_step(working2.path(), &undo.path().join("dir2"));
 
     let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
@@ -409,7 +371,6 @@ async fn fw_08_multiple_working_dirs() {
     let handle = fs_watcher::spawn_fs_watcher(
         vec![working1.path().to_path_buf(), working2.path().to_path_buf()],
         vec![undo.path().join("dir1"), undo.path().join("dir2")],
-        vec![interceptor1, interceptor2],
         recent_writes,
         event_sender,
         config,
@@ -493,6 +454,8 @@ read_only_commands = ["ls"]
 // -----------------------------------------------------------------------
 #[test]
 fn fw_12_write_tracking_interceptor_records() {
+    use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+    use codeagent_interceptor::write_interceptor::WriteInterceptor;
     use codeagent_sandbox::recent_writes::WriteTrackingInterceptor;
 
     let working = TempDir::new().unwrap();
