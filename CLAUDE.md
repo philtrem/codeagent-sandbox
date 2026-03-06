@@ -13,7 +13,7 @@
 
 ## Core Principles
 - **Verify before deleting**: Before deleting any files or folders, always verify they are not referenced elsewhere in the codebase using grep or other search tools. Never assume a file is unused.
-- **Verify assumptions**: Before acting on any assumption about the codebase (API signatures, available methods, file locations, type constraints, etc.), read the relevant source. Use grep, glob, or file reads to confirm. Do not assume — check.
+- **Verify assumptions**: Before acting on any assumption about the codebase (API signatures, available methods, file locations, type constraints, etc.), read the relevant source. Use grep, glob, or file reads to confirm. And write and run tests. Do not assume — check.
 - **Verify with builds and tests**: After making changes, build the affected project and run existing tests to confirm nothing is broken. When the correct behaviour of a piece of logic is non-obvious, write a test to verify it — including temporary/throwaway tests if that is the fastest way to confirm an assumption. Remove temporary tests once they have served their purpose.
 
 ## Code Documentation
