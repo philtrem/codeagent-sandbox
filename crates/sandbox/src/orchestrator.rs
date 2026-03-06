@@ -258,6 +258,7 @@ impl Orchestrator {
                 debounce: std::time::Duration::from_millis(self.file_watcher_config.debounce_ms),
                 exclude_patterns: fs_watcher::FsWatcherConfig::default().exclude_patterns,
                 enabled: self.file_watcher_config.enabled,
+                use_gitignore: self.file_watcher_config.use_gitignore,
             };
             config
                 .exclude_patterns

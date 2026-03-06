@@ -34,6 +34,8 @@ pub struct FileWatcherConfig {
     pub recent_write_ttl_ms: u64,
     /// Additional path substring patterns to exclude from watching.
     pub exclude_patterns: Vec<String>,
+    /// Whether to respect `.gitignore` rules when filtering external modifications (default: true).
+    pub use_gitignore: bool,
 }
 
 impl Default for FileWatcherConfig {
@@ -43,6 +45,7 @@ impl Default for FileWatcherConfig {
             debounce_ms: 2000,
             recent_write_ttl_ms: 5000,
             exclude_patterns: vec![],
+            use_gitignore: true,
         }
     }
 }

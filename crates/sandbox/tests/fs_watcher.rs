@@ -40,7 +40,7 @@ async fn fw_01_external_creation_detected() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -101,7 +101,7 @@ async fn fw_02_backend_writes_suppressed() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -178,7 +178,7 @@ async fn fw_04_excluded_patterns_filtered() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec!["excluded_dir".to_string()],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -227,7 +227,7 @@ async fn fw_05_undo_dir_changes_filtered() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let _handle = fs_watcher::spawn_fs_watcher(
@@ -269,7 +269,7 @@ async fn fw_06_events_emitted_without_completed_steps() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -316,7 +316,7 @@ async fn fw_07_ttl_expiry_allows_detection() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -372,7 +372,7 @@ async fn fw_08_multiple_working_dirs() {
     let config = FsWatcherConfig {
         debounce: Duration::from_millis(200),
         exclude_patterns: vec![],
-        enabled: true,
+        ..FsWatcherConfig::default()
     };
 
     let handle = fs_watcher::spawn_fs_watcher(
@@ -435,6 +435,7 @@ exclude_patterns = ["build/", "dist/"]
 fn fw_10_default_config() {
     let config = FileWatcherConfig::default();
     assert!(config.enabled);
+    assert!(config.use_gitignore);
     assert_eq!(config.debounce_ms, 2000);
     assert_eq!(config.recent_write_ttl_ms, 5000);
     assert!(config.exclude_patterns.is_empty());
@@ -492,4 +493,154 @@ fn fw_12_write_tracking_interceptor_records() {
     );
 
     interceptor.close_step(1).unwrap();
+}
+
+// -----------------------------------------------------------------------
+// FW-13: gitignored paths are filtered from external modification detection
+// -----------------------------------------------------------------------
+#[tokio::test]
+async fn fw_13_gitignored_paths_filtered() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    // Create a .gitignore that ignores *.log files and the build/ directory
+    std::fs::write(working.path().join(".gitignore"), "*.log\nbuild/\n").unwrap();
+
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
+    let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+
+    let config = FsWatcherConfig {
+        debounce: Duration::from_millis(200),
+        exclude_patterns: vec![],
+        use_gitignore: true,
+        ..FsWatcherConfig::default()
+    };
+
+    let handle = fs_watcher::spawn_fs_watcher(
+        vec![working.path().to_path_buf()],
+        vec![undo.path().to_path_buf()],
+        vec![],
+        recent_writes,
+        event_sender,
+        config,
+    );
+    assert!(handle.is_some());
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Write to a gitignored file — should NOT trigger an event
+    std::fs::write(working.path().join("debug.log"), "log data").unwrap();
+
+    // Write to a gitignored directory — should NOT trigger an event
+    let build_dir = working.path().join("build");
+    std::fs::create_dir_all(&build_dir).unwrap();
+    std::fs::write(build_dir.join("output.js"), "compiled").unwrap();
+
+    // Write to a tracked file — SHOULD trigger an event
+    std::fs::write(working.path().join("tracked.txt"), "real change").unwrap();
+
+    let events = collect_events(&mut event_receiver, Duration::from_secs(3)).await;
+
+    if let Some(h) = handle {
+        h.abort();
+    }
+
+    let external_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::ExternalModification {
+                affected_paths, ..
+            } = e
+            {
+                Some(affected_paths.clone())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    // The tracked file should appear in events
+    let has_tracked = external_events
+        .iter()
+        .any(|p| p.contains("tracked.txt"));
+    assert!(has_tracked, "tracked.txt should be detected as external modification, events: {external_events:?}");
+
+    // The gitignored files should NOT appear in events
+    let has_log = external_events.iter().any(|p| p.contains("debug.log"));
+    assert!(
+        !has_log,
+        "gitignored .log files should not trigger events, events: {external_events:?}"
+    );
+
+    let has_build = external_events
+        .iter()
+        .any(|p| p.contains("output.js"));
+    assert!(
+        !has_build,
+        "gitignored build/ directory files should not trigger events, events: {external_events:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// FW-14: use_gitignore=false disables gitignore filtering
+// -----------------------------------------------------------------------
+#[tokio::test]
+async fn fw_14_gitignore_disabled() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    // Create a .gitignore that ignores *.log files
+    std::fs::write(working.path().join(".gitignore"), "*.log\n").unwrap();
+
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
+    let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+
+    let config = FsWatcherConfig {
+        debounce: Duration::from_millis(200),
+        exclude_patterns: vec![],
+        use_gitignore: false,
+        ..FsWatcherConfig::default()
+    };
+
+    let handle = fs_watcher::spawn_fs_watcher(
+        vec![working.path().to_path_buf()],
+        vec![undo.path().to_path_buf()],
+        vec![],
+        recent_writes,
+        event_sender,
+        config,
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Write to a .log file — with gitignore disabled, this SHOULD trigger an event
+    std::fs::write(working.path().join("debug.log"), "log data").unwrap();
+
+    let events = collect_events(&mut event_receiver, Duration::from_secs(3)).await;
+
+    if let Some(h) = handle {
+        h.abort();
+    }
+
+    let external_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::ExternalModification {
+                affected_paths, ..
+            } = e
+            {
+                Some(affected_paths.clone())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    let has_log = external_events.iter().any(|p| p.contains("debug.log"));
+    assert!(
+        has_log,
+        "with use_gitignore=false, .log files should trigger events, events: {external_events:?}"
+    );
 }

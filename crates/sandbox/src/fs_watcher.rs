@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use codeagent_common::BarrierReason;
+use codeagent_interceptor::gitignore::GitignoreFilter;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
@@ -22,6 +23,8 @@ pub struct FsWatcherConfig {
     pub exclude_patterns: Vec<String>,
     /// Whether the watcher is enabled.
     pub enabled: bool,
+    /// Whether to respect `.gitignore` rules when filtering external modifications.
+    pub use_gitignore: bool,
 }
 
 impl Default for FsWatcherConfig {
@@ -33,6 +36,7 @@ impl Default for FsWatcherConfig {
                 "node_modules".to_string(),
             ],
             enabled: true,
+            use_gitignore: true,
         }
     }
 }
@@ -88,6 +92,16 @@ pub fn spawn_fs_watcher(
         .map(|d| d.to_string_lossy().replace('\\', "/"))
         .collect();
 
+    // Build gitignore filters per working directory if enabled.
+    let gitignore_filters: Vec<Option<GitignoreFilter>> = if config.use_gitignore {
+        working_dirs
+            .iter()
+            .map(|dir| GitignoreFilter::build(dir))
+            .collect()
+    } else {
+        working_dirs.iter().map(|_| None).collect()
+    };
+
     let exclude_patterns = config.exclude_patterns.clone();
     let debounce = config.debounce;
 
@@ -104,6 +118,7 @@ pub fn spawn_fs_watcher(
             event_sender: &event_sender,
             undo_dir_prefixes: &undo_dir_prefixes,
             exclude_patterns: &exclude_patterns,
+            gitignore_filters: &gitignore_filters,
         })
         .await;
     });
@@ -151,6 +166,7 @@ struct WatcherLoopParams<'a> {
     event_sender: &'a mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &'a [String],
     exclude_patterns: &'a [String],
+    gitignore_filters: &'a [Option<GitignoreFilter>],
 }
 
 /// Main watcher loop: reads batched events from the bridge channel, debounces
@@ -165,6 +181,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         event_sender,
         undo_dir_prefixes,
         exclude_patterns,
+        gitignore_filters,
     } = params;
     // Use a tokio mpsc to forward from blocking recv to async select.
     let (async_tx, mut async_rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
@@ -205,12 +222,15 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
 
                 process_pending_paths(
                     &mut pending_paths,
-                    working_dirs,
-                    interceptors,
-                    recent_writes,
-                    event_sender,
-                    undo_dir_prefixes,
-                    exclude_patterns,
+                    &ProcessParams {
+                        working_dirs,
+                        interceptors,
+                        recent_writes,
+                        event_sender,
+                        undo_dir_prefixes,
+                        exclude_patterns,
+                        gitignore_filters,
+                    },
                 );
             }
             _ = prune_interval.tick() => {
@@ -220,16 +240,28 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
     }
 }
 
+/// Grouped parameters for `process_pending_paths` to satisfy clippy's argument limit.
+struct ProcessParams<'a> {
+    working_dirs: &'a [PathBuf],
+    interceptors: &'a [Arc<UndoInterceptor>],
+    recent_writes: &'a RecentBackendWrites,
+    event_sender: &'a mpsc::UnboundedSender<Event>,
+    undo_dir_prefixes: &'a [String],
+    exclude_patterns: &'a [String],
+    gitignore_filters: &'a [Option<GitignoreFilter>],
+}
+
 /// Process accumulated paths: filter, group by working dir, and emit events.
-fn process_pending_paths(
-    pending_paths: &mut HashSet<PathBuf>,
-    working_dirs: &[PathBuf],
-    interceptors: &[Arc<UndoInterceptor>],
-    recent_writes: &RecentBackendWrites,
-    event_sender: &mpsc::UnboundedSender<Event>,
-    undo_dir_prefixes: &[String],
-    exclude_patterns: &[String],
-) {
+fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessParams<'_>) {
+    let ProcessParams {
+        working_dirs,
+        interceptors,
+        recent_writes,
+        event_sender,
+        undo_dir_prefixes,
+        exclude_patterns,
+        gitignore_filters,
+    } = params;
     // Group external paths by working directory index.
     let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
 
@@ -260,6 +292,16 @@ fn process_pending_paths(
         // Find which working directory this path belongs to.
         for (index, working_dir) in working_dirs.iter().enumerate() {
             if path.starts_with(working_dir) {
+                // Check gitignore rules for this working directory.
+                if let Some(Some(filter)) = gitignore_filters.get(index) {
+                    if let Ok(relative) = path.strip_prefix(working_dir) {
+                        let relative_str = relative.to_string_lossy().replace('\\', "/");
+                        let is_dir = path.is_dir();
+                        if filter.is_ignored(&relative_str, is_dir) {
+                            break;
+                        }
+                    }
+                }
                 per_dir[index].push(path);
                 break;
             }
@@ -360,6 +402,7 @@ mod tests {
     fn default_config_values() {
         let config = FsWatcherConfig::default();
         assert!(config.enabled);
+        assert!(config.use_gitignore);
         assert_eq!(config.debounce, Duration::from_secs(2));
         assert!(config.exclude_patterns.contains(&".git/".to_string()));
         assert!(config.exclude_patterns.contains(&"node_modules".to_string()));
