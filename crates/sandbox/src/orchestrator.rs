@@ -328,7 +328,7 @@ impl Orchestrator {
                 json!({
                     "index": i,
                     "path": d.display().to_string(),
-                    "mount_path": format!("/mnt/working/{i}"),
+                    "mount_path": if i == 0 { "/mnt/working".to_string() } else { format!("/mnt/working{i}") },
                 })
             }).collect::<Vec<_>>(),
         }))
@@ -889,7 +889,7 @@ impl RequestHandler for Orchestrator {
         let exec_msg = codeagent_control::HostMessage::Exec {
             id: command_id,
             command: payload.command.clone(),
-            cwd: payload.cwd,
+            cwd: payload.cwd.or_else(|| Some("/mnt/working".to_string())),
             env: payload.env,
         };
 
@@ -1101,7 +1101,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                     command_id,
                     args.command.clone(),
                     None,
-                    None,
+                    Some("/mnt/working".to_string()),
                 ),
             )
         });
