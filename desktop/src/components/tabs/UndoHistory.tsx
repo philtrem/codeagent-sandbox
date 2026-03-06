@@ -285,20 +285,20 @@ function ClearHistoryDialog({
 }
 
 /** Renders steps using pre-computed original indices for correct rollback counts. */
-function StepListWithIndices({
+function StepList({
   steps,
-  originalIndices,
+  startIndex = 0,
   barriers,
   onRollback,
 }: {
   steps: UndoStepDetail[];
-  originalIndices: number[];
+  startIndex?: number;
   barriers: BarrierDetail[];
   onRollback: (stepsToRollBack: number) => void;
 }) {
   return (
     <div className="space-y-2">
-      {steps.map((step, localIndex) => {
+      {steps.map((step, index) => {
         const barriersAfterStep = barriers.filter(
           (b) => b.after_step_id === step.step_id,
         );
@@ -312,7 +312,7 @@ function StepListWithIndices({
             ))}
             <StepCard
               step={step}
-              stepIndex={originalIndices[localIndex]}
+              stepIndex={startIndex + index}
               onRollback={onRollback}
             />
           </div>
@@ -331,21 +331,6 @@ function SessionGroupedSteps({
 }) {
   const [showPrevious, setShowPrevious] = useState(false);
 
-  // Filter out steps that affected no files (read-only commands, empty ambient
-  // steps). We keep the original indices for correct rollback counting.
-  const { filteredSteps, originalIndices } = useMemo(() => {
-    const filtered: UndoStepDetail[] = [];
-    const indices: number[] = [];
-    for (let i = 0; i < data.steps.length; i++) {
-      const s = data.steps[i];
-      if (s.file_count > 0) {
-        filtered.push(s);
-        indices.push(i);
-      }
-    }
-    return { filteredSteps: filtered, originalIndices: indices };
-  }, [data.steps]);
-
   // Find the session boundary: the session_start barrier with the highest
   // after_step_id marks where the current session started. Steps above it
   // are current session. Watcher barriers (external_modification) are ignored
@@ -360,44 +345,29 @@ function SessionGroupedSteps({
     );
   }, [data.barriers]);
 
-  const { currentSteps, previousSteps, currentOriginalIndices, previousOriginalIndices } = useMemo(() => {
-    const allCurrent = {
-      currentSteps: filteredSteps,
-      previousSteps: [] as UndoStepDetail[],
-      currentOriginalIndices: originalIndices,
-      previousOriginalIndices: [] as number[],
-    };
+  const { currentSteps, previousSteps } = useMemo(() => {
     if (!sessionBoundary) {
-      return allCurrent;
+      return { currentSteps: data.steps, previousSteps: [] as UndoStepDetail[] };
     }
-    const splitIndex = filteredSteps.findIndex(
+    const splitIndex = data.steps.findIndex(
       (s) => s.step_id <= sessionBoundary.after_step_id,
     );
-    if (splitIndex === -1) {
-      return allCurrent;
-    }
-    // If the split would put everything into "previous" with nothing in
-    // "current", skip the grouping entirely — show all steps as current.
-    if (splitIndex === 0) {
-      return allCurrent;
+    if (splitIndex <= 0) {
+      return { currentSteps: data.steps, previousSteps: [] as UndoStepDetail[] };
     }
     return {
-      currentSteps: filteredSteps.slice(0, splitIndex),
-      previousSteps: filteredSteps.slice(splitIndex),
-      currentOriginalIndices: originalIndices.slice(0, splitIndex),
-      previousOriginalIndices: originalIndices.slice(splitIndex),
+      currentSteps: data.steps.slice(0, splitIndex),
+      previousSteps: data.steps.slice(splitIndex),
     };
-  }, [filteredSteps, originalIndices, sessionBoundary]);
+  }, [data.steps, sessionBoundary]);
 
   const hasPreviousSteps = previousSteps.length > 0;
-  const hiddenCount = data.steps.length - filteredSteps.length;
 
   return (
     <div className="space-y-2">
       {currentSteps.length > 0 ? (
-        <StepListWithIndices
+        <StepList
           steps={currentSteps}
-          originalIndices={currentOriginalIndices}
           barriers={data.barriers}
           onRollback={onRollback}
         />
@@ -420,9 +390,9 @@ function SessionGroupedSteps({
 
           {showPrevious && (
             <div className="mt-2 space-y-2 border-l-2 border-dashed border-[var(--color-border)] pl-3">
-              <StepListWithIndices
+              <StepList
                 steps={previousSteps}
-                originalIndices={previousOriginalIndices}
+                startIndex={currentSteps.length}
                 barriers={data.barriers}
                 onRollback={onRollback}
               />
@@ -431,11 +401,6 @@ function SessionGroupedSteps({
         </div>
       )}
 
-      {hiddenCount > 0 && (
-        <div className="text-center text-xs text-[var(--color-text-secondary)]">
-          {hiddenCount} read-only step{hiddenCount !== 1 ? "s" : ""} hidden
-        </div>
-      )}
     </div>
   );
 }
