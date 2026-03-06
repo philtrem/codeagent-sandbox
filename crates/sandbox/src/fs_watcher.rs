@@ -29,9 +29,7 @@ impl Default for FsWatcherConfig {
         Self {
             debounce: Duration::from_secs(2),
             exclude_patterns: vec![
-                ".git/objects".to_string(),
-                ".git/logs".to_string(),
-                ".git/refs".to_string(),
+                ".git/".to_string(),
                 "node_modules".to_string(),
             ],
             enabled: true,
@@ -363,7 +361,7 @@ mod tests {
         let config = FsWatcherConfig::default();
         assert!(config.enabled);
         assert_eq!(config.debounce, Duration::from_secs(2));
-        assert!(config.exclude_patterns.contains(&".git/objects".to_string()));
+        assert!(config.exclude_patterns.contains(&".git/".to_string()));
         assert!(config.exclude_patterns.contains(&"node_modules".to_string()));
     }
 }
