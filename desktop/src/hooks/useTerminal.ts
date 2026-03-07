@@ -178,12 +178,15 @@ function shellQuote(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
+/** Root working directory inside the guest VM. */
+const ROOT_CWD = "/mnt/working";
+
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   entries: [],
   commandHistory: [],
   historyIndex: -1,
   isRunning: false,
-  cwd: "/mnt/working",
+  cwd: ROOT_CWD,
 
   execute: async (command: string, timeout?: number) => {
     const id = `entry-${nextEntryId++}`;
@@ -229,6 +232,20 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             output = lines.join("\n");
           }
         }
+      }
+
+      // Detect when the cwd no longer exists (e.g. deleted by rollback).
+      // The wrapped command starts with `cd '<cwd>' && ...`, so when the
+      // directory is gone bash reports "cd: <path>: No such file or directory".
+      // We check for this specific pattern to avoid false positives from the
+      // user's own command (e.g. `cat nonexistent.txt`).
+      if (
+        result.exit_code !== 0 &&
+        cwd !== ROOT_CWD &&
+        output.includes(`cd: ${cwd}`)
+      ) {
+        newCwd = ROOT_CWD;
+        output += `\n(directory no longer exists — returned to ${ROOT_CWD})`;
       }
 
       set((state) => ({
