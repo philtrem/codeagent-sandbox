@@ -263,6 +263,17 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
         exclude_patterns,
         gitignore_filters,
     } = params;
+
+    // Defer processing while a command is actively executing — filesystem
+    // events during an open step are internal writes, not external modifications.
+    // Paths stay in pending_paths for the next debounce tick.
+    if interceptors.iter().any(|i| {
+        use codeagent_interceptor::write_interceptor::WriteInterceptor;
+        i.current_step().is_some()
+    }) {
+        return;
+    }
+
     // Group external paths by working directory index.
     let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
 
@@ -289,6 +300,13 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
         if recent_writes.was_recent(&path) {
             continue;
         }
+
+        // Log paths not suppressed — helps diagnose watcher vs. interceptor mismatches.
+        eprintln!(
+            "{{\"level\":\"debug\",\"component\":\"fs_watcher\",\"action\":\"external_candidate\",\"raw_path\":\"{}\",\"normalized_path\":\"{}\"}}",
+            path.display(),
+            path_str
+        );
 
         // Find which working directory this path belongs to.
         for (index, working_dir) in working_dirs.iter().enumerate() {

@@ -33,6 +33,10 @@ impl RecentBackendWrites {
     /// and we need to suppress those too.
     pub fn record(&self, path: &Path) {
         let canonical = normalize_path(path);
+        eprintln!(
+            "{{\"level\":\"trace\",\"component\":\"recent_writes\",\"action\":\"record\",\"path\":\"{}\"}}",
+            canonical.display()
+        );
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
         if let Some(parent) = canonical.parent() {
@@ -78,9 +82,17 @@ impl Default for RecentBackendWrites {
 }
 
 /// Normalize a path to a canonical form for comparison.
-/// Uses forward slashes and lowercases on Windows for case-insensitive matching.
+///
+/// Converts backslashes to forward slashes and lowercases on Windows for
+/// case-insensitive matching. Also strips the Windows extended-length path
+/// prefix (`\\?\` / `//?/`) which `ReadDirectoryChangesW` (via the `notify`
+/// crate) can prepend, causing mismatches with paths from the P9 server.
 fn normalize_path(path: &Path) -> PathBuf {
     let normalized = path.to_string_lossy().replace('\\', "/");
+    // Strip Windows extended-length path prefix that notify may add.
+    let normalized = normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized);
     #[cfg(target_os = "windows")]
     let normalized = normalized.to_lowercase();
     PathBuf::from(normalized)
@@ -248,5 +260,31 @@ mod tests {
         rw.record(Path::new("/workspace/subdir/file.txt"));
         assert!(rw.was_recent(Path::new("/workspace/subdir/file.txt")));
         assert!(rw.was_recent(Path::new("/workspace/subdir")));
+    }
+
+    #[test]
+    fn normalize_strips_extended_length_prefix() {
+        // Paths with \\?\ prefix (Windows extended-length) should match regular paths.
+        let with_prefix = normalize_path(Path::new("//?/C:/Projects/test/file.txt"));
+        let without_prefix = normalize_path(Path::new("C:/Projects/test/file.txt"));
+        assert_eq!(with_prefix, without_prefix);
+    }
+
+    #[test]
+    fn extended_length_path_matches_regular() {
+        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        // P9 server records a regular path.
+        rw.record(Path::new("C:/Projects/test/file.txt"));
+        // Filesystem watcher checks with extended-length path (after \\?\ → //?/).
+        assert!(rw.was_recent(Path::new("//?/C:/Projects/test/file.txt")));
+    }
+
+    #[test]
+    fn regular_path_matches_extended_length_record() {
+        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        // Recorded with extended-length prefix.
+        rw.record(Path::new("//?/C:/Projects/test/file.txt"));
+        // Checked with regular path.
+        assert!(rw.was_recent(Path::new("C:/Projects/test/file.txt")));
     }
 }

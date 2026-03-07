@@ -644,3 +644,77 @@ async fn fw_14_gitignore_disabled() {
         "with use_gitignore=false, .log files should trigger events, events: {external_events:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// FW-15: active interceptor step suppresses watcher events
+// -----------------------------------------------------------------------
+#[tokio::test]
+async fn fw_15_active_step_defers_processing() {
+    use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    let interceptor = Arc::new(UndoInterceptor::new_default(
+        working.path().to_path_buf(),
+        undo.path().to_path_buf(),
+    ));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
+    let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+
+    let config = FsWatcherConfig {
+        debounce: Duration::from_millis(200),
+        exclude_patterns: vec![],
+        ..FsWatcherConfig::default()
+    };
+
+    let handle = fs_watcher::spawn_fs_watcher(
+        vec![working.path().to_path_buf()],
+        vec![undo.path().to_path_buf()],
+        vec![interceptor.clone()],
+        recent_writes,
+        event_sender,
+        config,
+    );
+    assert!(handle.is_some());
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Open a step to simulate an active command.
+    interceptor.open_step(1).unwrap();
+
+    // Write a file while the step is active.
+    std::fs::write(working.path().join("during_step.txt"), "content").unwrap();
+
+    // Wait for the debounce period — events should be deferred, not processed.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Close the step, then wait for the next debounce tick to process.
+    interceptor.close_step(1).unwrap();
+
+    // After the step closes, the watcher will process the deferred events.
+    // Because the WriteTrackingInterceptor was not in the chain here (direct
+    // fs::write), we do expect the watcher to see this as external. The point
+    // of this test is that events were DEFERRED during the active step, not
+    // processed immediately. We verify by checking that no events arrived
+    // during the active step window.
+    let events_during_step = collect_events(&mut event_receiver, Duration::from_millis(100)).await;
+    let external_during: Vec<_> = events_during_step
+        .iter()
+        .filter(|e| matches!(e, Event::ExternalModification { .. }))
+        .collect();
+
+    // The key assertion: no external events should have been emitted while the
+    // step was active (the 500ms sleep above should have triggered the debounce
+    // but processing should have been skipped).
+    // After step close, events may eventually appear — that's OK; what matters
+    // is the deferral during the active step.
+    assert!(
+        external_during.is_empty(),
+        "events should be deferred during active step, got: {external_during:?}"
+    );
+
+    if let Some(h) = handle {
+        h.abort();
+    }
+}
