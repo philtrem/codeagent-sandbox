@@ -167,7 +167,7 @@ function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
       {expanded && barrier.affected_paths.length > 0 && (
         <div className="mt-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2">
           <div className="space-y-0.5">
-            {barrier.affected_paths.map((path) => (
+            {[...barrier.affected_paths].reverse().map((path) => (
               <div key={path} className="truncate text-xs font-mono text-[var(--color-text-secondary)]">
                 {path}
               </div>
