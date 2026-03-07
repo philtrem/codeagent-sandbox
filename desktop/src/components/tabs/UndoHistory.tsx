@@ -319,13 +319,11 @@ function ClearHistoryDialog({
 function StepList({
   steps,
   startIndex = 0,
-  totalSteps,
   barriers,
   onRollback,
 }: {
   steps: UndoStepDetail[];
   startIndex?: number;
-  totalSteps: number;
   barriers: BarrierDetail[];
   onRollback: (stepsToRollBack: number) => void;
 }) {
@@ -347,7 +345,7 @@ function StepList({
             <StepCard
               step={step}
               stepIndex={stepIndex}
-              displayNumber={totalSteps - stepIndex}
+              displayNumber={steps.length - index}
               onRollback={onRollback}
             />
           </div>
@@ -408,7 +406,6 @@ function SessionGroupedSteps({
       {currentSteps.length > 0 && (
         <StepList
           steps={currentSteps}
-          totalSteps={data.steps.length}
           barriers={data.barriers}
           onRollback={onRollback}
         />
@@ -440,7 +437,6 @@ function SessionGroupedSteps({
               <StepList
                 steps={previousSteps}
                 startIndex={currentSteps.length}
-                totalSteps={data.steps.length}
                 barriers={data.barriers}
                 onRollback={onRollback}
               />
