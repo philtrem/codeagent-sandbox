@@ -86,6 +86,7 @@ impl Default for VmSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UndoSection {
+    pub enabled: bool,
     pub max_log_size_mb: u32,
     pub max_step_count: u32,
     pub max_single_step_size_mb: u32,
@@ -94,6 +95,7 @@ pub struct UndoSection {
 impl Default for UndoSection {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_log_size_mb: 500,
             max_step_count: 100,
             max_single_step_size_mb: 50,

@@ -475,25 +475,34 @@ export default function SandboxConfig() {
       />
 
       <Section title="Resource Limits">
-        <NumberInput
-          label="Max Undo Log Size (0 = unlimited)"
-          value={config.undo.max_log_size_mb}
-          onChange={(v) => updateSection("undo", { max_log_size_mb: v })}
-          suffix="MB"
+        <Toggle
+          label="Enable Resource Limits"
+          checked={config.undo.enabled}
+          onChange={(v) => updateSection("undo", { enabled: v })}
         />
-        <NumberInput
-          label="Max Step Count (0 = unlimited)"
-          value={config.undo.max_step_count}
-          onChange={(v) => updateSection("undo", { max_step_count: v })}
-        />
-        <NumberInput
-          label="Max Single Step Size (0 = unlimited)"
-          value={config.undo.max_single_step_size_mb}
-          onChange={(v) =>
-            updateSection("undo", { max_single_step_size_mb: v })
-          }
-          suffix="MB"
-        />
+        {config.undo.enabled && (
+          <>
+            <NumberInput
+              label="Max Undo Log Size (0 = unlimited)"
+              value={config.undo.max_log_size_mb}
+              onChange={(v) => updateSection("undo", { max_log_size_mb: v })}
+              suffix="MB"
+            />
+            <NumberInput
+              label="Max Step Count (0 = unlimited)"
+              value={config.undo.max_step_count}
+              onChange={(v) => updateSection("undo", { max_step_count: v })}
+            />
+            <NumberInput
+              label="Max Single Step Size (0 = unlimited)"
+              value={config.undo.max_single_step_size_mb}
+              onChange={(v) =>
+                updateSection("undo", { max_single_step_size_mb: v })
+              }
+              suffix="MB"
+            />
+          </>
+        )}
       </Section>
 
       <Section title="Safeguards">

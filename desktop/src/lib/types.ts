@@ -32,6 +32,7 @@ export interface VmSection {
 }
 
 export interface UndoSection {
+  enabled: boolean;
   max_log_size_mb: number;
   max_step_count: number;
   max_single_step_size_mb: number;
@@ -198,6 +199,7 @@ export function defaultConfig(): SandboxConfig {
       persist_vm: false,
     },
     undo: {
+      enabled: true,
       max_log_size_mb: 500,
       max_step_count: 100,
       max_single_step_size_mb: 50,
