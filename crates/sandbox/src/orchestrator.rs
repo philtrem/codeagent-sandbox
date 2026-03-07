@@ -68,6 +68,17 @@ fn check_paths_overlap(working_dir: &std::path::Path, undo_dir: &std::path::Path
     Ok(())
 }
 
+/// RAII guard that extends the watcher suppression deadline on drop.
+/// This ensures late-arriving filesystem events from rollback are still
+/// suppressed even after the rollback function returns.
+struct WatcherSuppressGuard(Arc<RecentBackendWrites>);
+
+impl Drop for WatcherSuppressGuard {
+    fn drop(&mut self) {
+        self.0.extend_suppression();
+    }
+}
+
 /// Central orchestrator that implements both `RequestHandler` (STDIO API)
 /// and `McpHandler` (MCP server) by delegating to shared session state.
 pub struct Orchestrator {
@@ -254,11 +265,13 @@ impl Orchestrator {
         // Create RecentBackendWrites tracker and spawn filesystem watcher.
         let recent_writes_ttl =
             std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
-        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl));
+        let watcher_tick =
+            std::time::Duration::from_millis(self.file_watcher_config.debounce_ms);
+        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl, watcher_tick));
 
         let watcher_config = {
             let mut config = fs_watcher::FsWatcherConfig {
-                debounce: std::time::Duration::from_millis(self.file_watcher_config.debounce_ms),
+                debounce: watcher_tick,
                 exclude_patterns: fs_watcher::FsWatcherConfig::default().exclude_patterns,
                 enabled: self.file_watcher_config.enabled,
                 use_gitignore: self.file_watcher_config.use_gitignore,
@@ -839,6 +852,16 @@ impl Orchestrator {
         }
     }
 
+    /// Begin suppressing all watcher events and return a guard that extends
+    /// the suppression deadline on drop. This prevents rollback-originated
+    /// filesystem changes from being misidentified as external modifications,
+    /// including late-arriving OS events after the rollback returns.
+    fn suppress_watcher_during_rollback(&self) -> Option<WatcherSuppressGuard> {
+        let rw = self.recent_writes()?;
+        rw.begin_suppression();
+        Some(WatcherSuppressGuard(rw))
+    }
+
     fn next_api_step_id(&self) -> Result<i64, McpError> {
         let state = self.state.lock().unwrap();
         match &*state {
@@ -1051,6 +1074,8 @@ impl RequestHandler for Orchestrator {
         let interceptor = self
             .resolve_interceptor(payload.directory.as_deref())
             .map_err(Self::agent_error_to_stdio)?;
+
+        let _guard = self.suppress_watcher_during_rollback();
 
         let result = interceptor
             .rollback(payload.count as usize, payload.force)
@@ -1698,6 +1723,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
 
         let count = args.count as usize;
         let force = args.force;
+
+        let _guard = self.suppress_watcher_during_rollback();
 
         let result = interceptor
             .rollback(count, force)

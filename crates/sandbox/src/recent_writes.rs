@@ -10,19 +10,34 @@ use codeagent_interceptor::write_interceptor::WriteInterceptor;
 /// Accounts for OS event delivery delay (especially macOS FSEvents).
 const DEFAULT_TTL: Duration = Duration::from_secs(5);
 
+/// Extra buffer added on top of the watcher tick interval to account for
+/// OS event delivery latency (especially macOS FSEvents batching).
+const OS_EVENT_DELIVERY_BUFFER: Duration = Duration::from_millis(300);
+
 /// Tracks paths recently written by the sandbox's own backends (filesystem
 /// channel or MCP API). The filesystem watcher checks this map to distinguish
 /// backend-originated writes from genuine external modifications.
+///
+/// Also provides a deadline-based suppression mechanism that the orchestrator
+/// activates during rollback. While the deadline has not expired, `was_recent`
+/// returns true for all paths, causing the watcher to skip all events.
 pub struct RecentBackendWrites {
     entries: Mutex<HashMap<PathBuf, Instant>>,
     ttl: Duration,
+    /// Grace period for rollback suppression, derived from the watcher tick
+    /// interval plus an OS event delivery buffer.
+    suppress_grace: Duration,
+    /// When set, all paths are suppressed until this instant passes.
+    suppress_until: Mutex<Option<Instant>>,
 }
 
 impl RecentBackendWrites {
-    pub fn new(ttl: Duration) -> Self {
+    pub fn new(ttl: Duration, watcher_tick: Duration) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             ttl,
+            suppress_grace: watcher_tick + OS_EVENT_DELIVERY_BUFFER,
+            suppress_until: Mutex::new(None),
         }
     }
 
@@ -47,8 +62,15 @@ impl RecentBackendWrites {
         entries.insert(canonical, now);
     }
 
-    /// Returns true if `path` was written by the sandbox within the TTL window.
+    /// Returns true if `path` should be suppressed by the watcher — either
+    /// because it was written by the sandbox within the TTL window, or because
+    /// the suppression deadline has not yet expired (e.g. during/after rollback).
     pub fn was_recent(&self, path: &Path) -> bool {
+        if let Some(deadline) = *self.suppress_until.lock().unwrap() {
+            if Instant::now() < deadline {
+                return true;
+            }
+        }
         let canonical = normalize_path(path);
         let entries = self.entries.lock().unwrap();
         entries
@@ -56,10 +78,30 @@ impl RecentBackendWrites {
             .is_some_and(|timestamp| timestamp.elapsed() < self.ttl)
     }
 
+    /// Begin suppressing all watcher events. Suppression lasts until the
+    /// grace period (watcher tick + OS buffer) expires. Call
+    /// `extend_suppression` to push the deadline further into the future
+    /// (e.g. after rollback completes).
+    pub fn begin_suppression(&self) {
+        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+    }
+
+    /// Extend the suppression deadline by the grace period from now. Called
+    /// when rollback completes to cover late-arriving filesystem events.
+    pub fn extend_suppression(&self) {
+        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+    }
+
     /// Remove entries older than the TTL.
     pub fn prune_expired(&self) {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, timestamp| timestamp.elapsed() < self.ttl);
+    }
+
+    /// Create a tracker with the given TTL and a default watcher tick (for tests).
+    #[cfg(test)]
+    pub fn default_with_ttl(ttl: Duration) -> Self {
+        Self::new(ttl, Duration::from_millis(200))
     }
 
     /// Number of tracked entries (for testing).
@@ -77,7 +119,7 @@ impl RecentBackendWrites {
 
 impl Default for RecentBackendWrites {
     fn default() -> Self {
-        Self::new(DEFAULT_TTL)
+        Self::new(DEFAULT_TTL, Duration::from_millis(200))
     }
 }
 
@@ -195,7 +237,7 @@ mod tests {
 
     #[test]
     fn record_and_check_recent() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         let path = Path::new("/tmp/test/file.txt");
 
         assert!(!rw.was_recent(path));
@@ -205,7 +247,7 @@ mod tests {
 
     #[test]
     fn expired_entries_not_recent() {
-        let rw = RecentBackendWrites::new(Duration::from_millis(1));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_millis(1));
         let path = Path::new("/tmp/test/file.txt");
 
         rw.record(path);
@@ -215,7 +257,7 @@ mod tests {
 
     #[test]
     fn prune_removes_expired() {
-        let rw = RecentBackendWrites::new(Duration::from_millis(1));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_millis(1));
         rw.record(Path::new("/tmp/a"));
         rw.record(Path::new("/tmp/b"));
         std::thread::sleep(Duration::from_millis(10));
@@ -225,7 +267,7 @@ mod tests {
 
     #[test]
     fn prune_keeps_fresh() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("/tmp/a"));
         rw.prune_expired();
         // record() stores both the path and its parent directory.
@@ -235,14 +277,14 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn case_insensitive_on_windows() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("C:\\Users\\Test\\File.txt"));
         assert!(rw.was_recent(Path::new("C:\\Users\\test\\file.txt")));
     }
 
     #[test]
     fn backslash_forward_slash_equivalent() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("some/path/file.txt"));
         // On Windows, Path::new("some\\path\\file.txt") would normalize too
         assert!(rw.was_recent(Path::new("some/path/file.txt")));
@@ -256,7 +298,7 @@ mod tests {
 
     #[test]
     fn parent_directory_recorded() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("/workspace/subdir/file.txt"));
         assert!(rw.was_recent(Path::new("/workspace/subdir/file.txt")));
         assert!(rw.was_recent(Path::new("/workspace/subdir")));
@@ -272,7 +314,7 @@ mod tests {
 
     #[test]
     fn extended_length_path_matches_regular() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         // P9 server records a regular path.
         rw.record(Path::new("C:/Projects/test/file.txt"));
         // Filesystem watcher checks with extended-length path (after \\?\ → //?/).
@@ -281,7 +323,7 @@ mod tests {
 
     #[test]
     fn regular_path_matches_extended_length_record() {
-        let rw = RecentBackendWrites::new(Duration::from_secs(10));
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         // Recorded with extended-length prefix.
         rw.record(Path::new("//?/C:/Projects/test/file.txt"));
         // Checked with regular path.
