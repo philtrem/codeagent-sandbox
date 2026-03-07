@@ -14,7 +14,7 @@ interface UndoHistoryState {
 
 let requestIdCounter = 1000;
 
-export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
+export const useUndoHistoryStore = create<UndoHistoryState>((set, get) => ({
   data: null,
   loading: false,
   error: null,
@@ -24,12 +24,20 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
       set({ data: null, error: null, loading: false });
       return;
     }
-    set({ loading: true });
+    // Only show loading spinner on initial fetch, not polling refreshes.
+    if (!get().data) {
+      set({ loading: true });
+    }
     try {
-      const data = await invoke<UndoHistoryData>("read_undo_history", {
+      const newData = await invoke<UndoHistoryData>("read_undo_history", {
         undoDir,
       });
-      set({ data, error: null, loading: false });
+      // Skip update if data hasn't changed to avoid unnecessary re-renders.
+      const current = get();
+      if (current.data && JSON.stringify(newData) === JSON.stringify(current.data)) {
+        return;
+      }
+      set({ data: newData, error: null, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
