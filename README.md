@@ -2,7 +2,7 @@
 
 A sandboxed execution environment for AI coding agents. Commands run inside a Linux VM (QEMU), with host-side filesystem interception that captures preimages of every write. This gives you N-step undo for any destructive operation — including bulk operations like `rm -rf *`, which count as a single step.
 
-When no VM is available, the sandbox runs in **host-only mode** — filesystem tools (read, write, edit, glob, grep, undo) work directly on the host, and commands execute directly on the host via `sh -c` (without VM isolation).
+When no VM is available, the sandbox runs in **host-only mode** — filesystem tools (read, write, edit, glob, grep, undo) work directly on the host, and commands execute directly on the host via a shell (without VM isolation).
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ This starts in STDIO mode (JSON Lines on stdin/stdout). For MCP mode (used by Cl
 sandbox --working-dir /path/to/project --undo-dir /tmp/undo --protocol mcp
 ```
 
-In MCP mode the sandbox speaks JSON-RPC 2.0 over stdin/stdout and exposes 11 tools: `execute_command`, `read_file`, `write_file`, `edit_file`, `list_directory`, `glob`, `grep`, `undo`, `get_undo_history`, `get_session_status`, `get_working_directory`.
+In MCP mode the sandbox speaks JSON-RPC 2.0 over stdin/stdout and exposes 12 tools: `Bash`, `read_file`, `write_file`, `edit_file`, `list_directory`, `glob`, `grep`, `undo`, `get_undo_history`, `get_session_status`, `get_working_directory`, `discard_undo_history`.
 
 Additional options: `--memory-mb` (default 2048), `--cpus` (default 2), `--qemu-binary`, `--kernel-path`, `--initrd-path`, `--virtiofsd-binary`. See `sandbox --help`.
 
@@ -90,7 +90,7 @@ cargo bench --workspace
 The host runs a Rust binary (`sandbox`) that serves the host working directory into a Linux VM through a transparent filesystem bridge. Two separate channels connect host and VM:
 
 - **Filesystem channel** — carries POSIX filesystem operations. The VM kernel mounts a host-backed filesystem (`virtiofs` on Linux/macOS, `9P` on Windows). A write interceptor on the host side captures preimages before mutations land on disk.
-- **Control channel** — carries command orchestration over virtio-serial (JSON Lines). A lightweight shim inside the VM receives commands, runs them via `sh -c`, streams output, and signals step boundaries.
+- **Control channel** — carries command orchestration over virtio-serial (JSON Lines). A lightweight shim inside the VM receives commands, runs them via a shell, streams output, and signals step boundaries.
 
 External interfaces speak either the **STDIO API** (JSON Lines over stdin/stdout) or the **MCP protocol** (JSON-RPC 2.0 over stdin/stdout), both of which expose the same capabilities: session lifecycle, command execution, filesystem access, undo, and safeguards.
 
@@ -115,10 +115,11 @@ crates/
                       resource limits, gitignore filtering, symlink policy)
   control/            Control channel protocol + state machine + handler
   stdio/              STDIO API server (JSON Lines)
-  mcp/                MCP server (JSON-RPC 2.0, 11 tools)
+  mcp/                MCP server (JSON-RPC 2.0, 12 tools)
   sandbox/            Host-side binary wiring everything together
   shim/               VM-side command executor
   p9/                 9P2000.L server (Windows filesystem backend)
+  p9proxy/            Guest-side 9P proxy for virtio-serial (Windows)
   virtiofs-backend/   Intercepted virtiofs filesystem backend (Linux/macOS)
   virtiofsd-fork/     Forked virtiofsd with macOS compatibility layer
   vmm-sys-util-fork/  Forked vmm-sys-util with macOS support
@@ -137,7 +138,7 @@ desktop/              Tauri v2 desktop app (React + TypeScript + Zustand)
 - **Safeguards.** Configurable thresholds for destructive operations (delete count, overwrite large files, rename over existing). Triggers block until explicitly allowed or denied. On deny, the current step is rolled back automatically.
 - **Undo barriers.** External modifications between steps create barriers that prevent rolling back past the modification point (since the rollback would destroy the external change). `force` flag overrides.
 - **Two-channel separation.** The filesystem channel and control channel are completely independent. The control channel never sees filesystem operations. Correlation happens on the host: all filesystem writes between `step_started(N)` and `step_completed(N)` belong to undo step N.
-- **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Commands execute directly on the host via `sh -c` (without VM isolation).
+- **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Commands execute directly on the host via a shell (without VM isolation).
 
 ## License
 
