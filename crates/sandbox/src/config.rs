@@ -28,7 +28,7 @@ pub struct SandboxTomlConfig {
 pub struct FileWatcherConfig {
     /// Whether the watcher is enabled (default: true).
     pub enabled: bool,
-    /// Debounce duration in milliseconds (default: 2000).
+    /// Throttle interval in milliseconds (default: 200).
     pub debounce_ms: u64,
     /// TTL for recent backend write records in milliseconds (default: 5000).
     pub recent_write_ttl_ms: u64,
@@ -42,7 +42,7 @@ impl Default for FileWatcherConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            debounce_ms: 2000,
+            debounce_ms: 200,
             recent_write_ttl_ms: 5000,
             exclude_patterns: vec![],
             use_gitignore: true,

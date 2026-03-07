@@ -31,7 +31,7 @@ pub struct FsWatcherConfig {
 impl Default for FsWatcherConfig {
     fn default() -> Self {
         Self {
-            debounce: Duration::from_secs(2),
+            debounce: Duration::from_millis(200),
             exclude_patterns: vec![
                 ".git/".to_string(),
                 "node_modules".to_string(),
@@ -197,7 +197,8 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         }
     });
 
-    let mut pending_paths: HashSet<PathBuf> = HashSet::new();
+    let mut pending_paths: Vec<PathBuf> = Vec::new();
+    let mut pending_seen: HashSet<PathBuf> = HashSet::new();
     let mut debounce_timer = tokio::time::interval(debounce);
     debounce_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Skip the immediate first tick.
@@ -212,7 +213,9 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         tokio::select! {
             Some(paths) = async_rx.recv() => {
                 for path in paths {
-                    pending_paths.insert(path);
+                    if pending_seen.insert(path.clone()) {
+                        pending_paths.push(path);
+                    }
                 }
                 // No timer reset: use fixed-interval throttling instead of
                 // debouncing. Debounce (wait for silence) starves processing
@@ -236,6 +239,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
                         gitignore_filters,
                     },
                 );
+                pending_seen.clear();
             }
             _ = prune_interval.tick() => {
                 recent_writes.prune_expired();
@@ -256,7 +260,7 @@ struct ProcessParams<'a> {
 }
 
 /// Process accumulated paths: filter, group by working dir, and emit events.
-fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessParams<'_>) {
+fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParams<'_>) {
     let ProcessParams {
         working_dirs,
         interceptors,
@@ -270,7 +274,7 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
     // Group external paths by working directory index.
     let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
 
-    for path in pending_paths.drain() {
+    for path in pending_paths.drain(..) {
         let path_str = path.to_string_lossy().replace('\\', "/");
 
         // Skip paths inside undo directories.
@@ -442,7 +446,7 @@ mod tests {
         let config = FsWatcherConfig::default();
         assert!(config.enabled);
         assert!(config.use_gitignore);
-        assert_eq!(config.debounce, Duration::from_secs(2));
+        assert_eq!(config.debounce, Duration::from_millis(200));
         assert!(config.exclude_patterns.contains(&".git/".to_string()));
         assert!(config.exclude_patterns.contains(&"node_modules".to_string()));
     }

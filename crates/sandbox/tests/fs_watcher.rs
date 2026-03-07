@@ -436,7 +436,7 @@ fn fw_10_default_config() {
     let config = FileWatcherConfig::default();
     assert!(config.enabled);
     assert!(config.use_gitignore);
-    assert_eq!(config.debounce_ms, 2000);
+    assert_eq!(config.debounce_ms, 200);
     assert_eq!(config.recent_write_ttl_ms, 5000);
     assert!(config.exclude_patterns.is_empty());
 }
@@ -455,7 +455,7 @@ read_only_commands = ["ls"]
         toml::from_str(toml_str).unwrap();
 
     assert!(config.file_watcher.enabled);
-    assert_eq!(config.file_watcher.debounce_ms, 2000);
+    assert_eq!(config.file_watcher.debounce_ms, 200);
 }
 
 // -----------------------------------------------------------------------

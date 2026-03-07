@@ -76,7 +76,7 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
   },
 }));
 
-/** Hook that polls undo history on a 5-second interval when undoDir is set. */
+/** Hook that polls undo history on a 500ms interval when undoDir is set. */
 export function useUndoHistoryPolling(undoDir: string, vmRunning: boolean) {
   const fetch = useUndoHistoryStore((s) => s.fetch);
 
@@ -84,7 +84,7 @@ export function useUndoHistoryPolling(undoDir: string, vmRunning: boolean) {
     if (!undoDir || !vmRunning) return;
 
     fetch(undoDir);
-    const interval = setInterval(() => fetch(undoDir), 5000);
+    const interval = setInterval(() => fetch(undoDir), 500);
     return () => clearInterval(interval);
   }, [undoDir, vmRunning, fetch]);
 }

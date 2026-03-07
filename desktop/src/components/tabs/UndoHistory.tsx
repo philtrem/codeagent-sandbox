@@ -143,7 +143,12 @@ function StepCard({
 }
 
 function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
+
+  const label =
+    barrier.after_step_id === 0
+      ? "Barrier (before any step)"
+      : `Barrier (after step ${barrier.after_step_id})`;
 
   return (
     <div className="px-2 py-1">
@@ -154,7 +159,7 @@ function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
           className="flex items-center gap-1 text-xs text-[var(--color-warning)]"
         >
           <Shield size={12} />
-          Barrier (after step {barrier.after_step_id})
+          {label}
           {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
         </button>
         <div className="h-px flex-1 bg-[var(--color-warning)]" />
@@ -371,15 +376,26 @@ function SessionGroupedSteps({
 
   const hasPreviousSteps = previousSteps.length > 0;
 
+  // Barriers whose after_step_id doesn't match any existing step (e.g., pre-step
+  // host modifications stored with after_step_id = 0).
+  const allStepIds = new Set(data.steps.map((s) => s.step_id));
+  const orphanBarriers = data.barriers.filter((b) => !allStepIds.has(b.after_step_id));
+
   return (
     <div className="space-y-2">
-      {currentSteps.length > 0 ? (
+      {currentSteps.length > 0 && (
         <StepList
           steps={currentSteps}
           barriers={data.barriers}
           onRollback={onRollback}
         />
-      ) : (
+      )}
+
+      {orphanBarriers.map((barrier) => (
+        <BarrierIndicator key={barrier.barrier_id} barrier={barrier} />
+      ))}
+
+      {currentSteps.length === 0 && orphanBarriers.length === 0 && (
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-6 text-center text-sm text-[var(--color-text-secondary)]">
           No steps in the current session
         </div>
@@ -512,7 +528,7 @@ export default function UndoHistory() {
         </div>
       )}
 
-      {!loading && !error && (!data || data.steps.length === 0) && (
+      {!loading && !error && (!data || (data.steps.length === 0 && data.barriers.length === 0)) && (
         <div className="flex flex-col items-center gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-12 text-center">
           <History size={48} className="text-[var(--color-text-secondary)]" />
           <p className="text-sm text-[var(--color-text-secondary)]">
@@ -521,7 +537,7 @@ export default function UndoHistory() {
         </div>
       )}
 
-      {data && data.steps.length > 0 && (
+      {data && (data.steps.length > 0 || data.barriers.length > 0) && (
         <SessionGroupedSteps
           data={data}
           onRollback={handleRollback}
