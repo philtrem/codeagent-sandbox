@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -387,6 +387,12 @@ fn process_pending_paths(
     // Group external paths by working directory index.
     let mut per_dir: Vec<Vec<AffectedPath>> = vec![vec![]; working_dirs.len()];
 
+    // Track ancestor directories of excluded paths. When a child is excluded
+    // (e.g., `.git/objects/xxx`), its parent directories may still appear as
+    // "modified" due to mtime propagation. We collect those ancestors here so
+    // we can remove them from the final set.
+    let mut excluded_ancestors: HashSet<PathBuf> = HashSet::new();
+
     for ap in pending.drain(..) {
         let path_str = ap.path.to_string_lossy().replace('\\', "/");
 
@@ -395,23 +401,28 @@ fn process_pending_paths(
             .iter()
             .any(|prefix| path_str.starts_with(prefix.as_str()))
         {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
 
-        // Skip excluded patterns (substring match).
+        // Skip excluded patterns.
         if exclude_patterns
             .iter()
-            .any(|pattern| path_str.contains(pattern.as_str()))
+            .any(|pattern| matches_exclude_pattern(&path_str, pattern))
         {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
 
         // Skip if this was a recent backend write (check both dest and source for renames).
         if recent_writes.was_recent(&ap.path) {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
         if let Some(ref from) = ap.renamed_from {
             if recent_writes.was_recent(from) {
+                record_ancestors(&ap.path, &mut excluded_ancestors);
+                record_ancestors(from, &mut excluded_ancestors);
                 continue;
             }
         }
@@ -433,6 +444,7 @@ fn process_pending_paths(
                         let relative_str = relative.to_string_lossy().replace('\\', "/");
                         let is_dir = ap.path.is_dir();
                         if filter.matched_path_or_any_parents(&relative_str, is_dir).is_ignore() {
+                            record_ancestors(&ap.path, &mut excluded_ancestors);
                             break;
                         }
                     }
@@ -448,6 +460,12 @@ fn process_pending_paths(
     for entries in &mut per_dir {
         if entries.len() > 1 {
             remove_redundant_parents(entries);
+        }
+        // Remove directories that only appear because an excluded child's
+        // operation changed their mtime (e.g., .git/ writes propagating
+        // mtime changes up to the working directory).
+        if !excluded_ancestors.is_empty() {
+            entries.retain(|ap| !excluded_ancestors.contains(&ap.path));
         }
     }
 
@@ -498,6 +516,44 @@ fn format_change_kind(kind: FileChangeKind) -> &'static str {
         FileChangeKind::Modified => "modified",
         FileChangeKind::Deleted => "deleted",
         FileChangeKind::Renamed => "renamed",
+    }
+}
+
+/// Check if a normalized path matches an exclude pattern.
+///
+/// A pattern like `.git/` matches both paths *inside* the directory
+/// (`path/.git/objects/xxx`) and the directory itself (`path/.git`).
+fn matches_exclude_pattern(path_str: &str, pattern: &str) -> bool {
+    if path_str.contains(pattern) {
+        return true;
+    }
+    // If the pattern ends with '/', also match the directory name at the end
+    // of the path. E.g., ".git/" should also exclude the ".git" directory.
+    if let Some(dir_name) = pattern.strip_suffix('/') {
+        if path_str.ends_with(dir_name) {
+            let prefix_len = path_str.len() - dir_name.len();
+            if prefix_len == 0 || path_str.as_bytes()[prefix_len - 1] == b'/' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Record all ancestor directories of a path into a set.
+///
+/// Used to track which directories may have spurious mtime changes caused
+/// by excluded child operations.
+fn record_ancestors(path: &Path, ancestors: &mut HashSet<PathBuf>) {
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if !ancestors.insert(parent.to_path_buf()) {
+            break; // already recorded this subtree
+        }
+        current = parent.parent();
     }
 }
 
@@ -788,5 +844,51 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, FileChangeKind::Created);
         assert!(entries[0].renamed_from.is_none());
+    }
+
+    #[test]
+    fn exclude_pattern_matches_contents() {
+        assert!(matches_exclude_pattern("C:/workspace/.git/objects/xxx", ".git/"));
+        assert!(matches_exclude_pattern("/workspace/.git/HEAD", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_matches_directory_itself() {
+        assert!(matches_exclude_pattern("C:/workspace/.git", ".git/"));
+        assert!(matches_exclude_pattern("/workspace/.git", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_no_false_positive_on_similar_names() {
+        assert!(!matches_exclude_pattern("/workspace/.gitignore", ".git/"));
+        assert!(!matches_exclude_pattern("/workspace/.gitthing", ".git/"));
+        assert!(!matches_exclude_pattern("/workspace/not-git", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_without_trailing_slash() {
+        assert!(matches_exclude_pattern("/workspace/node_modules/foo", "node_modules"));
+        assert!(matches_exclude_pattern("/workspace/node_modules", "node_modules"));
+    }
+
+    #[test]
+    fn record_ancestors_collects_parents() {
+        let mut ancestors = HashSet::new();
+        record_ancestors(Path::new("/workspace/subdir/file.txt"), &mut ancestors);
+        assert!(ancestors.contains(Path::new("/workspace/subdir")));
+        assert!(ancestors.contains(Path::new("/workspace")));
+        assert!(ancestors.contains(Path::new("/")));
+    }
+
+    #[test]
+    fn record_ancestors_deduplicates() {
+        let mut ancestors = HashSet::new();
+        record_ancestors(Path::new("/workspace/.git/objects/a"), &mut ancestors);
+        let count_after_first = ancestors.len();
+        record_ancestors(Path::new("/workspace/.git/objects/b"), &mut ancestors);
+        // The second call shares the same ancestor chain, so only the
+        // immediate parent of "b" (if different from "a") could be new.
+        // Here both share /workspace/.git/objects as parent, so no new entries.
+        assert_eq!(ancestors.len(), count_after_first);
     }
 }

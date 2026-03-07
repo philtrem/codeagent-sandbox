@@ -238,12 +238,12 @@ impl Orchestrator {
             // rollback across session boundaries where untracked changes may have occurred.
             if !interceptor.is_undo_disabled() && !interceptor.completed_steps().is_empty() {
                 if let Ok(Some(barrier)) = interceptor.notify_external_modification(
-                    vec![working_dir.clone().into()],
+                    vec![],
                     BarrierReason::SessionStart,
                 )
                 {
                     let _ = self.event_sender.send(Event::ExternalModification {
-                        affected_paths: vec![working_dir.to_string_lossy().into_owned()],
+                        affected_paths: vec![],
                         barrier_id: Some(barrier.barrier_id),
                     });
                 }
