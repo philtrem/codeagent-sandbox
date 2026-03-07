@@ -4,22 +4,11 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use codeagent_common::StepId;
+use codeagent_common::{StepId, StepManager};
 
 use crate::in_flight::InFlightTracker;
 use crate::protocol::{HostMessage, OutputStream, VmMessage};
 use crate::state_machine::{ControlChannelState, ControlEvent};
-
-/// Abstraction over the undo interceptor's step lifecycle.
-///
-/// The control channel handler uses this trait to open and close undo steps
-/// in response to protocol events. In production, `UndoInterceptor` implements
-/// this. In tests, a mock records calls for assertion.
-pub trait StepManager: Send + Sync {
-    fn open_step(&self, id: StepId) -> codeagent_common::Result<()>;
-    fn close_step(&self, id: StepId) -> codeagent_common::Result<Vec<StepId>>;
-    fn current_step(&self) -> Option<StepId>;
-}
 
 /// Configuration for quiescence and ambient step timeouts.
 #[derive(Debug, Clone)]
@@ -183,6 +172,8 @@ impl<S: StepManager + 'static> ControlChannelHandler<S> {
                     return;
                 }
 
+                self.step_manager.set_step_command(step_id, command.clone());
+
                 {
                     let mut state = self.state.lock().await;
                     state.active_command_step = Some(step_id);
@@ -332,7 +323,18 @@ impl<S: StepManager + 'static> ControlChannelHandler<S> {
             }
 
             // Close the step
-            let evicted = step_manager.close_step(step_id).unwrap_or_default();
+            let evicted = match step_manager.close_step(step_id) {
+                Ok(evicted) => evicted,
+                Err(error) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"component\":\"control\",\"message\":\"failed to close step {step_id}: {error}\"}}"
+                    );
+                    let _ = event_sender.send(HandlerEvent::ProtocolError {
+                        error: format!("failed to close step {step_id}: {error}"),
+                    });
+                    vec![]
+                }
+            };
 
             {
                 let mut state = state.lock().await;
@@ -395,9 +397,18 @@ impl<S: StepManager + 'static> ControlChannelHandler<S> {
                         state.ambient_step_id = None;
                         drop(state);
 
-                        let evicted = step_manager
-                            .close_step(ambient_id)
-                            .unwrap_or_default();
+                        let evicted = match step_manager.close_step(ambient_id) {
+                            Ok(evicted) => evicted,
+                            Err(error) => {
+                                eprintln!(
+                                    "{{\"level\":\"error\",\"component\":\"control\",\"message\":\"failed to close ambient step {ambient_id}: {error}\"}}"
+                                );
+                                let _ = event_sender.send(HandlerEvent::ProtocolError {
+                                    error: format!("failed to close ambient step {ambient_id}: {error}"),
+                                });
+                                vec![]
+                            }
+                        };
 
                         let _ = event_sender.send(HandlerEvent::AmbientStepClosed {
                             step_id: ambient_id,
@@ -432,10 +443,18 @@ impl<S: StepManager + 'static> ControlChannelHandler<S> {
             // Notify the ambient timeout task so it exits
             self.ambient_reset_notify.notify_waiters();
 
-            let evicted = self
-                .step_manager
-                .close_step(ambient_id)
-                .unwrap_or_default();
+            let evicted = match self.step_manager.close_step(ambient_id) {
+                Ok(evicted) => evicted,
+                Err(error) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"component\":\"control\",\"message\":\"failed to close ambient step {ambient_id}: {error}\"}}"
+                    );
+                    self.emit(HandlerEvent::ProtocolError {
+                        error: format!("failed to close ambient step {ambient_id}: {error}"),
+                    });
+                    vec![]
+                }
+            };
 
             self.emit(HandlerEvent::AmbientStepClosed {
                 step_id: ambient_id,

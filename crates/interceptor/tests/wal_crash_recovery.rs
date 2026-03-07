@@ -21,7 +21,7 @@ fn cr_01_crash_mid_step_rolls_back() {
 
     // Phase 1: Open a step, mutate files, "crash" (drop without close)
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         let ops = OperationApplier::new(&interceptor);
 
         interceptor.open_step(1).unwrap();
@@ -38,7 +38,7 @@ fn cr_01_crash_mid_step_rolls_back() {
     assert!(ws.working_dir.join("crash_artifact.txt").exists());
 
     // Phase 2: Restart and recover
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let recovery = interceptor.recover().unwrap();
 
     assert!(recovery.is_some());
@@ -64,7 +64,7 @@ fn cr_01_crash_mid_step_rolls_back() {
 fn cr_02_preimage_write_failure() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
 
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     interceptor.open_step(1).unwrap();
 
     // Remove the preimage directory entirely so writes into it fail
@@ -93,7 +93,7 @@ fn cr_03_crash_during_step_promotion() {
     // Phase 1: Complete a step normally, then simulate a post-manifest,
     // pre-rename crash by moving the committed step back to WAL
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         let ops = OperationApplier::new(&interceptor);
 
         interceptor.open_step(1).unwrap();
@@ -113,7 +113,7 @@ fn cr_03_crash_during_step_promotion() {
     );
 
     // Phase 2: Restart and recover
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let recovery = interceptor.recover().unwrap();
 
     assert!(recovery.is_some());
@@ -140,7 +140,7 @@ fn cr_04_truncated_manifest_recovery() {
 
     // Phase 1: Create crash state with preimages
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         let ops = OperationApplier::new(&interceptor);
 
         interceptor.open_step(1).unwrap();
@@ -155,7 +155,7 @@ fn cr_04_truncated_manifest_recovery() {
     fs::write(&manifest_path, r#"{"step_id":1,"timestamp":"2026-01-01T00:00"#).unwrap();
 
     // Phase 2: Restart and recover
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let recovery = interceptor.recover().unwrap();
 
     assert!(recovery.is_some());
@@ -178,7 +178,7 @@ fn cr_04_truncated_manifest_recovery() {
 fn cr_05_clean_shutdown_no_wal_residue() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
 
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -208,7 +208,7 @@ fn cr_06_double_recovery_is_noop() {
 
     // Phase 1: Create crash state
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         let ops = OperationApplier::new(&interceptor);
         interceptor.open_step(1).unwrap();
         ops.write_file(&ws.working_dir.join("small.txt"), b"crash data");
@@ -216,7 +216,7 @@ fn cr_06_double_recovery_is_noop() {
     }
 
     // Phase 2: First recovery
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let first_recovery = interceptor.recover().unwrap();
     assert!(first_recovery.is_some());
 
@@ -224,7 +224,7 @@ fn cr_06_double_recovery_is_noop() {
     assert_tree_eq(&before, &after_first, &compare_opts());
 
     // Phase 3: Second recovery — create new interceptor to simulate second restart
-    let interceptor2 = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor2 = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let second_recovery = interceptor2.recover().unwrap();
     assert!(second_recovery.is_none());
 
@@ -244,7 +244,7 @@ fn cr_07_crash_with_empty_step() {
 
     // Phase 1: Open step, do nothing, "crash"
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         interceptor.open_step(1).unwrap();
         // No operations — drop without close
     }
@@ -253,7 +253,7 @@ fn cr_07_crash_with_empty_step() {
     assert!(ws.undo_dir.join("wal").join("in_progress").exists());
 
     // Phase 2: Restart and recover
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let recovery = interceptor.recover().unwrap();
 
     assert!(recovery.is_some());
@@ -279,7 +279,7 @@ fn step_reconstruction_from_disk() {
 
     // Phase 1: Commit two steps
     {
-        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+        let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
         let ops = OperationApplier::new(&interceptor);
 
         interceptor.open_step(1).unwrap();
@@ -294,7 +294,7 @@ fn step_reconstruction_from_disk() {
     }
 
     // Phase 2: Create new interceptor — should reconstruct completed steps
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     assert_eq!(interceptor.completed_steps(), vec![1, 2]);
 
     // Rollback should still work

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::error::JsonRpcError;
@@ -120,14 +118,16 @@ pub struct ToolCallParams {
 
 // --- Tool argument structs ---
 
-/// Arguments for the `execute_command` tool.
+/// Arguments for the `Bash` tool (mirrors Claude Code's built-in Bash tool).
 #[derive(Debug, Clone, Deserialize)]
-pub struct ExecuteCommandArgs {
+pub struct BashArgs {
     pub command: String,
+    /// Clear, concise description of what this command does.
     #[serde(default)]
-    pub env: Option<HashMap<String, String>>,
+    pub description: Option<String>,
+    /// Timeout in milliseconds (default: 120 000, max: 600 000).
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub timeout: Option<u64>,
 }
 
 /// Arguments for the `read_file` tool.
@@ -166,6 +166,10 @@ fn default_undo_count() -> u32 {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GetUndoHistoryArgs {}
 
+/// Arguments for the `discard_undo_history` tool (no required fields).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscardUndoHistoryArgs {}
+
 /// Arguments for the `edit_file` tool.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EditFileArgs {
@@ -182,6 +186,9 @@ pub struct GlobArgs {
     pub pattern: String,
     #[serde(default)]
     pub path: Option<String>,
+    /// Maximum number of results to return (default: 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Arguments for the `grep` tool.
@@ -264,10 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_command_args_required_field() {
-        let result = serde_json::from_str::<ExecuteCommandArgs>(r#"{"command": "ls -la"}"#);
+    fn bash_args_required_field() {
+        let result = serde_json::from_str::<BashArgs>(r#"{"command": "ls -la"}"#);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().command, "ls -la");
+        let args = result.unwrap();
+        assert_eq!(args.command, "ls -la");
+        assert!(args.description.is_none());
+        assert!(args.timeout.is_none());
     }
 
     #[test]

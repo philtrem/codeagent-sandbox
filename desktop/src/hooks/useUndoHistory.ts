@@ -9,11 +9,12 @@ interface UndoHistoryState {
   error: string | null;
   fetch: (undoDir: string) => Promise<void>;
   rollback: (count: number, force: boolean) => Promise<string>;
+  clearHistory: (undoDir: string, vmRunning: boolean) => Promise<void>;
 }
 
 let requestIdCounter = 1000;
 
-export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
+export const useUndoHistoryStore = create<UndoHistoryState>((set, get) => ({
   data: null,
   loading: false,
   error: null,
@@ -23,12 +24,20 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
       set({ data: null, error: null, loading: false });
       return;
     }
-    set({ loading: true });
+    // Only show loading spinner on initial fetch, not polling refreshes.
+    if (!get().data) {
+      set({ loading: true });
+    }
     try {
-      const data = await invoke<UndoHistoryData>("read_undo_history", {
+      const newData = await invoke<UndoHistoryData>("read_undo_history", {
         undoDir,
       });
-      set({ data, error: null, loading: false });
+      // Skip update if data hasn't changed to avoid unnecessary re-renders.
+      const current = get();
+      if (current.data && JSON.stringify(newData) === JSON.stringify(current.data)) {
+        return;
+      }
+      set({ data: newData, error: null, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -51,9 +60,31 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set) => ({
     });
     return response;
   },
+
+  clearHistory: async (undoDir: string, vmRunning: boolean) => {
+    if (vmRunning) {
+      // Send MCP discard to the running sandbox — this properly resets
+      // both in-memory state and on-disk undo directories.
+      const id = requestIdCounter++;
+      const request = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "discard_undo_history",
+          arguments: {},
+        },
+      });
+      await invoke<string>("send_mcp_request", { requestJson: request });
+    } else {
+      // VM not running — clean up on-disk files directly.
+      await invoke("clear_undo_history", { undoDir });
+    }
+    set({ data: null, error: null });
+  },
 }));
 
-/** Hook that polls undo history on a 5-second interval when undoDir is set. */
+/** Hook that polls undo history on a 500ms interval when undoDir is set. */
 export function useUndoHistoryPolling(undoDir: string, vmRunning: boolean) {
   const fetch = useUndoHistoryStore((s) => s.fetch);
 
@@ -61,7 +92,7 @@ export function useUndoHistoryPolling(undoDir: string, vmRunning: boolean) {
     if (!undoDir || !vmRunning) return;
 
     fetch(undoDir);
-    const interval = setInterval(() => fetch(undoDir), 5000);
+    const interval = setInterval(() => fetch(undoDir), 500);
     return () => clearInterval(interval);
   }, [undoDir, vmRunning, fetch]);
 }

@@ -25,6 +25,9 @@ serde_json = "1"
 toml = "0.8"
 dirs = "6"
 which = "7"
+chrono = "0.4"
+codeagent-interceptor = { path = "../../crates/interceptor" }
+codeagent-common = { path = "../../crates/common" }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

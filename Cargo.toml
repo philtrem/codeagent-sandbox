@@ -13,6 +13,7 @@ members = [
     "crates/virtiofs-backend",
     "crates/vmm-sys-util-fork",
     "crates/p9",
+    "crates/p9proxy",
 ]
 exclude = ["fuzz", "crates/virtiofsd-fork", "desktop/src-tauri"]
 
@@ -40,6 +41,9 @@ which = "7"
 glob = "0.3"
 regex = "1"
 walkdir = "2"
+toml = "0.8"
+dirs = "6"
+notify = "8"
 
 [patch.crates-io]
 vmm-sys-util = { path = "crates/vmm-sys-util-fork" }

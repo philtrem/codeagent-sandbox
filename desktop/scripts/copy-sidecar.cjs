@@ -94,26 +94,24 @@ const guestDir = path.join(REPO_ROOT, "target/guest", guestArch);
 const vmlinuzPath = path.join(guestDir, "vmlinuz");
 const initrdPath = path.join(guestDir, "initrd.img");
 
-if (!fs.existsSync(vmlinuzPath) || !fs.existsSync(initrdPath)) {
-  if (commandExists("docker")) {
-    console.log(`\nBuilding guest VM image (${guestArch})...`);
-    const xtaskManifest = path.join(REPO_ROOT, "xtask/Cargo.toml");
-    if (
-      !tryRun(`cargo xtask build-guest --arch ${guestArch}`) &&
-      !tryRun(
-        `cargo run --manifest-path ${xtaskManifest} -- build-guest --arch ${guestArch}`
-      )
-    ) {
-      console.warn(
-        "warning: guest image build failed (Docker may not be running)"
-      );
-    }
-  } else {
-    console.warn("\nwarning: Docker not found — skipping guest image build.");
+if (commandExists("docker")) {
+  console.log(`\nBuilding guest VM image (${guestArch})...`);
+  const xtaskManifest = path.join(REPO_ROOT, "xtask/Cargo.toml");
+  if (
+    !tryRun(`cargo xtask build-guest --arch ${guestArch}`) &&
+    !tryRun(
+      `cargo run --manifest-path ${xtaskManifest} -- build-guest --arch ${guestArch}`
+    )
+  ) {
     console.warn(
-      "  Run 'cargo xtask build-guest' manually, then re-run this script."
+      "warning: guest image build failed (Docker may not be running)"
     );
   }
+} else {
+  console.warn("\nwarning: Docker not found — skipping guest image build.");
+  console.warn(
+    "  Run 'cargo xtask build-guest' manually, then re-run this script."
+  );
 }
 
 fs.mkdirSync(RESOURCES_DIR, { recursive: true });

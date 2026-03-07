@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 use codeagent_common::SafeguardConfig;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::recent_writes::RecentBackendWrites;
+
 use codeagent_common::SafeguardDecision;
-use codeagent_control::InFlightTracker;
+use codeagent_control::{ControlChannelHandler, InFlightTracker};
 
 use crate::fs_backend::FilesystemBackend;
 use crate::qemu::QemuProcess;
@@ -59,6 +61,9 @@ pub struct Session {
     /// Sender for enqueuing host messages to the control channel writer task.
     pub control_writer: Option<mpsc::UnboundedSender<String>>,
 
+    /// Control channel handler for registering outgoing commands.
+    pub control_handler: Option<Arc<ControlChannelHandler<UndoInterceptor>>>,
+
     /// Background task for the event bridge (control events → STDIO events).
     pub event_bridge_handle: Option<JoinHandle<()>>,
 
@@ -73,4 +78,20 @@ pub struct Session {
 
     /// Atomic counter for generating command IDs for `agent.execute`.
     pub next_command_id: Arc<AtomicU64>,
+
+    /// Monotonic counter for API step IDs (write_file/edit_file synthetic steps).
+    pub next_api_step_id: Arc<AtomicI64>,
+
+    // --- Filesystem watcher fields ---
+
+    /// Background task running the filesystem watcher.
+    pub fs_watcher_handle: Option<JoinHandle<()>>,
+
+    /// Shared tracker for paths recently written by this sandbox's backends.
+    pub recent_writes: Option<Arc<RecentBackendWrites>>,
+
+    // --- Safeguard bridge fields ---
+
+    /// Background task consuming safeguard events from interceptors.
+    pub safeguard_bridge_handle: Option<JoinHandle<()>>,
 }

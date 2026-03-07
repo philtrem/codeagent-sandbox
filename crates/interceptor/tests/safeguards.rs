@@ -8,7 +8,7 @@ use codeagent_common::{
     SafeguardEvent, SafeguardKind,
 };
 use codeagent_interceptor::safeguard::SafeguardHandler;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_test_support::snapshot::{assert_tree_eq, TreeSnapshot};
 use codeagent_test_support::workspace::TempWorkspace;
@@ -51,12 +51,15 @@ fn make_interceptor(
     config: SafeguardConfig,
     handler: Box<dyn SafeguardHandler>,
 ) -> UndoInterceptor {
-    UndoInterceptor::with_safeguard(
+    UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        ExternalModificationPolicy::default(),
-        config,
-        handler,
+        UndoConfig {
+            policy: ExternalModificationPolicy::Barrier,
+            safeguard_config: config,
+            safeguard_handler: Some(handler),
+            ..Default::default()
+        },
     )
 }
 
@@ -208,7 +211,6 @@ fn sg_04_timeout_auto_deny_rolls_back() {
     let (handler, _events) = ImmediateHandler::new(SafeguardDecision::Deny);
     let config = SafeguardConfig {
         delete_threshold: Some(2),
-        timeout_seconds: 1,
         ..SafeguardConfig::default()
     };
     let interceptor = make_interceptor(&ws, config, Box::new(handler));
@@ -372,7 +374,7 @@ fn sg_default_config_never_triggers() {
     let ws = TempWorkspace::new();
     create_files(&ws, &["a.txt", "b.txt", "c.txt"], 500);
 
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();

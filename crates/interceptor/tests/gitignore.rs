@@ -1,7 +1,7 @@
 use std::fs;
 
 use codeagent_interceptor::manifest::StepManifest;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_test_support::workspace::TempWorkspace;
 
 mod common;
@@ -19,7 +19,7 @@ fn read_step_manifest(ws: &TempWorkspace, step_id: u64) -> StepManifest {
 }
 
 // ---------------------------------------------------------------------------
-// GI-01: Ignored file is NOT captured on pre_write (verify empty manifest)
+// GI-01: Ignored file is NOT captured on pre_write
 // ---------------------------------------------------------------------------
 #[test]
 fn gi_01_ignored_file_not_captured_on_pre_write() {
@@ -31,17 +31,23 @@ fn gi_01_ignored_file_not_captured_on_pre_write() {
     fs::write(&log_file, b"old log content").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
     ops.write_file(&log_file, b"new log content");
     interceptor.close_step(1).unwrap();
 
-    let manifest = read_step_manifest(&ws, 1);
+    // Step had no non-ignored files so it is silently discarded — no step
+    // directory should exist on disk and no step ID should be consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
     assert!(
-        manifest.entries.is_empty(),
-        "ignored file should not appear in manifest"
+        interceptor.completed_steps().is_empty(),
+        "no completed steps should be recorded"
     );
 }
 
@@ -57,7 +63,10 @@ fn gi_02_non_ignored_file_captured_normally() {
     fs::write(&source_file, b"fn main() {}").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -90,7 +99,10 @@ fn gi_03_ignored_file_skipped_in_tree_delete() {
     fs::write(&source_file, b"source").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -129,7 +141,10 @@ fn gi_04_created_file_matching_ignore_skips_record_creation() {
     write_gitignore(&ws.working_dir, "*.tmp\n");
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -169,7 +184,10 @@ fn gi_05_nested_gitignore_respected() {
     fs::write(sub_dir.join("readme.txt"), b"readme").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -205,7 +223,10 @@ fn gi_06_negation_pattern_overrides_ignore() {
     fs::write(ws.working_dir.join("important.log"), b"important").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -240,7 +261,10 @@ fn gi_07_git_info_exclude_respected() {
     fs::write(ws.working_dir.join("public.txt"), b"public").unwrap();
 
     let interceptor =
-        UndoInterceptor::with_gitignore(ws.working_dir.clone(), ws.undo_dir.clone());
+        UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        gitignore: true,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -271,7 +295,7 @@ fn gi_08_gitignore_disabled_by_default() {
     fs::write(&log_file, b"old log").unwrap();
 
     // Use the default constructor (gitignore NOT enabled)
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();

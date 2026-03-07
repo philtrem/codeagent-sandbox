@@ -7,11 +7,14 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  Bug,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVmStore, useVmPolling } from "../../hooks/useVmStatus";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { invoke } from "@tauri-apps/api/core";
+import { useLayoutStore } from "../../hooks/useLayoutStore";
+import { useDebugConsoleStore } from "../../hooks/useDebugConsole";
 
 function StatusDot({ state }: { state: string }) {
   const colorMap: Record<string, string> = {
@@ -240,6 +243,16 @@ export default function VmManager() {
           className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
         >
           <RotateCcw size={14} /> Restart
+        </button>
+        <button
+          onClick={() => {
+            useDebugConsoleStore.getState().showPanel();
+            useLayoutStore.getState().setActiveTab("terminal");
+          }}
+          disabled={!isRunning}
+          className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+        >
+          <Bug size={14} /> Debug
         </button>
 
         <div className="ml-auto flex items-center gap-4">

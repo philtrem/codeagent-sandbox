@@ -111,7 +111,22 @@ impl P9Server {
             // Track in-flight operations via drop guard.
             let _guard = self.in_flight.as_ref().map(InFlightGuard::new);
 
-            let response_bytes = self.dispatch(msg_type, tag, payload);
+            // catch_unwind prevents a panic in dispatch (e.g., from an
+            // interceptor hook) from killing the server task. Without
+            // this, a panic would drop the TCP connection to QEMU,
+            // causing the VM kernel to hang retrying failed 9P operations.
+            let response_bytes = match std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| self.dispatch(msg_type, tag, payload)),
+            ) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    eprintln!(
+                        "P9Server: panic in dispatch for msg_type={}, tag={} — returning EIO",
+                        msg_type, tag
+                    );
+                    encode_error(tag, crate::error::errno::EIO)
+                }
+            };
 
             writer
                 .write_all(&response_bytes)
@@ -219,7 +234,15 @@ impl P9Server {
                         Err(e) => return encode_error(tag, p9_error_to_errno(&e)),
                     };
                     let is_dir = path.is_dir();
-                    if interceptor.pre_unlink(&path, is_dir).is_err() {
+                    eprintln!(
+                        "{{\"level\":\"debug\",\"component\":\"p9\",\"message\":\"pre_unlink (remove): {}\"}}",
+                        path.display()
+                    );
+                    if let Err(ref e) = interceptor.pre_unlink(&path, is_dir) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"component\":\"p9\",\"message\":\"pre_unlink (remove) failed: {}\"}}",
+                            e
+                        );
                         // Even on denial, the FID must be clunked per the spec.
                         let _ = self.fid_table.remove(request.fid);
                         return encode_error(tag, crate::error::errno::EACCES);
@@ -322,10 +345,17 @@ impl P9Server {
                     Err(e) => return encode_error(tag, p9_error_to_errno(&e)),
                 };
 
-                // Interceptor pre-hook.
-                if let Some(ref interceptor) = self.interceptor {
-                    if interceptor.pre_setattr(&path).is_err() {
-                        return encode_error(tag, crate::error::errno::EACCES);
+                // Only invoke the interceptor when the setattr changes attributes
+                // beyond just atime. Atime-only updates are triggered by read
+                // operations and should not create undo steps.
+                let atime_only_mask = P9_SETATTR_ATIME | P9_SETATTR_ATIME_SET;
+                let modifies_beyond_atime = request.valid & !atime_only_mask != 0;
+
+                if modifies_beyond_atime {
+                    if let Some(ref interceptor) = self.interceptor {
+                        if interceptor.pre_setattr(&path).is_err() {
+                            return encode_error(tag, crate::error::errno::EACCES);
+                        }
                     }
                 }
 
@@ -449,7 +479,15 @@ impl P9Server {
 
                 // Interceptor pre-hook.
                 if let Some(ref interceptor) = self.interceptor {
-                    if interceptor.pre_unlink(&target_path, is_dir).is_err() {
+                    eprintln!(
+                        "{{\"level\":\"debug\",\"component\":\"p9\",\"message\":\"pre_unlink: {}\"}}",
+                        target_path.display()
+                    );
+                    if let Err(ref e) = interceptor.pre_unlink(&target_path, is_dir) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"component\":\"p9\",\"message\":\"pre_unlink failed: {}\"}}",
+                            e
+                        );
                         return encode_error(tag, crate::error::errno::EACCES);
                     }
                 }

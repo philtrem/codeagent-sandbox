@@ -160,6 +160,7 @@ async fn sh_03_stderr_output() {
 /// this test creates a marker file in a temp directory and verifies the
 /// command can see it via `ls`.
 #[tokio::test]
+#[cfg_attr(windows, ignore = "bash resolves to WSL on Windows, which cannot chdir to Windows paths")]
 async fn sh_04_exec_with_cwd() {
     let temp_dir = tempfile::tempdir().unwrap();
     let marker_path = temp_dir.path().join("shim_test_marker.txt");
@@ -197,6 +198,7 @@ async fn sh_04_exec_with_cwd() {
 
 /// SH-05: exec with env — environment variables are set.
 #[tokio::test]
+#[cfg_attr(windows, ignore = "bash resolves to WSL on Windows, which cannot chdir to Windows paths")]
 async fn sh_05_exec_with_env() {
     let (mut writer, mut lines, _handle) = spawn_shim();
 

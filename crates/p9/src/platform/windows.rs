@@ -45,13 +45,22 @@ pub fn check_case_collision(parent: &Path, name: &str) -> Result<Option<String>,
     Ok(None)
 }
 
+/// UID/GID reported for all files on the guest side.
+///
+/// Must match the unprivileged user inside the guest VM (created in init.sh).
+/// The guest shim spawns commands as uid/gid 1000 via setuid/setgid.
+/// If these don't match, the Linux kernel's VFS permission checks will deny
+/// write operations because the guest user falls into "others" (r-x).
+const GUEST_UID: u32 = 1000;
+const GUEST_GID: u32 = 1000;
+
 /// Synthesize POSIX-compatible file attributes from Windows metadata.
 ///
 /// Windows lacks native POSIX mode bits, uid/gid, and nlink.
 /// We synthesize reasonable values:
 /// - Directories get mode 0o755, regular files get 0o644.
 /// - Executable extensions (.exe, .bat, .cmd, .sh, .py) get 0o755.
-/// - uid/gid are set to 0 (root).
+/// - uid/gid are set to 1000 (matching the guest sandbox user).
 /// - nlink is always 1.
 pub fn get_file_attributes(path: &Path) -> Result<FileAttributes, P9Error> {
     let meta = std::fs::metadata(path)?;
@@ -79,8 +88,8 @@ pub fn get_file_attributes(path: &Path) -> Result<FileAttributes, P9Error> {
 
     Ok(FileAttributes {
         mode,
-        uid: 0,
-        gid: 0,
+        uid: GUEST_UID,
+        gid: GUEST_GID,
         nlink: 1,
         rdev: 0,
         size,

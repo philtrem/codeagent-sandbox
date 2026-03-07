@@ -5,9 +5,9 @@ use crate::error::McpError;
 use crate::parser::extract_missing_field;
 use crate::path_validation::validate_path;
 use crate::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, JsonRpcRequest,
-    JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams, ToolCallResult,
-    ToolDefinition, UndoArgs, WriteFileArgs,
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    JsonRpcRequest, JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams,
+    ToolCallResult, ToolDefinition, UndoArgs, WriteFileArgs,
 };
 
 /// Trait abstracting the handling of MCP tool invocations.
@@ -16,7 +16,7 @@ use crate::protocol::{
 /// or an `McpError`. For contract tests, a stub implementation provides
 /// canned responses. Real implementations are added in later TDD steps.
 pub trait McpHandler: Send + Sync {
-    fn execute_command(&self, args: ExecuteCommandArgs) -> Result<serde_json::Value, McpError>;
+    fn bash(&self, args: BashArgs) -> Result<serde_json::Value, McpError>;
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError>;
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError>;
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError>;
@@ -26,6 +26,10 @@ pub trait McpHandler: Send + Sync {
     fn undo(&self, args: UndoArgs) -> Result<serde_json::Value, McpError>;
     fn get_undo_history(&self, args: GetUndoHistoryArgs) -> Result<serde_json::Value, McpError>;
     fn get_session_status(&self) -> Result<serde_json::Value, McpError>;
+    fn discard_undo_history(
+        &self,
+        args: DiscardUndoHistoryArgs,
+    ) -> Result<serde_json::Value, McpError>;
 }
 
 /// Returns the server capabilities advertised in the `initialize` response.
@@ -47,14 +51,14 @@ fn server_info(instructions: &str) -> serde_json::Value {
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "execute_command".to_string(),
-            description: "Run a terminal command inside the VM".to_string(),
+            name: "Bash".to_string(),
+            description: "Executes a bash command in the sandbox VM. Working directory persists between commands; shell state does not.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Command to execute" },
-                    "env": { "type": "object", "description": "Environment variables", "additionalProperties": { "type": "string" } },
-                    "cwd": { "type": "string", "description": "Working directory for the command" }
+                    "command": { "type": "string", "description": "The command to execute" },
+                    "description": { "type": "string", "description": "Clear, concise description of what this command does" },
+                    "timeout": { "type": "number", "description": "Optional timeout in milliseconds (max 600000)" }
                 },
                 "required": ["command"]
             }),
@@ -109,12 +113,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "glob".to_string(),
-            description: "Find files matching a glob pattern".to_string(),
+            description: "Find files matching a glob pattern. Results sorted by modification time (newest first).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs, src/**/*.ts)" },
-                    "path": { "type": "string", "description": "Directory to search in (relative to working dir)" }
+                    "path": { "type": "string", "description": "Directory to search in (relative to working dir)" },
+                    "limit": { "type": "integer", "description": "Max results to return (default: 200)" }
                 },
                 "required": ["pattern"]
             }),
@@ -163,6 +168,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "discard_undo_history".to_string(),
+            description: "Discard all undo history, resetting the undo log. Cannot be undone.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
             name: "get_working_directory".to_string(),
             description: "Get the sandbox working directory. This is the root directory for all file operations — NOT the project directory open in your editor.".to_string(),
             input_schema: serde_json::json!({
@@ -193,7 +206,7 @@ impl McpRouter {
              All file paths must be relative to that sandbox directory.\n\n\
              Sandbox root: {}\n\n\
              Use ONLY this server's tools for ALL file and command operations. \
-             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash) have been \
              disabled — do not attempt to use them.",
             root_dir.display()
         );
@@ -221,7 +234,7 @@ impl McpRouter {
              All file paths must be relative to that sandbox directory.\n\n\
              Sandbox roots:\n{}\n\n\
              Use ONLY this server's tools for ALL file and command operations. \
-             Built-in tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) have been \
+             Built-in tools (Read, Edit, Write, Glob, Grep, Bash) have been \
              disabled — do not attempt to use them.",
             dir_list.join("\n")
         );
@@ -299,9 +312,9 @@ impl McpRouter {
             })?;
 
         match tool_params.name.as_str() {
-            "execute_command" => {
-                let args = parse_tool_args::<ExecuteCommandArgs>(tool_params.arguments)?;
-                let value = self.handler.execute_command(args)?;
+            "Bash" => {
+                let args = parse_tool_args::<BashArgs>(tool_params.arguments)?;
+                let value = self.handler.bash(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "read_file" => {
@@ -356,6 +369,12 @@ impl McpRouter {
             }
             "get_session_status" => {
                 let value = self.handler.get_session_status()?;
+                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
+            }
+            "discard_undo_history" => {
+                let args =
+                    parse_tool_args::<DiscardUndoHistoryArgs>(tool_params.arguments)?;
+                let value = self.handler.discard_undo_history(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "get_working_directory" => {

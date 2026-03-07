@@ -36,6 +36,8 @@ pub fn run() {
             claude::generate_claude_code_cli_command,
             claude::set_claude_code_denied_tools,
             claude::remove_claude_code_denied_tools,
+            claude::set_claude_code_allowed_tools,
+            claude::remove_claude_code_allowed_tools,
             // System commands
             system::get_platform,
             system::get_cpu_count,
@@ -44,10 +46,16 @@ pub fn run() {
             system::resolve_sandbox_binary,
             system::validate_directory,
             system::validate_paths_overlap,
+            system::ensure_directory,
             // Undo commands
             undo::read_undo_history,
+            undo::clear_undo_history,
             // VM MCP passthrough
             vm::send_mcp_request,
+            // Terminal + Debug console
+            vm::get_debug_log,
+            vm::clear_debug_log,
+            vm::execute_terminal_command,
         ])
         .manage(vm::VmState::default())
         .build(tauri::generate_context!())

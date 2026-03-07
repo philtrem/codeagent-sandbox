@@ -16,19 +16,21 @@ RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 
-# Copy only the crates needed to compile the shim:
+# Copy only the crates needed to compile the shim and p9proxy:
 #   codeagent-shim -> codeagent-control -> codeagent-common
+#   codeagent-p9proxy (standalone, only needs libc)
 COPY crates/common crates/common
 COPY crates/control crates/control
 COPY crates/shim crates/shim
+COPY crates/p9proxy crates/p9proxy
 
-# Create a minimal workspace Cargo.toml with just these three crates.
-# This avoids pulling in the 9 other workspace members and the
+# Create a minimal workspace Cargo.toml with just these crates.
+# This avoids pulling in the other workspace members and the
 # [patch.crates-io] entries that reference Unix-only forks.
 RUN cat > Cargo.toml <<'TOML'
 [workspace]
 resolver = "3"
-members = ["crates/common", "crates/control", "crates/shim"]
+members = ["crates/common", "crates/control", "crates/shim", "crates/p9proxy"]
 
 [workspace.package]
 edition = "2024"
@@ -44,9 +46,9 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util"] 
 tempfile = "3"
 TOML
 
-# Build a statically-linked release binary
-RUN cargo build --release --package codeagent-shim \
-    && strip target/release/shim
+# Build statically-linked release binaries
+RUN cargo build --release --package codeagent-shim --package codeagent-p9proxy \
+    && strip target/release/shim target/release/p9proxy
 
 # ---------------------------------------------------------------------------
 # Stage 2: Assemble kernel + initramfs
@@ -59,6 +61,7 @@ ARG ARCH=x86_64
 RUN apk add --no-cache \
     linux-virt \
     busybox-static \
+    bash \
     cpio \
     findutils \
     kmod
@@ -79,21 +82,41 @@ RUN mkdir -p /initramfs/bin \
 RUN cp /bin/busybox.static /initramfs/bin/busybox \
     && chroot /initramfs /bin/busybox --install -s
 
-# Copy the shim binary from the builder stage
+# Install real bash — used by the shim for command execution.
+# Alpine installs bash to /usr/bin/bash. Copy the binary and all shared
+# library dependencies (musl libc, libreadline, libncursesw) into the
+# initramfs so bash can run in the minimal guest environment.
+RUN BASH_BIN=$(command -v bash) \
+    && cp "$BASH_BIN" /initramfs/bin/bash \
+    && ldd "$BASH_BIN" | awk '/=>/{print $3}' | while read lib; do \
+           mkdir -p "/initramfs$(dirname "$lib")"; \
+           cp "$lib" "/initramfs$lib"; \
+       done \
+    && mkdir -p /initramfs/lib \
+    && cp /lib/ld-musl-*.so.1 /initramfs/lib/ 2>/dev/null || true
+
+# Copy the shim and p9proxy binaries from the builder stage
 COPY --from=builder /build/target/release/shim /initramfs/bin/shim
+COPY --from=builder /build/target/release/p9proxy /initramfs/bin/p9proxy
 
 # Copy required kernel modules for filesystem and serial transport.
 # Alpine's linux-virt may have some of these built-in, but we include
 # the module files so modprobe works regardless.
+# Include fuse + netfs as they are dependencies of virtiofs and 9pnet.
 RUN KVER=$(ls /lib/modules/ | head -1) && \
     mkdir -p "/initramfs/lib/modules/$KVER" && \
     for mod in \
+        fuse netfs \
         virtiofs virtio_pci virtio_mmio virtio_ring \
-        9pnet 9pnet_virtio 9p \
-        virtio_console virtio_net; do \
+        9pnet 9pnet_virtio 9pnet_fd 9p \
+        virtio_console virtio_net net_failover failover; do \
         find "/lib/modules/$KVER" -name "${mod}.ko*" \
             -exec cp {} "/initramfs/lib/modules/$KVER/" \; 2>/dev/null || true; \
     done && \
+    # Decompress .ko.gz / .ko.zst modules — busybox modprobe cannot
+    # handle compressed modules, so we store them as plain .ko files.
+    gunzip /initramfs/lib/modules/$KVER/*.ko.gz 2>/dev/null || true && \
+    unzstd --rm /initramfs/lib/modules/$KVER/*.ko.zst 2>/dev/null || true && \
     depmod -b /initramfs "$KVER" 2>/dev/null || true
 
 # Copy the init script

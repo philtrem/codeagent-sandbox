@@ -1,15 +1,19 @@
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use codeagent_common::{SafeguardConfig, SafeguardDecision};
+use codeagent_common::{BarrierReason, SafeguardConfig, SafeguardDecision};
 use codeagent_control::InFlightTracker;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
+use codeagent_mcp::protocol::{
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
+};
 use codeagent_stdio::protocol::{
     AgentExecutePayload, AgentPromptPayload, FsListPayload, FsReadPayload,
     SafeguardConfirmPayload, SafeguardConfigurePayload, SessionStartPayload,
@@ -18,11 +22,29 @@ use codeagent_stdio::protocol::{
 use codeagent_stdio::{Event, RequestHandler, StdioError};
 
 use crate::cli::CliArgs;
+use crate::command_classifier::{self, CommandClassifier, CommandClassifierConfig, SanitizeResult};
+use crate::command_waiter::CommandWaiter;
+use crate::config::FileWatcherConfig;
 use crate::control_bridge;
 use crate::error::AgentError;
+use crate::fs_watcher;
 use crate::qemu::{QemuConfig, QemuProcess};
+use crate::recent_writes::RecentBackendWrites;
 use crate::safeguard_bridge::PendingSafeguard;
 use crate::session::{Session, SessionState};
+
+/// Compute a stable subdirectory name for a working directory's undo data.
+///
+/// Uses the first 16 hex characters of a blake3 hash of the canonicalized,
+/// forward-slash-normalized path. This ensures the same working directory
+/// always maps to the same undo subdirectory regardless of ordering.
+pub fn undo_subdir_name(working_dir: &Path) -> String {
+    let canonical = std::fs::canonicalize(working_dir)
+        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let normalized = canonical.to_string_lossy().replace('\\', "/");
+    let hash = blake3::hash(normalized.as_bytes());
+    hash.to_hex()[..16].to_string()
+}
 
 /// Check that two paths do not contain each other.
 /// Both paths must exist (so canonicalization works).
@@ -46,6 +68,17 @@ fn check_paths_overlap(working_dir: &std::path::Path, undo_dir: &std::path::Path
     Ok(())
 }
 
+/// RAII guard that extends the watcher suppression deadline on drop.
+/// This ensures late-arriving filesystem events from rollback are still
+/// suppressed even after the rollback function returns.
+struct WatcherSuppressGuard(Arc<RecentBackendWrites>);
+
+impl Drop for WatcherSuppressGuard {
+    fn drop(&mut self) {
+        self.0.extend_suppression();
+    }
+}
+
 /// Central orchestrator that implements both `RequestHandler` (STDIO API)
 /// and `McpHandler` (MCP server) by delegating to shared session state.
 pub struct Orchestrator {
@@ -53,26 +86,62 @@ pub struct Orchestrator {
     cli_args: CliArgs,
     event_sender: mpsc::UnboundedSender<Event>,
     /// Populated when the filesystem backend connects and safeguards are enabled.
-    #[allow(dead_code)]
     safeguard_receiver: Mutex<Option<mpsc::UnboundedReceiver<PendingSafeguard>>>,
+    /// Shared with the event bridge so MCP `Bash` tool can block
+    /// until a VM command completes and collect its output.
+    command_waiter: Arc<CommandWaiter>,
+    /// Pre-computed command classifier from config.
+    classifier: CommandClassifier,
+    /// Filesystem watcher configuration from TOML config.
+    file_watcher_config: FileWatcherConfig,
 }
 
 impl Orchestrator {
     pub fn new(
         cli_args: CliArgs,
         event_sender: mpsc::UnboundedSender<Event>,
+        classifier_config: CommandClassifierConfig,
+        file_watcher_config: FileWatcherConfig,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(SessionState::Idle)),
             cli_args,
             event_sender,
             safeguard_receiver: Mutex::new(None),
+            command_waiter: CommandWaiter::new(),
+            classifier: CommandClassifier::new(classifier_config),
+            file_watcher_config,
         }
     }
 
-    /// Returns true if VM components (kernel + initrd) are configured.
-    fn is_vm_available(&self) -> bool {
-        self.cli_args.kernel_path.is_some() && self.cli_args.initrd_path.is_some()
+    /// Resolve guest image paths: CLI args first, then auto-detect next to the binary.
+    fn resolve_guest_images(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        let mut kernel = self.cli_args.kernel_path.clone();
+        let mut initrd = self.cli_args.initrd_path.clone();
+
+        if kernel.is_some() && initrd.is_some() {
+            return (kernel, initrd);
+        }
+
+        // Auto-detect: look for guest/ directory next to the sandbox binary
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                if kernel.is_none() {
+                    let candidate = exe_dir.join("guest").join("vmlinuz");
+                    if candidate.is_file() {
+                        kernel = Some(candidate);
+                    }
+                }
+                if initrd.is_none() {
+                    let candidate = exe_dir.join("guest").join("initrd.img");
+                    if candidate.is_file() {
+                        initrd = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        (kernel, initrd)
     }
 
     /// Create a session from a `session.start` payload.
@@ -109,12 +178,43 @@ impl Orchestrator {
             check_paths_overlap(dir, &self.cli_args.undo_dir)?;
         }
 
+        // Check VM availability early so we know whether to wire safeguards.
+        // Safeguards use a blocking channel that would deadlock in host-only mode
+        // (the MCP handler thread would block in on_safeguard_triggered while also
+        // being the only thread that can process safeguard.confirm).
+        let (resolved_kernel, resolved_initrd) = self.resolve_guest_images();
+        let vm_available = resolved_kernel.is_some() && resolved_initrd.is_some();
+
+        // Create safeguard channel if VM is available (filesystem ops run on
+        // separate backend threads, so blocking is safe).
+        let safeguard_sender = if vm_available {
+            let (sender, receiver) = mpsc::unbounded_channel::<PendingSafeguard>();
+            *self.safeguard_receiver.lock().unwrap() = Some(receiver);
+            Some(sender)
+        } else {
+            None
+        };
+
         let mut interceptors = Vec::with_capacity(working_dirs.len());
         let mut undo_dirs = Vec::with_capacity(working_dirs.len());
 
-        for (index, working_dir) in working_dirs.iter().enumerate() {
-            let undo_dir = self.cli_args.undo_dir.join(index.to_string());
-            let interceptor = UndoInterceptor::new(working_dir.clone(), undo_dir.clone());
+        for working_dir in &working_dirs {
+            let undo_dir = self.cli_args.undo_dir.join(undo_subdir_name(working_dir));
+            let interceptor = if let Some(ref sender) = safeguard_sender {
+                use crate::safeguard_bridge::SafeguardBridge;
+                UndoInterceptor::new(
+                    working_dir.clone(),
+                    undo_dir.clone(),
+                    UndoConfig {
+                        policy: codeagent_common::ExternalModificationPolicy::Barrier,
+                        safeguard_config: SafeguardConfig::default(),
+                        safeguard_handler: Some(Box::new(SafeguardBridge::new(sender.clone()))),
+                        ..Default::default()
+                    },
+                )
+            } else {
+                UndoInterceptor::new_default(working_dir.clone(), undo_dir.clone())
+            };
 
             // Run crash recovery
             if let Ok(Some(recovery)) = interceptor.recover() {
@@ -132,18 +232,112 @@ impl Orchestrator {
                 });
             }
 
+            // Place a barrier if previous session steps exist, preventing accidental
+            // rollback across session boundaries where untracked changes may have occurred.
+            if !interceptor.is_undo_disabled() && !interceptor.completed_steps().is_empty() {
+                if let Ok(Some(barrier)) = interceptor.notify_external_modification(
+                    vec![working_dir.clone()],
+                    BarrierReason::SessionStart,
+                )
+                {
+                    let _ = self.event_sender.send(Event::ExternalModification {
+                        affected_paths: vec![working_dir.to_string_lossy().into_owned()],
+                        barrier_id: Some(barrier.barrier_id),
+                    });
+                }
+            }
+
             interceptors.push(Arc::new(interceptor));
             undo_dirs.push(undo_dir);
         }
 
-        // Determine VM availability and launch if configured
-        let (vm_status, backend_name) = if self.is_vm_available() {
-            // VM components are configured — attempt to launch.
-            // For now, the actual launch is deferred to when `launch_vm`
-            // is called from `do_session_start`. The launch_vm method
-            // will populate the VM fields on the session.
-            match self.launch_vm(&working_dirs, &interceptors) {
+        // Compute the next command ID from the highest existing step ID across all
+        // interceptors. This prevents step ID collisions when a session is restarted
+        // — without this, IDs would reset to 1 and overwrite previous session steps.
+        let max_existing_step_id = interceptors
+            .iter()
+            .flat_map(|i| i.completed_steps())
+            .filter(|id| *id > 0)
+            .max()
+            .unwrap_or(0) as u64;
+        let initial_command_id = max_existing_step_id + 1;
+
+        // Create RecentBackendWrites tracker and spawn filesystem watcher.
+        let recent_writes_ttl =
+            std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
+        let watcher_tick =
+            std::time::Duration::from_millis(self.file_watcher_config.debounce_ms);
+        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl, watcher_tick));
+
+        let watcher_config = {
+            let mut config = fs_watcher::FsWatcherConfig {
+                debounce: watcher_tick,
+                exclude_patterns: fs_watcher::FsWatcherConfig::default().exclude_patterns,
+                enabled: self.file_watcher_config.enabled,
+                use_gitignore: self.file_watcher_config.use_gitignore,
+            };
+            config
+                .exclude_patterns
+                .extend(self.file_watcher_config.exclude_patterns.clone());
+            config
+        };
+
+        let fs_watcher_handle = fs_watcher::spawn_fs_watcher(
+            working_dirs.clone(),
+            undo_dirs.clone(),
+            interceptors.clone(),
+            recent_writes.clone(),
+            self.event_sender.clone(),
+            watcher_config,
+        );
+
+        // Launch VM if available (guest images resolved above).
+        let (vm_status, backend_name) = if vm_available {
+            match self.launch_vm(
+                &working_dirs,
+                &interceptors,
+                &recent_writes,
+                resolved_kernel.unwrap(),
+                resolved_initrd.unwrap(),
+            ) {
                 Ok(vm_session_parts) => {
+                    // Spawn the safeguard consumer task: receives safeguard
+                    // events from interceptors (via SafeguardBridge) and
+                    // forwards them as STDIO events. The responder is stored
+                    // in session.pending_safeguards so safeguard.confirm can
+                    // unblock the filesystem thread.
+                    let safeguard_bridge_handle = {
+                        let mut guard = self.safeguard_receiver.lock().unwrap();
+                        guard.take().map(|mut receiver| {
+                            let event_sender = self.event_sender.clone();
+                            let session_state = self.state.clone();
+                            tokio::spawn(async move {
+                                while let Some(pending) = receiver.recv().await {
+                                    let event = &pending.event;
+                                    let safeguard_id = event.safeguard_id.to_string();
+                                    let _ = event_sender.send(Event::SafeguardTriggered {
+                                        step_id: event.step_id,
+                                        safeguard_id: safeguard_id.clone(),
+                                        kind: format!("{:?}", event.kind),
+                                        sample_paths: event.sample_paths.clone(),
+                                        message: format!(
+                                            "Safeguard triggered: {:?} (step {})",
+                                            event.kind, event.step_id
+                                        ),
+                                    });
+                                    // Store the responder so safeguard.confirm can send the decision.
+                                    let mut state = session_state.lock().unwrap();
+                                    if let SessionState::Active(session) = &mut *state {
+                                        session.pending_safeguards.insert(
+                                            safeguard_id,
+                                            pending.responder,
+                                        );
+                                    }
+                                }
+                            })
+                        })
+                    };
+
                     let session = Session {
                         interceptors,
                         working_dirs: working_dirs.clone(),
@@ -156,11 +350,16 @@ impl Orchestrator {
                         fs_backends: vm_session_parts.fs_backends,
                         in_flight_tracker: vm_session_parts.in_flight_tracker,
                         control_writer: vm_session_parts.control_writer,
+                        control_handler: vm_session_parts.control_handler,
                         event_bridge_handle: vm_session_parts.event_bridge_handle,
                         control_reader_handle: vm_session_parts.control_reader_handle,
                         control_writer_handle: vm_session_parts.control_writer_handle,
                         socket_dir: vm_session_parts.socket_dir,
-                        next_command_id: Arc::new(AtomicU64::new(1)),
+                        next_command_id: Arc::new(AtomicU64::new(initial_command_id)),
+                        next_api_step_id: Arc::new(AtomicI64::new(1_000_000)),
+                        fs_watcher_handle,
+                        recent_writes: Some(recent_writes),
+                        safeguard_bridge_handle,
                     };
 
                     *state = SessionState::Active(Box::new(session));
@@ -176,6 +375,7 @@ impl Orchestrator {
                     });
                     let session = Self::create_non_vm_session(
                         interceptors, working_dirs.clone(), undo_dirs, payload,
+                        fs_watcher_handle, Some(recent_writes), initial_command_id,
                     );
                     *state = SessionState::Active(Box::new(session));
                     ("unavailable", "none")
@@ -183,8 +383,24 @@ impl Orchestrator {
             }
         } else {
             // No VM components configured — run in host-only mode
+            let missing: Vec<&str> = [
+                self.cli_args.kernel_path.is_none().then_some("kernel"),
+                self.cli_args.initrd_path.is_none().then_some("initrd"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let _ = self.event_sender.send(Event::Warning {
+                code: "vm_not_configured".to_string(),
+                message: format!(
+                    "VM not configured (missing: {}), running in host-only mode. \
+                     Pass --kernel-path and --initrd-path to enable VM mode.",
+                    missing.join(", ")
+                ),
+            });
             let session = Self::create_non_vm_session(
                 interceptors, working_dirs.clone(), undo_dirs, payload,
+                fs_watcher_handle, Some(recent_writes), initial_command_id,
             );
             *state = SessionState::Active(Box::new(session));
             ("unavailable", "none")
@@ -198,7 +414,7 @@ impl Orchestrator {
                 json!({
                     "index": i,
                     "path": d.display().to_string(),
-                    "mount_path": format!("/mnt/working/{i}"),
+                    "mount_path": if i == 0 { "/mnt/working".to_string() } else { format!("/mnt/working{i}") },
                 })
             }).collect::<Vec<_>>(),
         }))
@@ -210,6 +426,9 @@ impl Orchestrator {
         working_dirs: Vec<PathBuf>,
         undo_dirs: Vec<PathBuf>,
         payload: SessionStartPayload,
+        fs_watcher_handle: Option<tokio::task::JoinHandle<()>>,
+        recent_writes: Option<Arc<RecentBackendWrites>>,
+        initial_command_id: u64,
     ) -> Session {
         Session {
             interceptors,
@@ -223,20 +442,27 @@ impl Orchestrator {
             fs_backends: vec![],
             in_flight_tracker: None,
             control_writer: None,
+            control_handler: None,
             event_bridge_handle: None,
             control_reader_handle: None,
             control_writer_handle: None,
             socket_dir: None,
-            next_command_id: Arc::new(AtomicU64::new(1)),
+            next_command_id: Arc::new(AtomicU64::new(initial_command_id)),
+            next_api_step_id: Arc::new(AtomicI64::new(1_000_000)),
+            fs_watcher_handle,
+            recent_writes,
+            safeguard_bridge_handle: None,
         }
     }
 
-    /// Launch VM components: virtiofsd backends, QEMU, control channel.
-    #[allow(unused_variables, unused_mut)]
+    /// Launch VM components: filesystem backends, QEMU, control channel.
     fn launch_vm(
         &self,
         working_dirs: &[PathBuf],
         interceptors: &[Arc<UndoInterceptor>],
+        recent_writes: &Arc<RecentBackendWrites>,
+        kernel_path: PathBuf,
+        initrd_path: PathBuf,
     ) -> Result<VmSessionParts, AgentError> {
         let socket_dir = self.cli_args.undo_dir.join(".sockets");
         std::fs::create_dir_all(&socket_dir)?;
@@ -254,12 +480,18 @@ impl Orchestrator {
         #[cfg(unix)]
         {
             use crate::fs_backend::{FilesystemBackend, InterceptedBackend};
+            use crate::recent_writes::WriteTrackingInterceptor;
             for (index, working_dir) in working_dirs.iter().enumerate() {
                 let fs_socket = socket_dir.join(format!("vfs{index}.sock"));
+                let tracking_interceptor: Arc<dyn codeagent_interceptor::write_interceptor::WriteInterceptor> =
+                    Arc::new(WriteTrackingInterceptor::new(
+                        interceptors[index].clone(),
+                        recent_writes.clone(),
+                    ));
                 let mut backend = InterceptedBackend::new(
                     working_dir.clone(),
                     fs_socket.clone(),
-                    interceptors[index].clone(),
+                    tracking_interceptor,
                     in_flight_tracker.clone(),
                 );
                 backend.start()?;
@@ -271,12 +503,18 @@ impl Orchestrator {
         #[cfg(target_os = "windows")]
         {
             use crate::fs_backend::{FilesystemBackend, P9Backend};
+            use crate::recent_writes::WriteTrackingInterceptor;
             for (index, working_dir) in working_dirs.iter().enumerate() {
                 let fs_socket = socket_dir.join(format!("p9fs{index}.addr"));
+                let tracking_interceptor: Arc<dyn codeagent_interceptor::write_interceptor::WriteInterceptor> =
+                    Arc::new(WriteTrackingInterceptor::new(
+                        interceptors[index].clone(),
+                        recent_writes.clone(),
+                    ));
                 let mut backend = P9Backend::new(
                     working_dir.clone(),
                     fs_socket.clone(),
-                    interceptors[index].clone(),
+                    tracking_interceptor,
                     in_flight_tracker.clone(),
                 );
                 backend.start()?;
@@ -285,11 +523,28 @@ impl Orchestrator {
             }
         }
 
-        // 2. Build QEMU config and spawn
+        // 2. On Windows, bind a TCP listener for the control channel before
+        //    QEMU starts. QEMU will connect to this address as a client.
+        //    The address file must exist before build_args() reads it.
+        #[cfg(target_os = "windows")]
+        let control_listener = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to bind control channel listener: {error}"),
+                })?;
+            let addr = listener.local_addr()
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to get control listener address: {error}"),
+                })?;
+            std::fs::write(&control_socket_path, addr.to_string())?;
+            listener
+        };
+
+        // 3. Build QEMU config and spawn
         let config = QemuConfig {
             qemu_binary: self.cli_args.qemu_binary.clone(),
-            kernel_path: self.cli_args.kernel_path.clone().unwrap(),
-            initrd_path: self.cli_args.initrd_path.clone().unwrap(),
+            kernel_path,
+            initrd_path,
             rootfs_path: self.cli_args.rootfs_path.clone(),
             memory_mb: self.cli_args.memory_mb,
             cpus: self.cli_args.cpus,
@@ -302,76 +557,119 @@ impl Orchestrator {
 
         let qemu_process = QemuProcess::spawn(config)?;
 
-        // 3. Connect to control socket and set up channel handler
-        #[cfg(not(unix))]
-        {
-            // On Windows, control channel will use named pipes (Phase 3).
-            Err(AgentError::ControlChannelFailed {
-                reason: "control channel not yet supported on Windows".to_string(),
-            })
-        }
+        // 4. Connect to control channel (platform-specific transport)
+        //
+        // Unix: connect to the Unix domain socket that QEMU created (server mode).
+        // Windows: accept the TCP connection from QEMU (client mode).
+        // Both produce a (reader, writer) pair implementing AsyncRead/AsyncWrite.
 
         #[cfg(unix)]
-        {
-            let (reader, writer) = {
-                let std_stream = std::os::unix::net::UnixStream::connect(&control_socket_path)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to connect to control socket: {error}"),
-                    })?;
-                std_stream
-                    .set_nonblocking(true)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to set socket non-blocking: {error}"),
-                    })?;
-                let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
-                    .map_err(|error| AgentError::ControlChannelFailed {
-                        reason: format!("failed to convert socket: {error}"),
-                    })?;
-                tokio_stream.into_split()
+        let (reader, writer) = {
+            let std_stream = std::os::unix::net::UnixStream::connect(&control_socket_path)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to connect to control socket: {error}"),
+                })?;
+            std_stream
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set socket non-blocking: {error}"),
+                })?;
+            let tokio_stream = tokio::net::UnixStream::from_std(std_stream)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to convert socket: {error}"),
+                })?;
+            tokio_stream.into_split()
+        };
+
+        #[cfg(target_os = "windows")]
+        let (reader, writer) = {
+            // Accept one connection from QEMU with a polling timeout.
+            // QEMU connects to our TCP listener as a client (server=off).
+            control_listener
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set listener non-blocking: {error}"),
+                })?;
+
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(30);
+            let poll_interval = std::time::Duration::from_millis(100);
+
+            let stream = loop {
+                match control_listener.accept() {
+                    Ok((stream, _addr)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if start.elapsed() > timeout {
+                            return Err(AgentError::ControlChannelFailed {
+                                reason: "QEMU did not connect to the control channel within 30s"
+                                    .to_string(),
+                            });
+                        }
+                        std::thread::sleep(poll_interval);
+                    }
+                    Err(error) => {
+                        return Err(AgentError::ControlChannelFailed {
+                            reason: format!(
+                                "failed to accept control channel connection: {error}"
+                            ),
+                        });
+                    }
+                }
             };
 
-            // 4. Create control channel handler
-            use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
-            use crate::event_bridge::run_event_bridge;
-            use crate::step_adapter::StepManagerAdapter;
+            stream
+                .set_nonblocking(true)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to set stream non-blocking: {error}"),
+                })?;
+            let tokio_stream = tokio::net::TcpStream::from_std(stream)
+                .map_err(|error| AgentError::ControlChannelFailed {
+                    reason: format!("failed to convert TCP stream: {error}"),
+                })?;
+            tokio_stream.into_split()
+        };
 
-            let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
-            let quiescence_config = QuiescenceConfig::default();
+        // 5. Create control channel handler
+        use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
+        use crate::event_bridge::run_event_bridge;
 
-            let (handler, handler_events) = ControlChannelHandler::new(
-                step_manager,
-                in_flight_tracker.clone(),
-                quiescence_config,
-            );
-            let handler = Arc::new(handler);
+        let quiescence_config = QuiescenceConfig::default();
 
-            // 5. Spawn event bridge (control events → STDIO events)
-            let event_bridge_handle = tokio::spawn(run_event_bridge(
-                handler_events,
-                self.event_sender.clone(),
-            ));
+        let (handler, handler_events) = ControlChannelHandler::new(
+            interceptors[0].clone(),
+            in_flight_tracker.clone(),
+            quiescence_config,
+        );
+        let handler = Arc::new(handler);
 
-            // 6. Spawn control channel writer and reader tasks
-            let (control_writer_sender, control_writer_handle) =
-                control_bridge::spawn_control_writer(writer);
+        // 6. Spawn event bridge (control events → STDIO events + command waiter)
+        let event_bridge_handle = tokio::spawn(run_event_bridge(
+            handler_events,
+            self.event_sender.clone(),
+            Some(self.command_waiter.clone()),
+        ));
 
-            let control_reader_handle = control_bridge::spawn_control_reader(
-                reader,
-                handler,
-                self.event_sender.clone(),
-            );
+        // 7. Spawn control channel writer and reader tasks
+        let (control_writer_sender, control_writer_handle) =
+            control_bridge::spawn_control_writer(writer);
 
-            Ok(VmSessionParts {
-                qemu_process: Some(qemu_process),
-                fs_backends,
-                in_flight_tracker: Some(in_flight_tracker),
-                control_writer: Some(control_writer_sender),
-                event_bridge_handle: Some(event_bridge_handle),
-                control_reader_handle: Some(control_reader_handle),
-                control_writer_handle: Some(control_writer_handle),
-                socket_dir: Some(socket_dir),
-            })
-        }
+        let control_reader_handle = control_bridge::spawn_control_reader(
+            reader,
+            handler.clone(),
+            self.event_sender.clone(),
+        );
+
+        Ok(VmSessionParts {
+            qemu_process: Some(qemu_process),
+            fs_backends,
+            in_flight_tracker: Some(in_flight_tracker),
+            control_writer: Some(control_writer_sender),
+            control_handler: Some(handler),
+            event_bridge_handle: Some(event_bridge_handle),
+            control_reader_handle: Some(control_reader_handle),
+            control_writer_handle: Some(control_writer_handle),
+            socket_dir: Some(socket_dir),
+        })
     }
 
     fn do_session_stop(&self) -> Result<serde_json::Value, AgentError> {
@@ -379,6 +677,16 @@ impl Orchestrator {
         match &mut *state {
             SessionState::Idle => Err(AgentError::SessionNotActive),
             SessionState::Active(session) => {
+                // Stop filesystem watcher
+                if let Some(handle) = session.fs_watcher_handle.take() {
+                    handle.abort();
+                }
+
+                // Stop safeguard bridge task
+                if let Some(handle) = session.safeguard_bridge_handle.take() {
+                    handle.abort();
+                }
+
                 // Stop background tasks
                 if let Some(handle) = session.control_reader_handle.take() {
                     handle.abort();
@@ -535,15 +843,191 @@ impl Orchestrator {
         }
     }
 
+    /// Get the recent writes tracker from the active session, if available.
+    fn recent_writes(&self) -> Option<Arc<RecentBackendWrites>> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            SessionState::Active(session) => session.recent_writes.clone(),
+            _ => None,
+        }
+    }
+
+    /// Begin suppressing all watcher events and return a guard that extends
+    /// the suppression deadline on drop. This prevents rollback-originated
+    /// filesystem changes from being misidentified as external modifications,
+    /// including late-arriving OS events after the rollback returns.
+    fn suppress_watcher_during_rollback(&self) -> Option<WatcherSuppressGuard> {
+        let rw = self.recent_writes()?;
+        rw.begin_suppression();
+        Some(WatcherSuppressGuard(rw))
+    }
+
     fn next_api_step_id(&self) -> Result<i64, McpError> {
         let state = self.state.lock().unwrap();
         match &*state {
             SessionState::Active(session) => {
-                Ok((session.interceptors[0].completed_steps().len() as i64) + 1_000_000)
+                Ok(session.next_api_step_id.fetch_add(1, Ordering::Relaxed))
             }
             _ => Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
         }
     }
+
+    /// Open a synthetic API step, run `f`, then close or rollback on error.
+    fn with_api_step<F>(
+        &self,
+        interceptor: &UndoInterceptor,
+        f: F,
+    ) -> Result<i64, McpError>
+    where
+        F: FnOnce(i64) -> Result<(), McpError>,
+    {
+        let step_id = self.next_api_step_id()?;
+        interceptor
+            .open_step(step_id)
+            .map_err(|e| McpError::InternalError { message: e.to_string() })?;
+        match f(step_id) {
+            Ok(()) => {
+                interceptor
+                    .close_step(step_id)
+                    .map_err(|e| McpError::InternalError { message: e.to_string() })?;
+                Ok(step_id)
+            }
+            Err(err) => {
+                let _ = interceptor.rollback_current_step();
+                Err(err)
+            }
+        }
+    }
+
+    fn do_write_file(
+        &self,
+        interceptor: &UndoInterceptor,
+        target: &std::path::Path,
+        args: &WriteFileArgs,
+    ) -> Result<(), McpError> {
+        interceptor.set_step_command(format!("write_file {}", args.path));
+
+        let existed_before = target.exists();
+
+        if existed_before {
+            let _ = interceptor.pre_write(target);
+        } else {
+            let mut dirs_to_track = Vec::new();
+            if let Some(parent) = target.parent() {
+                let mut ancestor = parent.to_path_buf();
+                while !ancestor.exists() {
+                    dirs_to_track.push(ancestor.clone());
+                    if !ancestor.pop() {
+                        break;
+                    }
+                }
+                std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
+                    message: e.to_string(),
+                })?;
+                for dir in dirs_to_track.iter().rev() {
+                    let _ = interceptor.post_mkdir(dir);
+                }
+            }
+        }
+
+        std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
+
+        if let Some(rw) = self.recent_writes() {
+            rw.record(target);
+        }
+
+        if !existed_before {
+            let _ = interceptor.post_create(target);
+        }
+
+        Ok(())
+    }
+
+    fn do_edit_file(
+        &self,
+        interceptor: &UndoInterceptor,
+        target: &std::path::Path,
+        path: &str,
+        new_content: &str,
+    ) -> Result<(), McpError> {
+        interceptor.set_step_command(format!("edit_file {}", path));
+
+        let _ = interceptor.pre_write(target);
+
+        std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
+
+        if let Some(rw) = self.recent_writes() {
+            rw.record(target);
+        }
+
+        Ok(())
+    }
+
+    /// Execute a shell command directly on the host (no VM).
+    /// Creates an unprotected undo step so the action is recorded but cannot
+    /// be rolled back.
+    fn execute_host_bash(
+        &self,
+        args: &BashArgs,
+        command_id: u64,
+        classification: &crate::command_classifier::CommandClassification,
+    ) -> Result<serde_json::Value, McpError> {
+        let working_dir = self
+            .primary_working_dir()
+            .map_err(Self::agent_error_to_mcp)?;
+
+        let shell = if cfg!(windows) { "bash" } else { "sh" };
+        let output = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(&args.command)
+            .current_dir(&working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| McpError::InternalError {
+                message: format!("failed to execute command: {e}"),
+            })?;
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let mut combined_output = stdout;
+        if !stderr.is_empty() {
+            if !combined_output.is_empty() {
+                combined_output.push('\n');
+            }
+            combined_output.push_str(&stderr);
+        }
+
+        Ok(json!({
+            "command_id": command_id,
+            "exit_code": exit_code,
+            "output": combined_output,
+            "classification": classification.to_string(),
+            "host_only": true,
+        }))
+    }
+}
+
+/// Strip a `cd '<cwd>' && ` or `cd "<cwd>" && ` prefix from a command string.
+///
+/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working' && ` to
+/// commands even though the sandbox already sets the working directory via the
+/// `cwd` field. This strips the redundant prefix for cleaner display and
+/// execution.
+fn strip_cwd_prefix(command: &str, cwd: &str) -> String {
+    for quote in ['\'', '"'] {
+        let prefix = format!("cd {quote}{cwd}{quote} && ");
+        if let Some(rest) = command.strip_prefix(&prefix) {
+            return rest.to_string();
+        }
+    }
+    command.to_string()
 }
 
 /// Parts of a session that come from VM launch.
@@ -552,6 +1036,7 @@ struct VmSessionParts {
     fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>>,
     in_flight_tracker: Option<InFlightTracker>,
     control_writer: Option<mpsc::UnboundedSender<String>>,
+    control_handler: Option<Arc<codeagent_control::ControlChannelHandler<codeagent_interceptor::undo_interceptor::UndoInterceptor>>>,
     event_bridge_handle: Option<tokio::task::JoinHandle<()>>,
     control_reader_handle: Option<tokio::task::JoinHandle<()>>,
     control_writer_handle: Option<tokio::task::JoinHandle<()>>,
@@ -589,6 +1074,8 @@ impl RequestHandler for Orchestrator {
         let interceptor = self
             .resolve_interceptor(payload.directory.as_deref())
             .map_err(Self::agent_error_to_stdio)?;
+
+        let _guard = self.suppress_watcher_during_rollback();
 
         let result = interceptor
             .rollback(payload.count as usize, payload.force)
@@ -662,7 +1149,7 @@ impl RequestHandler for Orchestrator {
         let exec_msg = codeagent_control::HostMessage::Exec {
             id: command_id,
             command: payload.command.clone(),
-            cwd: payload.cwd,
+            cwd: payload.cwd.or_else(|| Some("/mnt/working".to_string())),
             env: payload.env,
         };
 
@@ -817,20 +1304,135 @@ impl RequestHandler for Orchestrator {
 // McpHandler implementation
 // ---------------------------------------------------------------------------
 
-use codeagent_mcp::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
-    ReadFileArgs, UndoArgs, WriteFileArgs,
-};
-
 impl codeagent_mcp::McpHandler for Orchestrator {
-    fn execute_command(
+    fn bash(
         &self,
-        _args: ExecuteCommandArgs,
+        args: BashArgs,
     ) -> Result<serde_json::Value, McpError> {
         self.require_active()
             .map_err(Self::agent_error_to_mcp)?;
 
-        Err(Self::agent_error_to_mcp(AgentError::QemuUnavailable))
+        // Sanitize: reject inherently dangerous commands before they reach the VM
+        if let SanitizeResult::Rejected { reason } = command_classifier::sanitize(&args.command) {
+            return Err(McpError::InvalidParams {
+                message: format!("command rejected: {reason}"),
+            });
+        }
+
+        // Classify for response metadata (informational — no gate)
+        let classification = self.classifier.classify(&args.command);
+
+        let (control_writer, control_handler, command_id) = {
+            let state = self.state.lock().unwrap();
+            let session = match &*state {
+                SessionState::Active(s) => s,
+                _ => return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive)),
+            };
+
+            let writer = session.control_writer.clone();
+            let handler = session.control_handler.clone();
+            let id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
+            (writer, handler, id)
+        };
+
+        // No VM available — execute directly on the host.
+        if control_writer.is_none() || control_handler.is_none() {
+            return self.execute_host_bash(&args, command_id, &classification);
+        }
+        let control_writer = control_writer.unwrap();
+        let control_handler = control_handler.unwrap();
+
+        // Register with the waiter before sending so early events are captured
+        self.command_waiter.register(command_id);
+
+        // Register the command with the control channel handler's state machine
+        // (so it expects the StepStarted response from the VM) and get the
+        // serializable HostMessage back. Uses block_in_place because send_exec
+        // is async (may close an ambient step).
+        let cwd = "/mnt/working";
+        let command = strip_cwd_prefix(&args.command, cwd);
+
+        let host_msg = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                control_handler.send_exec(
+                    command_id,
+                    command,
+                    None,
+                    Some(cwd.to_string()),
+                ),
+            )
+        });
+
+        let json_str = control_bridge::serialize_host_message(&host_msg)
+            .map_err(|error| McpError::InternalError {
+                message: format!("failed to serialize exec message: {error}"),
+            })?;
+
+        control_writer
+            .send(json_str)
+            .map_err(|_| McpError::InternalError {
+                message: "control channel closed".to_string(),
+            })?;
+
+        // Block until the command completes or times out.
+        // Use block_in_place so tokio can spawn a replacement worker thread
+        // while this one is blocked on the Condvar — otherwise async tasks
+        // (control reader, event bridge, P9 server) may starve.
+        let timeout_ms = args.timeout.unwrap_or(120_000).min(600_000);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        eprintln!(
+            "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"bash: waiting for command {} (timeout {}ms)\"}}",
+            command_id,
+            timeout_ms
+        );
+        let result = tokio::task::block_in_place(|| {
+            self.command_waiter.wait_for_completion(command_id, timeout)
+        });
+
+        match result {
+            Some(r) if r.exit_code.is_some() => {
+                let exit_code = r.exit_code.unwrap();
+                eprintln!(
+                    "{{\"level\":\"debug\",\"component\":\"mcp\",\"message\":\"bash: command {} completed with exit code {}\"}}",
+                    command_id, exit_code
+                );
+                let mut output = r.stdout;
+                if !r.stderr.is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&r.stderr);
+                }
+                Ok(json!({
+                    "command_id": command_id,
+                    "exit_code": exit_code,
+                    "output": output,
+                    "classification": classification.to_string(),
+                }))
+            }
+            Some(r) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"component\":\"mcp\",\"message\":\"bash: command {} timed out\"}}",
+                    command_id
+                );
+                let mut output = r.stdout;
+                if !r.stderr.is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&r.stderr);
+                }
+                Ok(json!({
+                    "command_id": command_id,
+                    "status": "timeout",
+                    "output": output,
+                    "classification": classification.to_string(),
+                }))
+            }
+            None => Err(McpError::InternalError {
+                message: "command was not registered".to_string(),
+            }),
+        }
     }
 
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError> {
@@ -858,40 +1460,9 @@ impl codeagent_mcp::McpHandler for Orchestrator {
 
         let target = working_dir.join(&args.path);
 
-        // Open a synthetic API step for undo tracking
-        let step_id = self.next_api_step_id()?;
-
-        interceptor
-            .open_step(step_id)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?;
-
-        // Capture preimage before writing
-        if target.exists() {
-            let _ = interceptor.pre_write(&target);
-        } else {
-            // Ensure parent directory exists
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
-                    message: e.to_string(),
-                })?;
-            }
-        }
-
-        std::fs::write(&target, &args.content).map_err(|e| McpError::InternalError {
-            message: e.to_string(),
+        let step_id = self.with_api_step(&interceptor, |_| {
+            self.do_write_file(&interceptor, &target, &args)
         })?;
-
-        if !target.exists() {
-            let _ = interceptor.post_create(&target);
-        }
-
-        interceptor
-            .close_step(step_id)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?;
 
         Ok(json!({ "written": true, "step_id": step_id }))
     }
@@ -970,28 +1541,14 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
 
-        // Open a synthetic API step for undo tracking
-        let step_id = self.next_api_step_id()?;
-
-        interceptor
-            .open_step(step_id)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?;
-
-        let _ = interceptor.pre_write(&target);
-
-        std::fs::write(&target, &new_content).map_err(|e| McpError::InternalError {
-            message: e.to_string(),
+        self.with_api_step(&interceptor, |_| {
+            self.do_edit_file(&interceptor, &target, &args.path, &new_content)
         })?;
 
-        interceptor
-            .close_step(step_id)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?;
-
-        Ok(json!(format!("The file {} has been updated successfully.", args.path)))
+        Ok(json!(format!(
+            "The file {} has been updated successfully.",
+            args.path
+        )))
     }
 
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError> {
@@ -1029,8 +1586,17 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // Sort by modification time, newest first
         entries.sort_by(|a, b| b.1.cmp(&a.1));
 
+        let limit = args.limit.unwrap_or(200);
+        let total = entries.len();
+        let truncated = total > limit;
+        entries.truncate(limit);
+
         let result: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
-        Ok(json!(result.join("\n")))
+        let mut output = result.join("\n");
+        if truncated {
+            output.push_str(&format!("\n\n[Truncated: showing {limit} of {total} matches]"));
+        }
+        Ok(json!(output))
     }
 
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {
@@ -1158,6 +1724,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let count = args.count as usize;
         let force = args.force;
 
+        let _guard = self.suppress_watcher_during_rollback();
+
         let result = interceptor
             .rollback(count, force)
             .map_err(|e| McpError::InternalError {
@@ -1185,5 +1753,28 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     fn get_session_status(&self) -> Result<serde_json::Value, McpError> {
         self.do_session_status()
             .map_err(Self::agent_error_to_mcp)
+    }
+
+    fn discard_undo_history(
+        &self,
+        _args: DiscardUndoHistoryArgs,
+    ) -> Result<serde_json::Value, McpError> {
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Active(s) => s,
+            SessionState::Idle => {
+                return Err(Self::agent_error_to_mcp(AgentError::SessionNotActive))
+            }
+        };
+
+        for interceptor in &session.interceptors {
+            interceptor
+                .discard()
+                .map_err(|e| McpError::InternalError {
+                    message: e.to_string(),
+                })?;
+        }
+
+        Ok(json!({}))
     }
 }

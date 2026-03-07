@@ -3,7 +3,9 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use codeagent_sandbox::cli::CliArgs;
-use codeagent_sandbox::orchestrator::Orchestrator;
+use codeagent_sandbox::command_classifier::CommandClassifierConfig;
+use codeagent_sandbox::config::FileWatcherConfig;
+use codeagent_sandbox::orchestrator::{undo_subdir_name, Orchestrator};
 use codeagent_stdio::protocol::{
     FsListPayload, FsReadPayload, SessionStartPayload, UndoHistoryPayload, UndoRollbackPayload,
     WorkingDirectoryConfig,
@@ -24,6 +26,7 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     }
 }
 
@@ -46,7 +49,7 @@ fn setup() -> (Orchestrator, mpsc::UnboundedReceiver<Event>, TempDir, TempDir) {
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let args = make_args(working.path(), undo.path());
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
     (orchestrator, event_receiver, working, undo)
 }
@@ -260,10 +263,11 @@ fn ao_12_crash_recovery_event() {
     let undo = TempDir::new().unwrap();
 
     // Simulate an incomplete step by creating the WAL structure
-    let wal_dir = undo.path().join("0").join("wal").join("in_progress");
+    let subdir_name = undo_subdir_name(working.path());
+    let wal_dir = undo.path().join(&subdir_name).join("wal").join("in_progress");
     std::fs::create_dir_all(&wal_dir).unwrap();
     // Write version file so the interceptor doesn't treat it as fresh
-    let step_base = undo.path().join("0");
+    let step_base = undo.path().join(&subdir_name);
     std::fs::create_dir_all(step_base.join("steps")).unwrap();
     std::fs::write(step_base.join("version"), "1").unwrap();
     // Create empty WAL preimages dir
@@ -271,7 +275,7 @@ fn ao_12_crash_recovery_event() {
 
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let args = make_args(working.path(), undo.path());
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
     let payload = make_start_payload(&working.path().display().to_string());
     let _ = orchestrator.session_start(payload);
@@ -312,8 +316,8 @@ fn ao_13_agent_execute_unavailable() {
 
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
-    EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs, ReadFileArgs,
-    UndoArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
 #[test]
@@ -505,6 +509,7 @@ fn mcp_10_glob() {
         .glob(GlobArgs {
             pattern: "**/*.rs".to_string(),
             path: None,
+            limit: None,
         })
         .unwrap();
     let output = result.as_str().unwrap();
@@ -602,7 +607,7 @@ fn ao_14_no_vm_components_falls_back_to_host_mode() {
     assert!(args.kernel_path.is_none());
     assert!(args.initrd_path.is_none());
 
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
     let payload = make_start_payload(&working.path().display().to_string());
 
     let result = orchestrator.session_start(payload).unwrap();
@@ -665,8 +670,9 @@ fn ao_16_undo_inside_working_dir_rejected() {
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     };
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
     let payload = make_start_payload(&working.path().display().to_string());
     let result = orchestrator.session_start(payload);
@@ -698,12 +704,513 @@ fn ao_17_working_inside_undo_dir_rejected() {
         memory_mb: 2048,
         cpus: 2,
         virtiofsd_binary: None,
+        config_file: None,
     };
-    let orchestrator = Orchestrator::new(args, event_sender);
+    let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
     let payload = make_start_payload(&working.display().to_string());
     let result = orchestrator.session_start(payload);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("overlaps"), "expected overlap error, got: {err}");
+}
+
+// -----------------------------------------------------------------------
+// BA-01: Sanitization rejection returns InvalidParams error
+// -----------------------------------------------------------------------
+#[test]
+fn ba_01_bash_sanitization_rejection() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Fork bomb should be rejected before reaching the VM
+    let result = orchestrator.bash(BashArgs {
+        command: ":(){ :|:& };:".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    // JSON-RPC 2.0 invalid params code
+    assert_eq!(rpc_err.code, -32602);
+    assert!(
+        rpc_err.message.contains("fork bomb"),
+        "expected fork bomb rejection, got: {}",
+        rpc_err.message
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-02: Sudo rejection
+// -----------------------------------------------------------------------
+#[test]
+fn ba_02_bash_sudo_rejected() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "sudo rm -rf /".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    assert!(
+        rpc_err.message.contains("privilege escalation"),
+        "expected privilege escalation rejection, got: {}",
+        rpc_err.message
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-03: Empty command rejection
+// -----------------------------------------------------------------------
+#[test]
+fn ba_03_bash_empty_command_rejected() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let rpc_err = err.to_jsonrpc_error();
+    assert!(
+        rpc_err.message.contains("empty command"),
+        "expected empty command rejection, got: {}",
+        rpc_err.message
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-04: Host-only bash execution works without VM
+// -----------------------------------------------------------------------
+#[test]
+fn ba_04_bash_host_only() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let result = orchestrator.bash(BashArgs {
+        command: "echo hello".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_ok(), "host-only bash should succeed: {:?}", result.err());
+
+    let value = result.unwrap();
+    assert!(
+        value["host_only"].as_bool().unwrap_or(false),
+        "response should include host_only flag"
+    );
+    assert_eq!(value["exit_code"].as_i64().unwrap(), 0);
+    let output = value["output"].as_str().unwrap();
+    assert!(
+        output.contains("hello"),
+        "expected 'hello' in output, got: {output}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// BA-05: Host-only bash still rejects sanitization failures
+// -----------------------------------------------------------------------
+#[test]
+fn ba_05_bash_host_sanitize() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Fork bomb should be rejected before host execution
+    let result = orchestrator.bash(BashArgs {
+        command: ":(){ :|:& };:".to_string(),
+        description: None,
+        timeout: None,
+    });
+    assert!(result.is_err(), "sanitization should still apply in host-only mode");
+}
+
+// ── MCP write_file undo tracking tests ──
+
+/// write_file creating a new file should produce an undo step that,
+/// when rolled back, removes the file.
+#[test]
+fn mcp_14_write_file_new_file_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let target = working.path().join("new.txt");
+    assert!(!target.exists());
+
+    let result = orchestrator
+        .write_file(WriteFileArgs {
+            path: "new.txt".to_string(),
+            content: "hello".to_string(),
+        })
+        .unwrap();
+    assert_eq!(result["written"], true);
+    assert!(target.exists());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+
+    // Undo should remove the newly created file
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert!(
+        !target.exists(),
+        "newly created file should be removed after undo"
+    );
+}
+
+/// write_file overwriting an existing file should capture the preimage
+/// and restore it on undo.
+#[test]
+fn mcp_15_write_file_overwrite_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    std::fs::write(working.path().join("existing.txt"), "original").unwrap();
+
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    orchestrator
+        .write_file(WriteFileArgs {
+            path: "existing.txt".to_string(),
+            content: "replaced".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("existing.txt")).unwrap(),
+        "replaced"
+    );
+
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("existing.txt")).unwrap(),
+        "original"
+    );
+}
+
+/// write_file to a nested path should create parent directories and
+/// track them for undo.
+#[test]
+fn mcp_16_write_file_creates_parent_dirs_undo() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    let nested_dir = working.path().join("a").join("b");
+    let target = nested_dir.join("file.txt");
+    assert!(!working.path().join("a").exists());
+
+    orchestrator
+        .write_file(WriteFileArgs {
+            path: "a/b/file.txt".to_string(),
+            content: "deep".to_string(),
+        })
+        .unwrap();
+    assert!(target.exists());
+
+    // Undo should remove the file and the created directories
+    orchestrator
+        .undo(UndoArgs {
+            count: 1,
+            force: false,
+        })
+        .unwrap();
+    assert!(!target.exists(), "file should be removed after undo");
+    assert!(
+        !working.path().join("a").exists(),
+        "created parent directories should be removed after undo"
+    );
+}
+
+// -----------------------------------------------------------------------
+// MCP-17: write_file error cancels the step so subsequent operations work
+// -----------------------------------------------------------------------
+#[test]
+fn mcp_17_write_file_error_cancels_step() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Create a directory so writing a file at that path fails.
+    std::fs::create_dir_all(working.path().join("blocker")).unwrap();
+
+    let result = orchestrator.write_file(WriteFileArgs {
+        path: "blocker".to_string(),
+        content: "should fail".to_string(),
+    });
+    assert!(result.is_err(), "writing to a directory path should fail");
+
+    // A subsequent write_file should succeed (step was cleaned up, not left open).
+    let result = orchestrator.write_file(WriteFileArgs {
+        path: "ok.txt".to_string(),
+        content: "works".to_string(),
+    });
+    assert!(result.is_ok(), "subsequent write should succeed after error cleanup");
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("ok.txt")).unwrap(),
+        "works"
+    );
+}
+
+// -----------------------------------------------------------------------
+// MCP-18: edit_file error cancels the step so subsequent operations work
+// -----------------------------------------------------------------------
+#[test]
+fn mcp_18_edit_file_error_cancels_step() {
+    let (orchestrator, _rx, working, _undo) = setup();
+    let payload = make_start_payload(&working.path().display().to_string());
+    let _ = orchestrator.session_start(payload);
+
+    // Create a file, then make target path a directory to cause write failure.
+    std::fs::write(working.path().join("target.txt"), "original").unwrap();
+
+    // edit_file reads the file, validates, then writes. We need the write to fail.
+    // Make the file read-only so write fails on Windows (on Unix we need a different approach).
+    #[cfg(windows)]
+    {
+        let target = working.path().join("target.txt");
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        let result = orchestrator.edit_file(EditFileArgs {
+            path: "target.txt".to_string(),
+            old_string: "original".to_string(),
+            new_string: "modified".to_string(),
+            replace_all: false,
+        });
+        assert!(result.is_err(), "writing to read-only file should fail");
+
+        // Restore permissions for cleanup.
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&target, perms).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    {
+        // On Unix, remove write permission from the parent directory to prevent write.
+        use std::os::unix::fs::PermissionsExt;
+        let target = working.path().join("target.txt");
+        let parent = target.parent().unwrap();
+        let original_perms = std::fs::metadata(parent).unwrap().permissions();
+        let mut no_write = original_perms.clone();
+        no_write.set_mode(0o555);
+        std::fs::set_permissions(parent, no_write).unwrap();
+
+        let result = orchestrator.edit_file(EditFileArgs {
+            path: "target.txt".to_string(),
+            old_string: "original".to_string(),
+            new_string: "modified".to_string(),
+            replace_all: false,
+        });
+        assert!(result.is_err(), "writing to read-only dir should fail");
+
+        // Restore permissions for cleanup.
+        std::fs::set_permissions(parent, original_perms).unwrap();
+    }
+
+    // A subsequent edit should succeed (step was cleaned up, not left open).
+    let result = orchestrator.edit_file(EditFileArgs {
+        path: "target.txt".to_string(),
+        old_string: "original".to_string(),
+        new_string: "modified".to_string(),
+        replace_all: false,
+    });
+    assert!(result.is_ok(), "subsequent edit should succeed after error cleanup");
+    assert_eq!(
+        std::fs::read_to_string(working.path().join("target.txt")).unwrap(),
+        "modified"
+    );
+}
+
+// -----------------------------------------------------------------------
+// AO-18: new session places barrier when previous steps exist
+// -----------------------------------------------------------------------
+#[test]
+fn ao_18_session_boundary_barrier() {
+    let working = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+    let path_str = working.path().display().to_string();
+
+    // Session 1: write a file to create an undo step
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = make_args(working.path(), undo.path());
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
+        let _ = orch.session_start(make_start_payload(&path_str));
+
+        orch.write_file(WriteFileArgs {
+            path: "file.txt".to_string(),
+            content: "hello".to_string(),
+        })
+        .unwrap();
+        assert!(working.path().join("file.txt").exists());
+
+        let _ = orch.session_stop();
+    }
+
+    // Session 2: reuse same working + undo dirs
+    {
+        let (event_sender, mut rx) = mpsc::unbounded_channel();
+        let args = make_args(working.path(), undo.path());
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
+        let _ = orch.session_start(make_start_payload(&path_str));
+
+        // Should have received an ExternalModification event with a barrier
+        let mut got_barrier_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::ExternalModification {
+                barrier_id,
+                affected_paths: _,
+            } = event
+            {
+                assert!(barrier_id.is_some(), "barrier_id should be present");
+                got_barrier_event = true;
+            }
+        }
+        assert!(got_barrier_event, "expected ExternalModification event on session start");
+
+        // Rollback without force should fail (barrier blocks it)
+        let result = orch.undo(UndoArgs {
+            count: 1,
+            force: false,
+        });
+        assert!(result.is_err(), "rollback should be blocked by session boundary barrier");
+
+        // Rollback with force should succeed
+        let result = orch.undo(UndoArgs {
+            count: 1,
+            force: true,
+        });
+        assert!(result.is_ok(), "forced rollback should cross the barrier");
+        assert!(
+            !working.path().join("file.txt").exists(),
+            "file should be removed after forced rollback"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// AO-19: new session with no previous steps does NOT place a barrier
+// -----------------------------------------------------------------------
+#[test]
+fn ao_19_no_barrier_on_fresh_session() {
+    let (orchestrator, mut rx, working, _undo) = setup();
+    let _ = orchestrator.session_start(make_start_payload(&working.path().display().to_string()));
+
+    // Drain events — none should be ExternalModification
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, Event::ExternalModification { .. }) {
+            panic!("should not emit ExternalModification on a fresh session with no steps");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// AO-20: undo_subdir_name produces stable hashes
+// -----------------------------------------------------------------------
+#[test]
+fn ao_20_stable_undo_subdir_name() {
+    let dir = TempDir::new().unwrap();
+    let name1 = undo_subdir_name(dir.path());
+    let name2 = undo_subdir_name(dir.path());
+    assert_eq!(name1, name2, "same path should produce same hash");
+    assert_eq!(name1.len(), 16, "hash should be 16 hex chars");
+    assert!(
+        name1.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash should be hex: {name1}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// AO-21: reordered directories map to the same undo subdirs
+// -----------------------------------------------------------------------
+#[test]
+fn ao_21_reordered_dirs_stable_mapping() {
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let undo = TempDir::new().unwrap();
+
+    let hash_a = undo_subdir_name(dir_a.path());
+    let hash_b = undo_subdir_name(dir_b.path());
+    assert_ne!(hash_a, hash_b, "different dirs should have different hashes");
+
+    // Session 1: dirs in order [a, b]
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = CliArgs {
+            working_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
+            undo_dir: undo.path().to_path_buf(),
+            ..make_args(dir_a.path(), undo.path())
+        };
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
+        let payload = SessionStartPayload {
+            working_directories: vec![
+                WorkingDirectoryConfig { path: dir_a.path().display().to_string(), label: None },
+                WorkingDirectoryConfig { path: dir_b.path().display().to_string(), label: None },
+            ],
+            network_policy: "disabled".to_string(),
+            vm_mode: "ephemeral".to_string(),
+            protocol_version: None,
+        };
+        let _ = orch.session_start(payload);
+
+        // Write via MCP to create undo steps
+        orch.write_file(WriteFileArgs {
+            path: "marker.txt".to_string(),
+            content: "from_a".to_string(),
+        }).unwrap();
+        let _ = orch.session_stop();
+    }
+
+    // Verify undo data landed in the hash-named directory
+    assert!(undo.path().join(&hash_a).join("steps").exists());
+
+    // Session 2: dirs in reversed order [b, a] — undo data should still match
+    {
+        let (event_sender, _rx) = mpsc::unbounded_channel();
+        let args = CliArgs {
+            working_dirs: vec![dir_b.path().to_path_buf(), dir_a.path().to_path_buf()],
+            undo_dir: undo.path().to_path_buf(),
+            ..make_args(dir_b.path(), undo.path())
+        };
+        let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
+        let payload = SessionStartPayload {
+            working_directories: vec![
+                WorkingDirectoryConfig { path: dir_b.path().display().to_string(), label: None },
+                WorkingDirectoryConfig { path: dir_a.path().display().to_string(), label: None },
+            ],
+            network_policy: "disabled".to_string(),
+            vm_mode: "ephemeral".to_string(),
+            protocol_version: None,
+        };
+        let result = orch.session_start(payload);
+        assert!(result.is_ok(), "session with reordered dirs should succeed");
+
+        // dir_a's undo history should be found (barrier placed).
+        // dir_a is at index 1 in this session (reversed order).
+        let history = orch.undo_history(UndoHistoryPayload { directory: Some("1".to_string()) }).unwrap();
+        let steps = history["steps"].as_array().unwrap();
+        assert!(!steps.is_empty(), "should find previous undo steps for dir_a");
+    }
 }

@@ -52,6 +52,10 @@ where
         let mut lines = BufReader::new(reader).lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!(
+                "{{\"level\":\"debug\",\"component\":\"control_reader\",\"message\":\"vm message: {}\"}}",
+                line.chars().take(200).collect::<String>()
+            );
             match parse_vm_message(&line) {
                 Ok(msg) => {
                     handler.handle_vm_message(msg).await;
@@ -65,7 +69,6 @@ where
             }
         }
 
-        // Control channel closed
         let _ = event_sender.send(Event::Error {
             code: "control_channel_closed".to_string(),
             message: "VM control channel disconnected".to_string(),

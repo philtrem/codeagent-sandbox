@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use codeagent_mcp::protocol::{
-    EditFileArgs, ExecuteCommandArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
+    BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
     JsonRpcNotification, ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
@@ -19,7 +19,7 @@ use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
 struct StubMcpHandler;
 
 impl McpHandler for StubMcpHandler {
-    fn execute_command(&self, args: ExecuteCommandArgs) -> Result<Value, McpError> {
+    fn bash(&self, args: BashArgs) -> Result<Value, McpError> {
         Ok(json!({
             "exit_code": 0,
             "stdout": format!("executed: {}", args.command),
@@ -61,6 +61,10 @@ impl McpHandler for StubMcpHandler {
 
     fn get_session_status(&self) -> Result<Value, McpError> {
         Ok(json!({ "state": "idle" }))
+    }
+
+    fn discard_undo_history(&self, _args: DiscardUndoHistoryArgs) -> Result<Value, McpError> {
+        Ok(json!({}))
     }
 }
 
@@ -280,25 +284,26 @@ async fn mc01_tools_list_returns_seven_tools() {
 
     let resp = harness.send_request(2, "tools/list", json!({})).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"execute_command"));
+    assert!(names.contains(&"Bash"));
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
     assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"undo"));
     assert!(names.contains(&"get_undo_history"));
+    assert!(names.contains(&"discard_undo_history"));
     assert!(names.contains(&"get_working_directory"));
     assert!(names.contains(&"get_session_status"));
 }
 
 // ===========================================================================
-// MC-02: execute_command
+// MC-02: Bash tool
 // ===========================================================================
 
 #[tokio::test]
-async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
+async fn mc02_bash_returns_exit_code_stdout_stderr() {
     let mut harness = McpTestHarness::new();
     harness.initialize().await;
 
@@ -307,7 +312,7 @@ async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
             10,
             "tools/call",
             json!({
-                "name": "execute_command",
+                "name": "Bash",
                 "arguments": { "command": "echo hello" }
             }),
         )
@@ -322,7 +327,7 @@ async fn mc02_execute_command_returns_exit_code_stdout_stderr() {
 }
 
 #[tokio::test]
-async fn mc02_execute_command_missing_command_returns_invalid_params() {
+async fn mc02_bash_missing_command_returns_invalid_params() {
     let mut harness = McpTestHarness::new();
     harness.initialize().await;
 
@@ -331,7 +336,7 @@ async fn mc02_execute_command_missing_command_returns_invalid_params() {
             11,
             "tools/call",
             json!({
-                "name": "execute_command",
+                "name": "Bash",
                 "arguments": {}
             }),
         )
@@ -483,7 +488,7 @@ impl UndoMcpHandler {
 }
 
 impl McpHandler for UndoMcpHandler {
-    fn execute_command(&self, _args: ExecuteCommandArgs) -> Result<Value, McpError> {
+    fn bash(&self, _args: BashArgs) -> Result<Value, McpError> {
         Ok(json!({ "exit_code": 0, "stdout": "", "stderr": "" }))
     }
 
@@ -600,11 +605,16 @@ impl McpHandler for UndoMcpHandler {
     fn get_session_status(&self) -> Result<Value, McpError> {
         Ok(json!({ "state": "active" }))
     }
+
+    fn discard_undo_history(&self, _args: DiscardUndoHistoryArgs) -> Result<Value, McpError> {
+        self.interceptor.discard().map_err(to_internal)?;
+        Ok(json!({}))
+    }
 }
 
 /// Create an UndoInterceptor + handler pair for a TempWorkspace.
 fn make_undo_harness(ws: &TempWorkspace) -> (Arc<UndoInterceptor>, UndoMcpHandler) {
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));
@@ -933,7 +943,7 @@ async fn mc06_multiple_notifications_delivered() {
 async fn mc08_concurrent_operations_share_undo_state() {
     let ws = TempWorkspace::new();
 
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));
@@ -992,7 +1002,7 @@ async fn mc08_concurrent_operations_share_undo_state() {
 async fn mc08_concurrent_write_and_query_no_deadlock() {
     let ws = TempWorkspace::new();
 
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));

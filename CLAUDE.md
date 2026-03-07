@@ -13,7 +13,7 @@
 
 ## Core Principles
 - **Verify before deleting**: Before deleting any files or folders, always verify they are not referenced elsewhere in the codebase using grep or other search tools. Never assume a file is unused.
-- **Verify assumptions**: Before acting on any assumption about the codebase (API signatures, available methods, file locations, type constraints, etc.), read the relevant source. Use grep, glob, or file reads to confirm. Do not assume — check.
+- **Verify assumptions**: Before acting on any assumption about the codebase (API signatures, available methods, file locations, type constraints, etc.), read the relevant source. Use grep, glob, or file reads to confirm. And write and run tests. Do not assume — check.
 - **Verify with builds and tests**: After making changes, build the affected project and run existing tests to confirm nothing is broken. When the correct behaviour of a piece of logic is non-obvious, write a test to verify it — including temporary/throwaway tests if that is the fastest way to confirm an assumption. Remove temporary tests once they have served their purpose.
 
 ## Code Documentation
@@ -23,6 +23,12 @@
 ## Variable Naming
 - Use clear, descriptive names for all variables.
 - Avoid obscure abbreviations (e.g., use `isCollection` instead of `isColl`).
+
+## Constants & Configuration
+- **No hard-coded values**: Use named constants or derive values from existing configuration
+  rather than embedding magic numbers or durations directly in logic. If a value depends on
+  another configurable parameter, compute it from that parameter rather than hard-coding a
+  value that assumes a specific default.
 
 ## Workflow
 - **Write plans to a file before implementing**: For non-trivial tasks, write the plan to a
@@ -67,16 +73,17 @@ xtask/                              # Development task runner (NOT a workspace m
   Cargo.toml                       #   standalone crate, depends on clap
   src/main.rs                      #   CLI dispatch: build-guest subcommand
 guest/                              # Guest VM image build files
-  Dockerfile                       #   multi-stage: compile shim (musl), assemble initramfs
-  init.sh                          #   /init script for guest VM boot (mount + start shim)
+  Dockerfile                       #   multi-stage: compile shim + p9proxy (musl), assemble initramfs
+  init.sh                          #   /init script for guest VM boot (virtiofs or p9proxy mount,
+                                   #   sandbox user creation, start shim)
 crates/
   common/                          # codeagent-common — shared types and errors
-    src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
-                                   #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
-                                   #   SafeguardDecision, ExternalModificationPolicy, SymlinkPolicy,
-                                   #   RollbackResult, ResourceLimitsConfig, CodeAgentError (incl.
-                                   #   RollbackBlocked, SafeguardDenied, StepUnprotected,
-                                   #   UndoDisabled), Result<T>
+    src/lib.rs                     #   StepId, StepManager trait, StepType, StepInfo, BarrierId,
+                                   #   BarrierInfo, SafeguardId, SafeguardKind, SafeguardConfig,
+                                   #   SafeguardEvent, SafeguardDecision, ExternalModificationPolicy,
+                                   #   SymlinkPolicy, RollbackResult, ResourceLimitsConfig,
+                                   #   CodeAgentError (incl. RollbackBlocked, SafeguardDenied,
+                                   #   StepUnprotected, UndoDisabled), Result<T>
   control/                         # codeagent-control — control channel protocol + handler
     src/
       lib.rs                       #   module declarations + re-exports
@@ -87,7 +94,7 @@ crates/
       parser.rs                    #   JSONL parsing with 1MB size limit
       state_machine.rs             #   ControlChannelState, ControlEvent, PendingCommand,
                                    #   ActiveCommand — validates message sequences
-      handler.rs                   #   StepManager trait, QuiescenceConfig, HandlerEvent,
+      handler.rs                   #   QuiescenceConfig, HandlerEvent,
                                    #   ControlChannelHandler (quiescence + ambient steps)
       in_flight.rs                 #   InFlightTracker (Arc<AtomicUsize> + Notify)
     tests/
@@ -98,17 +105,17 @@ crates/
       lib.rs                       #   module declarations
       write_interceptor.rs         #   WriteInterceptor trait (13 methods)
       safeguard.rs                 #   SafeguardHandler trait, SafeguardTracker (per-step counters)
-      step_tracker.rs              #   StepTracker (Mutex-based step lifecycle, incl. cancel_step)
       preimage.rs                  #   path_hash, PreimageMetadata, capture/restore preimages
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
-      barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
-      resource_limits.rs             #   calculate_step_size, calculate_total_log_size, evict_if_needed
-      gitignore.rs                 #   GitignoreFilter (opt-in .gitignore-aware preimage skipping)
-      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
+      resource_limits.rs           #   calculate_step_size, calculate_total_log_size
+      gitignore.rs                 #   build_gitignore() — opt-in .gitignore-aware preimage skipping
+      history.rs                   #   read_undo_history() — standalone disk reader (no UndoInterceptor
+                                   #   instance needed), FileDetail, StepDetail, UndoHistoryData
+      undo_interceptor.rs          #   UndoConfig, UndoInterceptor (impl StepManager + WriteInterceptor),
+                                   #   RecoveryInfo, recover(), per-step barrier storage (BarrierEntry),
                                    #   notify_external_modification(), barriers(), rollback(count, force),
-                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
-                                   #   with_resource_limits(), with_gitignore(), with_symlink_policy(),
+                                   #   rollback_current_step(), safeguard checks in pre_*, evict_if_needed(),
                                    #   discard(), is_undo_disabled(), version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
@@ -192,8 +199,9 @@ crates/
                                    #   handle_remove, handle_flush, qid_from_path (FNV-1a hash)
         walk.rs                    #   handle_walk (path traversal + containment), is_contained(),
                                    #   logical_contains(), resolve_logical()
-        file.rs                    #   handle_lopen, handle_lcreate, handle_read, handle_write,
-                                   #   handle_fsync, open_with_flags (Linux O_* → Rust OpenOptions)
+        file.rs                    #   handle_lopen (skips open for dirs on Windows), handle_lcreate,
+                                   #   handle_read, handle_write, handle_fsync,
+                                   #   open_with_flags (Linux O_* → Rust OpenOptions)
         dir.rs                     #   handle_readdir (qid+offset+type+name packing), handle_mkdir,
                                    #   handle_unlinkat, handle_renameat, handle_statfs
         attr.rs                    #   handle_getattr, handle_setattr, FileAttributes struct
@@ -210,34 +218,55 @@ crates/
       wire_protocol.rs             #   P9-01..P9-05 wire format round-trip tests (61 tests)
       server_operations.rs         #   SO/WK/RO/WR/LK/RB integration tests (47 tests)
       windows_normalization.rs     #   WN-01..WN-07 Windows normalization tests (8 tests, most cfg(windows))
+  p9proxy/                          # codeagent-p9proxy — guest-side 9P proxy for virtio-serial
+    Cargo.toml                     #   [[bin]] name = "p9proxy", depends on libc (Unix only)
+    src/
+      main.rs                      #   bridges virtio-serial port to Unix socketpair for kernel
+                                   #   trans=fd 9P transport; forks before mount (child proxies
+                                   #   data, parent calls mount then exits); bidirectional copy
+                                   #   between socket and port via two threads
   sandbox/                          # codeagent-sandbox — host-side agent binary ("sandbox")
-    Cargo.toml                     #   [[bin]] name = "sandbox", depends on which (binary resolution)
+    Cargo.toml                     #   [[bin]] name = "sandbox", depends on which, toml, dirs
     src/
       main.rs                      #   entry point: parse CLI → branch on --protocol (stdio|mcp)
       lib.rs                       #   module declarations + re-exports
       cli.rs                       #   CliArgs (clap derive): --working-dir, --undo-dir, --vm-mode,
                                    #   --protocol, --log-level, --qemu-binary, --kernel-path,
                                    #   --initrd-path, --rootfs-path, --memory-mb, --cpus,
-                                   #   --virtiofsd-binary
-      error.rs                     #   AgentError enum (10 variants: SessionNotActive,
+                                   #   --virtiofsd-binary, --config-file
+      config.rs                    #   SandboxTomlConfig (command_classifier + file_watcher sections),
+                                   #   FileWatcherConfig (enabled, debounce_ms, recent_write_ttl_ms,
+                                   #   exclude_patterns), load_config(), default_config_dir/file_path
+      command_classifier.rs        #   CommandClassifierConfig (serde, 9 Vec<String> fields),
+                                   #   CommandClassifier (HashSet-based O(1) lookup), classify(),
+                                   #   sanitize(); configurable allowlists for read-only/write/
+                                   #   destructive commands + git/cargo/npm subcommand lists
+      error.rs                     #   AgentError enum (11 variants: SessionNotActive,
                                    #   SessionAlreadyActive, InvalidWorkingDir, QemuUnavailable,
                                    #   QemuSpawnFailed, ControlChannelFailed, VirtioFsFailed,
-                                   #   NotImplemented, Undo, Io)
+                                   #   FileWatcherFailed, NotImplemented, Undo, Io)
       session.rs                   #   SessionState enum (Idle | Active), Session struct with
                                    #   optional VM fields (qemu_process, fs_backends,
-                                   #   in_flight_tracker, control_writer, task handles, socket_dir)
+                                   #   in_flight_tracker, control_writer, task handles, socket_dir),
+                                   #   fs_watcher_handle, recent_writes
       orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
                                    #   McpHandler (10 methods), session lifecycle, undo delegation,
                                    #   direct host fs access, safeguard confirm/configure,
                                    #   launch_vm() for QEMU + virtiofsd + control channel setup,
                                    #   agent_execute sends commands through control channel when VM
-                                   #   available, fs_status reports backend/VM info
-      step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
+                                   #   available, fs_status reports backend/VM info; holds
+                                   #   CommandClassifier for configurable command classification
       safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
       event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
       control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
                                    #   spawn_control_reader (socket reader → ControlChannelHandler),
                                    #   serialize_host_message
+      recent_writes.rs             #   RecentBackendWrites (Mutex<HashMap<PathBuf, Instant>> + TTL),
+                                   #   WriteTrackingInterceptor (WriteInterceptor decorator that
+                                   #   records mutated paths for watcher suppression)
+      fs_watcher.rs                #   FsWatcherConfig, spawn_fs_watcher() — notify crate v8,
+                                   #   debounced event processing, RecentBackendWrites filtering,
+                                   #   exclude patterns, undo dir filtering, barrier creation
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns external
                                    #   virtiofsd process (no interception),
@@ -250,7 +279,9 @@ crates/
                                    #   virtconsole for 9P transport), QemuProcess (spawn with socket
                                    #   readiness polling, stop, pid)
     tests/
-      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (28 tests)
+      orchestrator.rs              #   AO-01..AO-15 + MCP-01..MCP-13 integration tests (40 tests)
+      undo_history.rs              #   UH-01..UH-14 undo history integration tests (14 tests)
+      fs_watcher.rs                #   FW-01..FW-12 filesystem watcher integration tests (12 tests)
   shim/                             # codeagent-shim — VM-side command executor binary
     Cargo.toml                     #   [[bin]] name = "shim", depends on codeagent-control
     src/
@@ -259,7 +290,8 @@ crates/
                                    #   main loop, message dispatch, cancel_all, reap_completed
       error.rs                     #   ShimError enum (Io, Json, ChannelClosed, CommandNotFound,
                                    #   MalformedMessage)
-      executor.rs                  #   spawn_command (sh -c, piped output, process groups on Unix),
+      executor.rs                  #   spawn_command (sh -c, piped output, process groups on Unix,
+                                   #   drops to uid/gid 1000 via setuid/setgid in pre_exec),
                                    #   cancel_command (SIGTERM/SIGKILL on Unix, child.kill on
                                    #   Windows), stream_output (buffered interval-based flushing),
                                    #   CommandHandle
@@ -359,8 +391,9 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
     vite-env.d.ts                  #   Vite type declarations
     lib/
       types.ts                     #   TypeScript types mirroring Rust SandboxConfig, VmStatus,
-                                   #   ClaudeConfigInfo, McpServerEntry, UndoStepDetail,
-                                   #   BarrierDetail, UndoHistoryData, defaultConfig()
+                                   #   ClaudeConfigInfo, McpServerEntry, CommandClassifierSection,
+                                   #   UndoStepDetail, BarrierDetail, UndoHistoryData,
+                                   #   defaultConfig(), defaultCommandClassifier()
     hooks/
       useSandboxConfig.ts          #   Zustand store: config load/save with 500ms debounced auto-save,
                                    #   toast on save errors
@@ -373,8 +406,9 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
       Toast.tsx                    #   Global toast container (multi-variant, stacked, fixed bottom-right)
       tabs/
         SandboxConfig.tsx          #   Tab 1: collapsible sections (Working Dir, Resource Limits,
-                                   #   Safeguards, Advanced) with DirPicker (validates via backend),
-                                   #   NumberInput (range display), Toggle, Select
+                                   #   Safeguards, Advanced, Command Classification) with DirPicker
+                                   #   (validates via backend), NumberInput, Toggle, Select,
+                                   #   CommandListEditor (tag-style add/remove for command lists)
         VmManager.tsx              #   Tab 2: status panel, Start/Stop/Restart, memory/CPU sliders,
                                    #   file pickers for QEMU/kernel/initrd, auto-start + persist toggles
         ClaudeIntegration.tsx      #   Tab 3: Claude Desktop + Code panels side-by-side, MCP server
@@ -383,7 +417,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
                                    #   barrier indicators, rollback with confirmation dialog + force option
   src-tauri/                        # Tauri Rust backend (standalone Cargo.toml)
     Cargo.toml                     #   deps: tauri 2, tauri-plugin-{dialog,shell,process,updater},
-                                   #   serde, serde_json, toml, dirs, which
+                                   #   serde, serde_json, toml, dirs, which,
+                                   #   codeagent-interceptor (path), codeagent-common (path)
     build.rs                       #   tauri_build::build()
     tauri.conf.json                #   window 1024x768, identifier com.codeagent.desktop, bundle config,
                                    #   updater plugin config, NSIS/macOS/deb/AppImage installer settings
@@ -395,8 +430,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
       main.rs                      #   entry point (calls lib::run)
       lib.rs                       #   plugin registration (incl. updater) + invoke_handler with all cmds
       config.rs                    #   SandboxConfig (9 sections: sandbox, vm, undo, safeguards,
-                                   #   symlinks, external_modifications, gitignore, claude_desktop,
-                                   #   claude_code) — serde Serialize/Deserialize + Default
+                                   #   symlinks, external_modifications, gitignore, claude_code,
+                                   #   command_classifier) — serde Serialize/Deserialize + Default
       paths.rs                     #   config_dir(), config_file_path(), pid_file_path() — platform paths
       commands/
         mod.rs                     #   re-exports: claude, config, system, undo, vm
@@ -405,7 +440,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
         vm.rs                      #   VmState (separate Mutex for process/stdin/stdout), VmStatus,
                                    #   start_vm (spawn + extract I/O handles), stop_vm (kill + cleanup),
                                    #   get_vm_status (try_wait), send_mcp_request (JSON-RPC passthrough)
-        undo.rs                    #   read_undo_history (scans steps/ manifests + barriers.json)
+        undo.rs                    #   read_undo_history (delegates to codeagent_interceptor::history),
+                                   #   clear_undo_history
         claude.rs                  #   ClaudeConfigInfo, McpServerEntry, detect/write/remove for
                                    #   Claude Desktop + Code configs, generate_claude_code_cli_command
 ```
@@ -430,13 +466,15 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   {undo_dir}/wal/in_progress/   # active step (promoted to steps/ on close)
   {undo_dir}/steps/{id}/        # completed steps
     manifest.json
+    barriers.json                 # optional, per-step barrier entries
     preimages/{hash}.dat          # zstd level 3 compressed file contents
     preimages/{hash}.meta.json    # PreimageMetadata (path, type, mode, mtime, etc.)
   ```
-- **Undo barriers**: Barriers are placed "after" a specific completed step. A barrier with
+- **Undo barriers**: Barriers are stored per-step in `steps/{id}/barriers.json`. A barrier with
   `after_step_id = S` blocks rollback of step S (because the external modification happened
   after S and rolling back S would destroy it). `rollback(count, force)` checks barriers;
-  `force: true` crosses and removes them. Barriers persist in `{undo_dir}/barriers.json`.
+  `force: true` crosses and removes them. Barrier IDs are synthesized as
+  `step_id * 1000 + entry_index`.
 - **Safeguards**: Configurable thresholds (delete count, overwrite-large-file, rename-over-existing)
   checked in `pre_*` methods. On trigger, calls `SafeguardHandler::on_safeguard_triggered()` which
   blocks until Allow/Deny. On Deny, `rollback_current_step()` undoes all operations in the current
@@ -448,12 +486,12 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   (`version` file ≠ `CURRENT_VERSION`) disables undo; `discard()` re-enables it.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
-- **Gitignore filtering**: Opt-in via `UndoInterceptor::with_gitignore()`. When enabled, the
+- **Gitignore filtering**: Opt-in via `UndoConfig { gitignore: true, .. }`. When enabled, the
   `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
   Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
   and `capture_tree_preimages` — no preimage, no manifest entry.
 - **Symlink policy**: Three-state `SymlinkPolicy` enum (`Ignore`, `ReadOnly`, `ReadWrite`),
-  default `Ignore`. Configured via `UndoInterceptor::with_symlink_policy()`. `Ignore` skips
+  default `Ignore`. Configured via `UndoConfig { symlink_policy: ..., .. }`. `Ignore` skips
   symlinks in `ensure_preimage`, `record_creation`, `capture_tree_preimages`, `post_symlink`,
   and `pre_link`. `ReadOnly` allows preimage capture (read-side) but skips symlink restore on
   rollback (write-side). `ReadWrite` enables full symlink support. Write is conditional on
@@ -505,9 +543,16 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   `getdents64`) have macOS equivalents or `ENOSYS` fallbacks. The fork is excluded from workspace
   members (Unix-only) but available via `[patch.crates-io]` — only compiled when a Unix dependency
   chain requires it.
-- **Dependencies** (all permissively licensed): blake3, filetime, ignore, serde (+derive),
-  serde_json, tempfile, thiserror, tokio (rt, macros, sync, time, io-util), xattr (Linux only),
-  zstd, chrono (+serde), which (binary resolution for QEMU/virtiofsd). **Unix-only** (virtiofs
+- **Command classification**: The `CommandClassifier` classifies shell commands into ReadOnly,
+  Write, or Destructive categories. Allowlists (read-only, write, destructive commands + git/
+  cargo/npm subcommand lists) are configurable via `CommandClassifierConfig` loaded from
+  `codeagent.toml`. Sanitization checks (fork bombs, `sudo`, device access, shell expansion
+  attacks) are hardcoded and not user-configurable — these are security-critical.
+- **Dependencies** (all permissively licensed): blake3, filetime, ignore, notify (v8, CC0,
+  cross-platform filesystem watching), serde (+derive), serde_json, tempfile, thiserror,
+  tokio (rt, macros, sync, time, io-util), xattr (Linux only), zstd, chrono (+serde),
+  which (binary resolution for QEMU/virtiofsd), toml (config loading),
+  dirs (platform config directory). **Unix-only** (virtiofs
   backend): virtiofsd (Apache-2.0/BSD-3, via local fork), vhost-user-backend, vhost, vm-memory,
   log; vmm-sys-util (via local fork with macOS support). **Dev-only**: proptest (model-based
   testing), criterion (performance benchmarks, with html_reports).
@@ -545,7 +590,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `UndoInterceptor::notify_external_modification()` — creates barriers under `Barrier` policy
   - `UndoInterceptor::rollback(count, force)` — checks barriers, blocks or force-crosses
   - `UndoInterceptor::barriers()` — query all barriers
-  - `UndoInterceptor::with_policy()` — constructor with configurable policy
+  - `UndoConfig::policy` — configurable external modification policy
   - Integration tests EB-01..EB-06, EB-08 covering: barrier creation, rollback blocking,
     force rollback, barrier querying, internal writes no-barrier, multiple barriers,
     warn policy (7 tests)
@@ -556,8 +601,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `SafeguardHandler` trait — synchronous blocking callback for safeguard decisions
   - `SafeguardTracker` — per-step counters (delete count, overwrite, rename-over), threshold checks,
     allowed-kind tracking to prevent re-triggering after Allow
-  - `StepTracker::cancel_step()` — clears active step without adding to completed list
-  - `UndoInterceptor::with_safeguard()` — constructor with configurable safeguard config + handler
+  - `UndoConfig::safeguard_config` + `UndoConfig::safeguard_handler` — configurable safeguard
   - `UndoInterceptor::rollback_current_step()` — mid-step rollback on deny (writes manifest,
     rolls back WAL, cancels step)
   - Safeguard checks in `pre_unlink` (delete threshold), `pre_write`/`pre_open_trunc` (overwrite
@@ -581,9 +625,9 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `StepManifest::unprotected` field marks steps that exceeded single-step size limit
   - Atomic preimage writes (temp-file-then-rename) for `.meta.json` and `.dat` files
   - `capture_preimage` returns `(PreimageMetadata, u64)` — includes compressed data size
-  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size`, `evict_if_needed`
-    (FIFO eviction by step count and log size)
-  - `UndoInterceptor::with_resource_limits()` — constructor with limits config
+  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size` (size utilities)
+  - `UndoInterceptor::evict_if_needed()` — FIFO eviction by step count and log size
+  - `UndoConfig::resource_limits` — configurable limits
   - `close_step` returns `Result<Vec<StepId>>` — list of evicted step IDs
   - Unprotected step tracking: skips preimage capture after threshold exceeded, blocks rollback
   - Version mismatch detection on construction, `is_undo_disabled()`, `discard()` to re-enable
@@ -768,13 +812,20 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - Filesystem operations: direct host filesystem access (no VM needed)
   - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
   - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
-  - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
+  - `UndoInterceptor` implements `StepManager` directly (no adapter needed)
   - MCP `write_file`/`edit_file`: opens synthetic API step on interceptor, writes file, closes step
   - MCP `glob`: pattern matching via `glob` crate, results sorted by mtime (newest first)
   - MCP `grep`: regex search via `regex` + `walkdir` crates, 3 output modes (files_with_matches, content, count)
   - `main.rs`: `--protocol stdio` (default) runs StdioServer; `--protocol mcp` runs McpServer on stdin/stdout
+  - MCP Bash tool: command sanitization (fork bombs, sudo, device access) + configurable
+    classification (read-only/write/destructive) via `CommandClassifier` with `HashSet` lookup
+  - `config.rs`: `SandboxTomlConfig` with `load_config()` — loads from `--config-file` arg
+    or platform default (`{config_dir}/CodeAgent/codeagent.toml`), falls back to built-in defaults
   - CLI unit tests (5 tests) + QC-01..QC-10 QEMU config tests (10 tests) +
-    integration tests AO-01..AO-15 + MCP-01..MCP-13 (28 tests) = 43 total tests
+    command classifier config tests (10 tests) + TOML config loading tests (5 tests) +
+    integration tests AO-01..AO-15 + MCP-01..MCP-13 (40 tests) +
+    UH-01..UH-14 undo history tests (14 tests) +
+    FW-01..FW-12 filesystem watcher tests (12 tests) = 166 total tests
 
 - **VM-Side Shim** — complete
   - `codeagent-shim` crate: lightweight binary that runs inside the guest VM
@@ -785,7 +836,8 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `Shim` struct: tracks running commands in `HashMap<u64, CommandHandle>`,
     message dispatch, `reap_completed()`, `cancel_all()` on shutdown
   - `executor`: `spawn_command()` — `sh -c <command>` with piped stdout/stderr,
-    process groups on Unix (`setpgid`), sends `StepStarted` → `Output` → `StepCompleted`
+    process groups on Unix (`setpgid`), drops to uid/gid 1000 via setuid/setgid in
+    `pre_exec`, sends `StepStarted` → `Output` → `StepCompleted`
   - `cancel_command()`: `SIGTERM` → 5s wait → `SIGKILL` on Unix (process group);
     `child.kill()` on non-Unix; aborts output reader tasks on cancel
   - `stream_output()`: buffered interval-based flushing (`OutputBufferConfig`:
@@ -864,10 +916,11 @@ integration code are built. The remaining work is:
    operations + 8 Windows normalization + 50 unit).~~
 6. ~~**Guest image build** (`cargo xtask build-guest`) — complete. Docker multi-stage build
    (Rust Alpine builder + Alpine assembler) produces vmlinuz (Alpine linux-virt kernel) +
-   initrd.img (busybox-static + shim binary + virtio kernel modules + init script). The init
-   script auto-detects virtiofs (Unix hosts) or 9P-over-serial (Windows hosts) and mounts
-   working directories before starting the shim. Xtask crate at `xtask/` (standalone, not a
-   workspace member) provides the CLI. Requires Docker with BuildKit.~~
+   initrd.img (busybox-static + shim + p9proxy binaries + virtio kernel modules + init script).
+   The init script auto-detects virtiofs (Unix hosts) or 9P-over-virtio-serial via p9proxy
+   (Windows hosts), creates an unprivileged sandbox user (uid 1000), and mounts working
+   directories before starting the shim. Xtask crate at `xtask/` (standalone, not a workspace
+   member) provides the CLI. Requires Docker with BuildKit.~~
 7. ~~**macOS virtiofs support** (Phase 2) — complete. Vendored vmm-sys-util and virtiofsd forks
    with macOS compat layers. `InterceptedBackend` now works on all Unix platforms (Linux + macOS).
    The virtiofsd fork's `src/compat/` module handles all Linux→macOS API translations
@@ -877,6 +930,29 @@ integration code are built. The remaining work is:
 `crates/virtiofs-backend/tests/filesystem_backend.rs` (Linux only, all `#[ignore]`).
 They verify that POSIX syscalls arriving via FUSE trigger the correct `WriteInterceptor`
 method calls. Will become runnable when QEMU/KVM infrastructure is available in CI.
+
+- **External Modification Detection (Filesystem Watcher)** — complete
+  - `notify` crate v8 for cross-platform filesystem watching
+  - `RecentBackendWrites`: `Mutex<HashMap<PathBuf, Instant>>` with configurable TTL (default 5s)
+    for tracking sandbox-originated writes. Normalized path comparison (forward slashes,
+    case-insensitive on Windows).
+  - `WriteTrackingInterceptor`: decorator over `Arc<dyn WriteInterceptor>` that records
+    mutated paths on all 13 `WriteInterceptor` methods. Injected between `UndoInterceptor`
+    and filesystem backends (InterceptedBackend/P9Backend) at the sandbox level.
+  - `FsWatcherConfig`: debounce duration (default 2s), exclude patterns, enabled flag.
+  - `spawn_fs_watcher()`: creates `notify::RecommendedWatcher`, bridges sync callbacks to
+    tokio via `spawn_blocking`, debounced event accumulation, filters against
+    `RecentBackendWrites` + undo dir prefixes + configurable exclude patterns, groups by
+    working directory, calls `interceptor.notify_external_modification()`, emits
+    `Event::ExternalModification`.
+  - `FileWatcherConfig` in `SandboxTomlConfig` for TOML configuration (enabled, debounce_ms,
+    recent_write_ttl_ms, exclude_patterns).
+  - Watcher failure is non-fatal: emits `Event::Warning` and continues without watching.
+  - MCP `write_file`/`edit_file` record paths to `RecentBackendWrites` after writing.
+  - Default exclude patterns: `.git/objects`, `.git/logs`, `.git/refs`, `node_modules`.
+  - 12 integration tests (FW-01..FW-12) covering: external detection, backend suppression,
+    disabled watcher, exclude patterns, undo dir filtering, no-steps guard, TTL expiry,
+    multi-dir grouping, config deserialization, defaults, WriteTrackingInterceptor recording.
 
 - **Desktop App (Phases 1-4)** — complete
   - Tauri v2 + React 19 + TypeScript + Tailwind CSS 4 + Zustand stack in `desktop/`
@@ -923,7 +999,7 @@ all are blocked on components that don't exist. Adapt each when its target compo
 ### Build & Test Commands
 ```sh
 cargo check --workspace          # type-check
-cargo test --workspace           # run all tests (~554 on Windows, ~557 on Linux; 22 E2E+shim + 16 FB ignored)
+cargo test --workspace           # run all tests (~687 on Windows; 24 E2E+shim+FB ignored)
 cargo clippy --workspace --tests # lint (must be warning-free)
 cargo test -p codeagent-interceptor --test undo_interceptor    # UI integration tests only
 cargo test -p codeagent-interceptor --test wal_crash_recovery  # CR integration tests only
@@ -941,8 +1017,10 @@ cargo test -p codeagent-p9                                                 # p9 
 cargo test -p codeagent-p9 --test wire_protocol                            # P9 wire format tests only (61 tests)
 cargo test -p codeagent-p9 --test server_operations                        # P9 server operation tests only (47 tests)
 cargo test -p codeagent-p9 --test windows_normalization                    # P9 Windows normalization tests only (8 tests)
-cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC tests (43 tests)
-cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (28 tests)
+cargo test -p codeagent-sandbox                                        # sandbox orchestrator + CLI + QC + classifier + config + watcher + undo history tests (166 tests)
+cargo test -p codeagent-sandbox --test orchestrator                    # AO/MCP integration tests only (40 tests)
+cargo test -p codeagent-sandbox --test undo_history                    # UH undo history integration tests only (14 tests)
+cargo test -p codeagent-sandbox --test fs_watcher                      # FW filesystem watcher tests only (12 tests)
 cargo test -p codeagent-shim                                               # shim tests (8 tests, 1 ignored on Windows)
 cargo test -p codeagent-shim --test shim_integration                       # SH integration tests only
 cargo test -p codeagent-virtiofs-backend                                   # virtiofs-backend tests (16 unit + 16 ignored L3 on Linux)

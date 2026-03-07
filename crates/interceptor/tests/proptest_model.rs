@@ -322,7 +322,7 @@ proptest! {
     #[test]
     fn undo_model(plan in test_plan_strategy()) {
         let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-        let interceptor = UndoInterceptor::new(
+        let interceptor = UndoInterceptor::new_default(
             ws.working_dir.clone(),
             ws.undo_dir.clone(),
         );
@@ -356,7 +356,7 @@ proptest! {
     #[test]
     fn undo_model_multi_step_rollback(plan in multi_step_plan_strategy()) {
         let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-        let interceptor = UndoInterceptor::new(
+        let interceptor = UndoInterceptor::new_default(
             ws.working_dir.clone(),
             ws.undo_dir.clone(),
         );

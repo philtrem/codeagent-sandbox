@@ -3,7 +3,7 @@ use std::path::Path;
 
 use codeagent_common::SymlinkPolicy;
 use codeagent_interceptor::manifest::StepManifest;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_test_support::workspace::TempWorkspace;
 
@@ -48,10 +48,13 @@ fn sy_01_ignore_policy_post_symlink_is_noop() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::Ignore,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::Ignore,
+            ..Default::default()
+        },
     );
 
     interceptor.open_step(1).unwrap();
@@ -59,11 +62,9 @@ fn sy_01_ignore_policy_post_symlink_is_noop() {
     interceptor.post_symlink(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    let manifest = read_step_manifest(&ws, 1);
-    assert!(
-        manifest.entries.is_empty(),
-        "Ignore policy: post_symlink should not create manifest entries"
-    );
+    // Empty step is discarded — no step directory on disk, no ID consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
 }
 
 // ---------------------------------------------------------------------------
@@ -75,10 +76,13 @@ fn sy_02_ignore_policy_pre_link_is_noop() {
     let target = ws.working_dir.join("target.txt");
     fs::write(&target, "content").unwrap();
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::Ignore,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::Ignore,
+            ..Default::default()
+        },
     );
 
     interceptor.open_step(1).unwrap();
@@ -87,11 +91,9 @@ fn sy_02_ignore_policy_pre_link_is_noop() {
     interceptor.pre_link(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    let manifest = read_step_manifest(&ws, 1);
-    assert!(
-        manifest.entries.is_empty(),
-        "Ignore policy: pre_link should not capture preimage for link target"
-    );
+    // Empty step is discarded — no step directory on disk, no ID consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
 }
 
 // ---------------------------------------------------------------------------
@@ -112,10 +114,13 @@ fn sy_03_ignore_policy_symlink_skipped_in_tree_delete() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::Ignore,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::Ignore,
+            ..Default::default()
+        },
     );
     let ops = OperationApplier::new(&interceptor);
 
@@ -150,10 +155,13 @@ fn sy_04_read_only_policy_symlink_preimage_captured() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::ReadOnly,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::ReadOnly,
+            ..Default::default()
+        },
     );
     let ops = OperationApplier::new(&interceptor);
 
@@ -184,10 +192,13 @@ fn sy_05_read_only_policy_rollback_skips_symlink_restore() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::ReadOnly,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::ReadOnly,
+            ..Default::default()
+        },
     );
     let ops = OperationApplier::new(&interceptor);
 
@@ -222,10 +233,13 @@ fn sy_06_read_write_policy_full_symlink_round_trip() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::ReadWrite,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::ReadWrite,
+            ..Default::default()
+        },
     );
     let ops = OperationApplier::new(&interceptor);
 
@@ -267,17 +281,15 @@ fn sy_07_default_policy_is_ignore() {
     }
 
     // Default constructor — should use Ignore policy
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
 
     interceptor.open_step(1).unwrap();
     interceptor.post_symlink(&target, &link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    let manifest = read_step_manifest(&ws, 1);
-    assert!(
-        manifest.entries.is_empty(),
-        "default policy (Ignore): post_symlink should be a no-op"
-    );
+    // Empty step is discarded — no step directory on disk, no ID consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
 }
 
 // ---------------------------------------------------------------------------
@@ -295,10 +307,13 @@ fn sy_08_ignore_policy_ensure_preimage_skips_symlinks() {
         return;
     }
 
-    let interceptor = UndoInterceptor::with_symlink_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        SymlinkPolicy::Ignore,
+        UndoConfig {
+            symlink_policy: SymlinkPolicy::Ignore,
+            ..Default::default()
+        },
     );
 
     interceptor.open_step(1).unwrap();
@@ -306,9 +321,7 @@ fn sy_08_ignore_policy_ensure_preimage_skips_symlinks() {
     interceptor.pre_write(&link).unwrap();
     interceptor.close_step(1).unwrap();
 
-    let manifest = read_step_manifest(&ws, 1);
-    assert!(
-        manifest.entries.is_empty(),
-        "Ignore policy: pre_write on a symlink should not capture preimage"
-    );
+    // Empty step is discarded — no step directory on disk, no ID consumed.
+    let step_dir = ws.undo_dir.join("steps").join("1");
+    assert!(!step_dir.exists(), "empty step should not be persisted");
 }

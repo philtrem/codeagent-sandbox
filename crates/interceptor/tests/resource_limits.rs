@@ -3,7 +3,7 @@ use std::fs;
 use codeagent_common::{CodeAgentError, ResourceLimitsConfig};
 use codeagent_interceptor::manifest::StepManifest;
 use codeagent_interceptor::preimage::capture_preimage;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_test_support::fixtures;
 use codeagent_test_support::snapshot::assert_tree_eq;
 use codeagent_test_support::workspace::TempWorkspace;
@@ -17,7 +17,7 @@ use common::{compare_opts, OperationApplier};
 #[test]
 fn ui_16_multi_step_rollback_restores_intermediate_state() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let original = ws.snapshot();
@@ -72,8 +72,10 @@ fn ui_17_unprotected_step_blocks_rollback() {
         max_single_step_size_bytes: Some(500),
         ..Default::default()
     };
-    let interceptor =
-        UndoInterceptor::with_resource_limits(ws.working_dir.clone(), ws.undo_dir.clone(), limits);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        resource_limits: limits,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     // Step 1: Modify all 5 files in one step
@@ -120,8 +122,10 @@ fn ui_18_fifo_eviction_by_step_count() {
         max_step_count: Some(2),
         ..Default::default()
     };
-    let interceptor =
-        UndoInterceptor::with_resource_limits(ws.working_dir.clone(), ws.undo_dir.clone(), limits);
+    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+        resource_limits: limits,
+        ..Default::default()
+    });
     let ops = OperationApplier::new(&interceptor);
 
     // Create 3 steps
@@ -177,7 +181,7 @@ fn ui_19_log_size_eviction() {
         fs::write(&probe_file, &data).unwrap();
 
         let probe_interceptor =
-            UndoInterceptor::new(probe_ws.working_dir.clone(), probe_ws.undo_dir.clone());
+            UndoInterceptor::new_default(probe_ws.working_dir.clone(), probe_ws.undo_dir.clone());
         let probe_ops = OperationApplier::new(&probe_interceptor);
 
         probe_interceptor.open_step(1).unwrap();
@@ -195,11 +199,10 @@ fn ui_19_log_size_eviction() {
             max_log_size_bytes: Some(budget),
             ..Default::default()
         };
-        let interceptor = UndoInterceptor::with_resource_limits(
-            ws.working_dir.clone(),
-            ws.undo_dir.clone(),
-            limits,
-        );
+        let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone(), UndoConfig {
+            resource_limits: limits,
+            ..Default::default()
+        });
         let ops = OperationApplier::new(&interceptor);
 
         for step_id in 1..=4 {
@@ -298,7 +301,7 @@ fn ul_02_preimage_atomicity_no_tmp_files() {
 #[test]
 fn ul_03_step_promotion_atomicity() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -329,7 +332,7 @@ fn ul_04_version_mismatch_disables_undo() {
     fs::create_dir_all(ws.undo_dir.join("wal")).unwrap();
     fs::create_dir_all(ws.undo_dir.join("steps")).unwrap();
 
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
 
     assert!(interceptor.is_undo_disabled());
     assert_eq!(
@@ -358,7 +361,7 @@ fn ul_05_discard_after_mismatch_re_enables_undo() {
     fs::create_dir_all(ws.undo_dir.join("wal")).unwrap();
     fs::create_dir_all(ws.undo_dir.join("steps")).unwrap();
 
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     assert!(interceptor.is_undo_disabled());
 
     // Discard the old log
@@ -406,7 +409,7 @@ fn ul_06_corrupt_manifest_graceful_error() {
 #[test]
 fn ul_07_missing_preimage_file_rollback_error() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();
@@ -435,7 +438,7 @@ fn ul_07_missing_preimage_file_rollback_error() {
 #[test]
 fn ul_08_corrupt_preimage_rollback_error() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     interceptor.open_step(1).unwrap();

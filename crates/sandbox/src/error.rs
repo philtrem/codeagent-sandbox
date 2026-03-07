@@ -32,6 +32,9 @@ pub enum AgentError {
     #[error(transparent)]
     Undo(#[from] CodeAgentError),
 
+    #[error("file watcher failed: {reason}")]
+    FileWatcherFailed { reason: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

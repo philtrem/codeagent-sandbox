@@ -1,10 +1,14 @@
 pub mod cli;
+pub mod command_classifier;
+pub mod command_waiter;
+pub mod config;
 pub mod control_bridge;
 pub mod error;
 pub mod event_bridge;
 pub mod fs_backend;
+pub mod fs_watcher;
 pub mod orchestrator;
 pub mod qemu;
+pub mod recent_writes;
 pub mod safeguard_bridge;
 pub mod session;
-pub mod step_adapter;

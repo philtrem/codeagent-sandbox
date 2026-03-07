@@ -16,10 +16,16 @@ pub fn handle_lopen(
     let path = state.path.clone();
     let qid = qid_from_path(&path)?;
 
-    let file = open_with_flags(&path, request.flags)?;
+    // Directories don't need a real file handle — readdir uses
+    // fs::read_dir on the path directly. On Windows, opening a directory
+    // with OpenOptions fails with "Access Denied".
+    if !path.is_dir() {
+        let file = open_with_flags(&path, request.flags)?;
+        let state = fid_table.get_mut(request.fid)?;
+        state.open_handle = Some(file);
+    }
 
     let state = fid_table.get_mut(request.fid)?;
-    state.open_handle = Some(file);
     state.open_flags = request.flags;
 
     let iounit = msize.saturating_sub(24);

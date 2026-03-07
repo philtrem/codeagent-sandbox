@@ -2,7 +2,7 @@
 
 A sandboxed execution environment for AI coding agents. Commands run inside a Linux VM (QEMU), with host-side filesystem interception that captures preimages of every write. This gives you N-step undo for any destructive operation — including bulk operations like `rm -rf *`, which count as a single step.
 
-When no VM is available, the sandbox runs in **host-only mode** — filesystem tools (read, write, edit, glob, grep, undo) work directly on the host, but command execution is disabled.
+When no VM is available, the sandbox runs in **host-only mode** — filesystem tools (read, write, edit, glob, grep, undo) work directly on the host, and commands execute directly on the host via `sh -c` (without VM isolation).
 
 ## Prerequisites
 
@@ -58,12 +58,12 @@ The desktop app and the sandbox binary are **separate executables**. The app spa
 
 ### Claude Code integration
 
-When started from the desktop app, the sandbox automatically registers itself as an MCP server in Claude Code's configuration and blocks Claude Code's built-in filesystem tools (Read, Edit, Write, Glob, Grep, Bash, NotebookEdit) so all operations go through the sandbox. On stop or app exit, the registration is removed and built-in tools are restored.
+When started from the desktop app, the sandbox automatically registers itself as an MCP server in Claude Code's configuration and blocks Claude Code's built-in filesystem and execution tools (Read, Edit, Write, Glob, Grep, Bash) so all operations go through the sandbox. Tools like NotebookEdit remain available natively. On stop or app exit, the registration is removed and built-in tools are restored.
 
 ## Testing
 
 ```sh
-cargo test --workspace              # ~596 tests (Windows), ~599 (Linux)
+cargo test --workspace              # ~766 tests (Windows; 24 E2E/shim/FB ignored)
 cargo clippy --workspace --tests    # lint
 ```
 
@@ -137,7 +137,7 @@ desktop/              Tauri v2 desktop app (React + TypeScript + Zustand)
 - **Safeguards.** Configurable thresholds for destructive operations (delete count, overwrite large files, rename over existing). Triggers block until explicitly allowed or denied. On deny, the current step is rolled back automatically.
 - **Undo barriers.** External modifications between steps create barriers that prevent rolling back past the modification point (since the rollback would destroy the external change). `force` flag overrides.
 - **Two-channel separation.** The filesystem channel and control channel are completely independent. The control channel never sees filesystem operations. Correlation happens on the host: all filesystem writes between `step_started(N)` and `step_completed(N)` belong to undo step N.
-- **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Command execution is disabled.
+- **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Commands execute directly on the host via `sh -c` (without VM isolation).
 
 ## License
 

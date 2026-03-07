@@ -12,6 +12,7 @@ pub struct SandboxConfig {
     pub external_modifications: ExternalModificationsSection,
     pub gitignore: GitignoreSection,
     pub claude_code: ClaudeCodeSection,
+    pub command_classifier: CommandClassifierSection,
 }
 
 impl Default for SandboxConfig {
@@ -25,6 +26,7 @@ impl Default for SandboxConfig {
             external_modifications: ExternalModificationsSection::default(),
             gitignore: GitignoreSection::default(),
             claude_code: ClaudeCodeSection::default(),
+            command_classifier: CommandClassifierSection::default(),
         }
     }
 }
@@ -84,6 +86,7 @@ impl Default for VmSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UndoSection {
+    pub enabled: bool,
     pub max_log_size_mb: u32,
     pub max_step_count: u32,
     pub max_single_step_size_mb: u32,
@@ -92,6 +95,7 @@ pub struct UndoSection {
 impl Default for UndoSection {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_log_size_mb: 500,
             max_step_count: 100,
             max_single_step_size_mb: 50,
@@ -168,6 +172,7 @@ pub struct ClaudeCodeSection {
     pub server_name: String,
     pub scope: String,
     pub disable_builtin_tools: bool,
+    pub auto_allow_write_tools: bool,
 }
 
 impl Default for ClaudeCodeSection {
@@ -177,6 +182,68 @@ impl Default for ClaudeCodeSection {
             server_name: "codeagent-sandbox".into(),
             scope: "user".into(),
             disable_builtin_tools: true,
+            auto_allow_write_tools: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandClassifierSection {
+    pub read_only_commands: Vec<String>,
+    pub write_commands: Vec<String>,
+    pub destructive_commands: Vec<String>,
+    pub git_read_only_subcommands: Vec<String>,
+    pub git_destructive_subcommands: Vec<String>,
+    pub cargo_read_only_subcommands: Vec<String>,
+    pub cargo_destructive_subcommands: Vec<String>,
+    pub npm_read_only_subcommands: Vec<String>,
+    pub npm_read_only_scripts: Vec<String>,
+}
+
+impl Default for CommandClassifierSection {
+    fn default() -> Self {
+        Self {
+            read_only_commands: vec![
+                "cd", "ls", "cat", "head", "tail", "less", "more", "wc", "file", "find",
+                "grep", "egrep", "fgrep", "rg", "ag", "awk", "gawk", "which", "whereis",
+                "type", "echo", "printf", "pwd", "env", "printenv", "whoami", "id",
+                "hostname", "uname", "date", "cal", "uptime", "df", "du", "free", "top",
+                "htop", "ps", "stat", "readlink", "realpath", "basename", "dirname",
+                "test", "[", "true", "false", "diff", "cmp", "md5sum", "sha256sum",
+                "sha1sum", "sha512sum", "xxd", "od", "strings", "tree", "bat", "jq",
+                "yq", "sort", "uniq", "cut", "tr", "column", "comm", "join", "paste",
+                "fold", "rev", "tac", "nl", "expand", "unexpand", "hexdump", "man",
+                "help", "info",
+            ].into_iter().map(String::from).collect(),
+            write_commands: vec![
+                "touch", "mkdir", "cp", "mv", "chmod", "chown", "chgrp", "curl", "wget",
+                "tar", "unzip", "zip", "gzip", "gunzip", "bzip2", "bunzip2", "xz",
+                "unxz", "make", "cmake", "patch", "ln",
+            ].into_iter().map(String::from).collect(),
+            destructive_commands: vec![
+                "rm", "rmdir", "dd", "mkfs", "shred", "truncate",
+            ].into_iter().map(String::from).collect(),
+            git_read_only_subcommands: vec![
+                "status", "log", "diff", "show", "branch", "tag", "remote", "rev-parse",
+                "ls-files", "ls-tree", "describe", "shortlog", "blame", "bisect",
+                "reflog", "stash list", "config", "help", "version",
+            ].into_iter().map(String::from).collect(),
+            git_destructive_subcommands: vec![
+                "clean",
+            ].into_iter().map(String::from).collect(),
+            cargo_read_only_subcommands: vec![
+                "check", "test", "clippy", "doc", "bench", "metadata", "tree", "version", "help",
+            ].into_iter().map(String::from).collect(),
+            cargo_destructive_subcommands: vec![
+                "clean",
+            ].into_iter().map(String::from).collect(),
+            npm_read_only_subcommands: vec![
+                "test", "list", "ls", "view", "info", "outdated", "help", "version",
+            ].into_iter().map(String::from).collect(),
+            npm_read_only_scripts: vec![
+                "test", "lint", "check", "typecheck", "type-check", "validate",
+            ].into_iter().map(String::from).collect(),
         }
     }
 }
