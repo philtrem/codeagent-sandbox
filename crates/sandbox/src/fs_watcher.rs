@@ -170,8 +170,9 @@ struct WatcherLoopParams<'a> {
     gitignore_filters: &'a [Option<Gitignore>],
 }
 
-/// Main watcher loop: reads batched events from the bridge channel, debounces
-/// them, filters against recent backend writes, and emits events.
+/// Main watcher loop: reads events from the bridge channel, accumulates them,
+/// and processes at fixed intervals (throttle), filtering against recent
+/// backend writes before emitting external modification events.
 async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
     let WatcherLoopParams {
         bridge_rx,
@@ -213,8 +214,10 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
                 for path in paths {
                     pending_paths.insert(path);
                 }
-                // Reset the debounce timer by advancing it.
-                debounce_timer.reset();
+                // No timer reset: use fixed-interval throttling instead of
+                // debouncing. Debounce (wait for silence) starves processing
+                // when the VM generates continuous filesystem activity because
+                // each event resets the timer.
             }
             _ = debounce_timer.tick() => {
                 if pending_paths.is_empty() {
@@ -263,16 +266,6 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
         exclude_patterns,
         gitignore_filters,
     } = params;
-
-    // Defer processing while a command is actively executing — filesystem
-    // events during an open step are internal writes, not external modifications.
-    // Paths stay in pending_paths for the next debounce tick.
-    if interceptors.iter().any(|i| {
-        use codeagent_interceptor::write_interceptor::WriteInterceptor;
-        i.current_step().is_some()
-    }) {
-        return;
-    }
 
     // Group external paths by working directory index.
     let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
@@ -327,6 +320,14 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
         }
     }
 
+    // Remove parent directories whose mtime changed only because a child was
+    // modified — the child path is already in the set and is the real change.
+    for paths in &mut per_dir {
+        if paths.len() > 1 {
+            remove_redundant_parents(paths);
+        }
+    }
+
     // Create barriers and emit events for each working directory with external changes.
     for (index, external_paths) in per_dir.into_iter().enumerate() {
         if external_paths.is_empty() {
@@ -356,6 +357,25 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
             barrier_id,
         });
     }
+}
+
+/// Remove paths that are a direct parent of another path in the list.
+///
+/// When a child file is created or modified, the OS also updates the parent
+/// directory's mtime, causing `notify` to report both. The parent entry is
+/// noise — the child is the real change. However, a directory path with no
+/// child in the list is kept (it may be a genuine mkdir/rmdir event).
+fn remove_redundant_parents(paths: &mut Vec<PathBuf>) {
+    // Collect parents of all paths in the set to identify which directories
+    // are only present because a child's creation/modification changed their mtime.
+    let parents_of_children: HashSet<PathBuf> = paths
+        .iter()
+        .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+        .collect();
+    paths.retain(|path| {
+        // Keep this path unless it is the parent of another path in the set.
+        !parents_of_children.contains(path)
+    });
 }
 
 #[cfg(test)]
@@ -425,5 +445,47 @@ mod tests {
         assert_eq!(config.debounce, Duration::from_secs(2));
         assert!(config.exclude_patterns.contains(&".git/".to_string()));
         assert!(config.exclude_patterns.contains(&"node_modules".to_string()));
+    }
+
+    #[test]
+    fn redundant_parent_removed() {
+        let mut paths = vec![
+            PathBuf::from("/workspace/subdir"),
+            PathBuf::from("/workspace/subdir/file.txt"),
+        ];
+        remove_redundant_parents(&mut paths);
+        assert_eq!(paths, vec![PathBuf::from("/workspace/subdir/file.txt")]);
+    }
+
+    #[test]
+    fn standalone_directory_kept() {
+        let mut paths = vec![
+            PathBuf::from("/workspace/new_dir"),
+            PathBuf::from("/workspace/other_file.txt"),
+        ];
+        remove_redundant_parents(&mut paths);
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn multiple_children_remove_parent() {
+        let mut paths = vec![
+            PathBuf::from("/workspace/dir"),
+            PathBuf::from("/workspace/dir/a.txt"),
+            PathBuf::from("/workspace/dir/b.txt"),
+        ];
+        remove_redundant_parents(&mut paths);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&PathBuf::from("/workspace/dir/a.txt")));
+        assert!(paths.contains(&PathBuf::from("/workspace/dir/b.txt")));
+    }
+
+    #[test]
+    fn single_path_unchanged() {
+        let mut paths = vec![PathBuf::from("/workspace/file.txt")];
+        // remove_redundant_parents is only called when len > 1, but test the
+        // function directly to verify it handles edge cases.
+        remove_redundant_parents(&mut paths);
+        assert_eq!(paths, vec![PathBuf::from("/workspace/file.txt")]);
     }
 }
