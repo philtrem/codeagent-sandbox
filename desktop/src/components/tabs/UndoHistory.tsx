@@ -61,10 +61,12 @@ function formatTimestamp(timestamp: string): string {
 function StepCard({
   step,
   stepIndex,
+  displayNumber,
   onRollback,
 }: {
   step: UndoStepDetail;
   stepIndex: number;
+  displayNumber: number;
   onRollback: (stepsToRollBack: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -87,7 +89,7 @@ function StepCard({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">Step {step.step_id}</span>
+            <span className="text-sm font-medium">Step {displayNumber}</span>
             <StepTypeBadge step={step} />
             <span className="text-xs text-[var(--color-text-secondary)]">
               {formatTimestamp(step.timestamp)}
@@ -304,17 +306,20 @@ function ClearHistoryDialog({
 function StepList({
   steps,
   startIndex = 0,
+  totalSteps,
   barriers,
   onRollback,
 }: {
   steps: UndoStepDetail[];
   startIndex?: number;
+  totalSteps: number;
   barriers: BarrierDetail[];
   onRollback: (stepsToRollBack: number) => void;
 }) {
   return (
     <div className="space-y-2">
       {steps.map((step, index) => {
+        const stepIndex = startIndex + index;
         const barriersAfterStep = barriers.filter(
           (b) => b.after_step_id === step.step_id,
         );
@@ -328,7 +333,8 @@ function StepList({
             ))}
             <StepCard
               step={step}
-              stepIndex={startIndex + index}
+              stepIndex={stepIndex}
+              displayNumber={totalSteps - stepIndex}
               onRollback={onRollback}
             />
           </div>
@@ -389,6 +395,7 @@ function SessionGroupedSteps({
       {currentSteps.length > 0 && (
         <StepList
           steps={currentSteps}
+          totalSteps={data.steps.length}
           barriers={data.barriers}
           onRollback={onRollback}
         />
@@ -420,6 +427,7 @@ function SessionGroupedSteps({
               <StepList
                 steps={previousSteps}
                 startIndex={currentSteps.length}
+                totalSteps={data.steps.length}
                 barriers={data.barriers}
                 onRollback={onRollback}
               />
