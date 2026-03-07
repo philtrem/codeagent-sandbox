@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use codeagent_common::{BarrierReason, SafeguardConfig, SafeguardDecision};
 use codeagent_control::InFlightTracker;
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
 use codeagent_mcp::protocol::{
@@ -191,15 +191,18 @@ impl Orchestrator {
             let undo_dir = self.cli_args.undo_dir.join(undo_subdir_name(working_dir));
             let interceptor = if let Some(ref sender) = safeguard_sender {
                 use crate::safeguard_bridge::SafeguardBridge;
-                UndoInterceptor::with_safeguard(
+                UndoInterceptor::new(
                     working_dir.clone(),
                     undo_dir.clone(),
-                    codeagent_common::ExternalModificationPolicy::Barrier,
-                    SafeguardConfig::default(),
-                    Box::new(SafeguardBridge::new(sender.clone())),
+                    UndoConfig {
+                        policy: codeagent_common::ExternalModificationPolicy::Barrier,
+                        safeguard_config: SafeguardConfig::default(),
+                        safeguard_handler: Some(Box::new(SafeguardBridge::new(sender.clone()))),
+                        ..Default::default()
+                    },
                 )
             } else {
-                UndoInterceptor::new(working_dir.clone(), undo_dir.clone())
+                UndoInterceptor::new_default(working_dir.clone(), undo_dir.clone())
             };
 
             // Run crash recovery
@@ -616,13 +619,11 @@ impl Orchestrator {
         // 5. Create control channel handler
         use codeagent_control::{ControlChannelHandler, QuiescenceConfig};
         use crate::event_bridge::run_event_bridge;
-        use crate::step_adapter::StepManagerAdapter;
 
-        let step_manager = Arc::new(StepManagerAdapter::new(interceptors[0].clone()));
         let quiescence_config = QuiescenceConfig::default();
 
         let (handler, handler_events) = ControlChannelHandler::new(
-            step_manager,
+            interceptors[0].clone(),
             in_flight_tracker.clone(),
             quiescence_config,
         );
@@ -1012,7 +1013,7 @@ struct VmSessionParts {
     fs_backends: Vec<Box<dyn crate::fs_backend::FilesystemBackend>>,
     in_flight_tracker: Option<InFlightTracker>,
     control_writer: Option<mpsc::UnboundedSender<String>>,
-    control_handler: Option<Arc<codeagent_control::ControlChannelHandler<crate::step_adapter::StepManagerAdapter>>>,
+    control_handler: Option<Arc<codeagent_control::ControlChannelHandler<codeagent_interceptor::undo_interceptor::UndoInterceptor>>>,
     event_bridge_handle: Option<tokio::task::JoinHandle<()>>,
     control_reader_handle: Option<tokio::task::JoinHandle<()>>,
     control_writer_handle: Option<tokio::task::JoinHandle<()>>,

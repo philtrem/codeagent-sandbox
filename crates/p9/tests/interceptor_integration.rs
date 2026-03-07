@@ -39,7 +39,7 @@ impl InterceptorHarness {
         let undo_dir = TempDir::new().expect("undo_dir");
         let root_path = working_dir.path().to_path_buf();
 
-        let interceptor = Arc::new(UndoInterceptor::new(
+        let interceptor = Arc::new(UndoInterceptor::new_default(
             working_dir.path().to_path_buf(),
             undo_dir.path().to_path_buf(),
         ));

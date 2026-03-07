@@ -704,25 +704,32 @@ fn uh_12_session_boundary_barrier_has_session_start_reason() {
         let _ = orchestrator.session_stop();
     }
 
-    // Read barriers from disk
+    // Read barriers from per-step files. The barrier is placed after the last
+    // completed step (step 1), so it lives in steps/1/barriers.json.
     let subdir_name = undo_subdir_name(working.path());
-    let barriers_path = undo.path().join(&subdir_name).join("barriers.json");
-    assert!(
-        barriers_path.exists(),
-        "barriers.json should exist after session restart"
-    );
+    let steps_dir = undo.path().join(&subdir_name).join("steps");
+    let step_dirs: Vec<_> = fs::read_dir(&steps_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    assert!(!step_dirs.is_empty(), "should have at least one step dir");
 
-    let json = fs::read_to_string(&barriers_path).unwrap();
-    let barriers: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
-    assert!(!barriers.is_empty(), "should have at least one barrier");
-
-    let has_session_start = barriers.iter().any(|b| {
-        b["reason"].as_str() == Some("session_start")
-    });
+    let mut found_session_start = false;
+    for step_entry in &step_dirs {
+        let barrier_path = step_entry.path().join("barriers.json");
+        if barrier_path.exists() {
+            let json = fs::read_to_string(&barrier_path).unwrap();
+            let barriers: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+            if barriers.iter().any(|b| b["reason"].as_str() == Some("session_start")) {
+                found_session_start = true;
+                break;
+            }
+        }
+    }
     assert!(
-        has_session_start,
-        "barrier should have reason 'session_start', got: {:?}",
-        barriers.iter().map(|b| b["reason"].clone()).collect::<Vec<_>>()
+        found_session_start,
+        "at least one step should have a barrier with reason 'session_start'"
     );
 }
 
@@ -1692,10 +1699,15 @@ fn uh_32_multiple_session_barriers() {
         let _ = orchestrator.session_stop();
     }
 
-    // Verify barriers file exists
+    // Verify at least one per-step barriers file exists (remaining barriers
+    // are stored inside their step directories, not at the global level)
     let subdir_name = undo_subdir_name(working.path());
-    let barriers_path = undo.path().join(&subdir_name).join("barriers.json");
-    assert!(barriers_path.exists());
+    let steps_dir = undo.path().join(&subdir_name).join("steps");
+    let has_barrier_file = fs::read_dir(&steps_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().join("barriers.json").exists());
+    assert!(has_barrier_file, "at least one step should have a barriers.json");
 }
 
 // -----------------------------------------------------------------------
@@ -1717,18 +1729,20 @@ fn uh_33_barrier_persists_across_restart() {
         let _ = orchestrator.session_stop();
     }
 
-    // Verify barrier file was created
     let subdir_name = undo_subdir_name(working.path());
-    let barriers_path = undo.path().join(&subdir_name).join("barriers.json");
+    let steps_dir = undo.path().join(&subdir_name).join("steps");
 
-    // Session 2 start creates barrier — verify it
+    // Session 2 start creates barrier — verify it in per-step file
     {
         let (orchestrator, _rx) = create_orchestrator(working.path(), undo.path());
         let _ = orchestrator.session_start(make_start_payload(&path_str));
         let _ = orchestrator.session_stop();
     }
-    assert!(barriers_path.exists(), "barriers.json should exist after session 2");
-    let _barriers_content_after_s2 = fs::read_to_string(&barriers_path).unwrap();
+    let has_barrier_after_s2 = fs::read_dir(&steps_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().join("barriers.json").exists());
+    assert!(has_barrier_after_s2, "per-step barriers.json should exist after session 2");
 
     // Session 3 — barrier from session 2 should still block rollback
     {
@@ -1744,13 +1758,17 @@ fn uh_33_barrier_persists_across_restart() {
         let _ = orchestrator.session_stop();
     }
 
-    // barriers.json should still exist
-    assert!(barriers_path.exists());
-    let barriers_content_after_s3 = fs::read_to_string(&barriers_path).unwrap();
-    // Session 3 adds another barrier, so file content should have grown or at least exist
+    // Per-step barriers should still exist after session 3
+    let has_barrier_after_s3 = fs::read_dir(&steps_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let p = e.path().join("barriers.json");
+            p.exists() && fs::read_to_string(&p).map(|s| !s.is_empty()).unwrap_or(false)
+        });
     assert!(
-        !barriers_content_after_s3.is_empty(),
-        "barriers.json should not be empty"
+        has_barrier_after_s3,
+        "per-step barriers.json should not be empty after session 3"
     );
 }
 

@@ -4,24 +4,11 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use codeagent_common::StepId;
+use codeagent_common::{StepId, StepManager};
 
 use crate::in_flight::InFlightTracker;
 use crate::protocol::{HostMessage, OutputStream, VmMessage};
 use crate::state_machine::{ControlChannelState, ControlEvent};
-
-/// Abstraction over the undo interceptor's step lifecycle.
-///
-/// The control channel handler uses this trait to open and close undo steps
-/// in response to protocol events. In production, `UndoInterceptor` implements
-/// this. In tests, a mock records calls for assertion.
-pub trait StepManager: Send + Sync {
-    fn open_step(&self, id: StepId) -> codeagent_common::Result<()>;
-    fn close_step(&self, id: StepId) -> codeagent_common::Result<Vec<StepId>>;
-    fn current_step(&self) -> Option<StepId>;
-    /// Store the command string associated with the current step in the manifest.
-    fn set_step_command(&self, _id: StepId, _command: String) {}
-}
 
 /// Configuration for quiescence and ambient step timeouts.
 #[derive(Debug, Clone)]

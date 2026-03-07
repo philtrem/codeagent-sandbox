@@ -72,12 +72,12 @@ guest/                              # Guest VM image build files
                                    #   sandbox user creation, start shim)
 crates/
   common/                          # codeagent-common — shared types and errors
-    src/lib.rs                     #   StepId, StepType, StepInfo, BarrierId, BarrierInfo,
-                                   #   SafeguardId, SafeguardKind, SafeguardConfig, SafeguardEvent,
-                                   #   SafeguardDecision, ExternalModificationPolicy, SymlinkPolicy,
-                                   #   RollbackResult, ResourceLimitsConfig, CodeAgentError (incl.
-                                   #   RollbackBlocked, SafeguardDenied, StepUnprotected,
-                                   #   UndoDisabled), Result<T>
+    src/lib.rs                     #   StepId, StepManager trait, StepType, StepInfo, BarrierId,
+                                   #   BarrierInfo, SafeguardId, SafeguardKind, SafeguardConfig,
+                                   #   SafeguardEvent, SafeguardDecision, ExternalModificationPolicy,
+                                   #   SymlinkPolicy, RollbackResult, ResourceLimitsConfig,
+                                   #   CodeAgentError (incl. RollbackBlocked, SafeguardDenied,
+                                   #   StepUnprotected, UndoDisabled), Result<T>
   control/                         # codeagent-control — control channel protocol + handler
     src/
       lib.rs                       #   module declarations + re-exports
@@ -88,7 +88,7 @@ crates/
       parser.rs                    #   JSONL parsing with 1MB size limit
       state_machine.rs             #   ControlChannelState, ControlEvent, PendingCommand,
                                    #   ActiveCommand — validates message sequences
-      handler.rs                   #   StepManager trait, QuiescenceConfig, HandlerEvent,
+      handler.rs                   #   QuiescenceConfig, HandlerEvent,
                                    #   ControlChannelHandler (quiescence + ambient steps)
       in_flight.rs                 #   InFlightTracker (Arc<AtomicUsize> + Notify)
     tests/
@@ -99,17 +99,17 @@ crates/
       lib.rs                       #   module declarations
       write_interceptor.rs         #   WriteInterceptor trait (13 methods)
       safeguard.rs                 #   SafeguardHandler trait, SafeguardTracker (per-step counters)
-      step_tracker.rs              #   StepTracker (Mutex-based step lifecycle, incl. cancel_step)
       preimage.rs                  #   path_hash, PreimageMetadata, capture/restore preimages
       manifest.rs                  #   StepManifest, ManifestEntry (JSON on disk)
       rollback.rs                  #   rollback_step (two-pass: delete→recreate→restore)
-      barrier.rs                   #   BarrierTracker (in-memory + JSON persistence)
-      resource_limits.rs             #   calculate_step_size, calculate_total_log_size, evict_if_needed
-      gitignore.rs                 #   GitignoreFilter (opt-in .gitignore-aware preimage skipping)
-      undo_interceptor.rs          #   UndoInterceptor, RecoveryInfo, recover(), WriteInterceptor impl,
+      resource_limits.rs           #   calculate_step_size, calculate_total_log_size
+      gitignore.rs                 #   build_gitignore() — opt-in .gitignore-aware preimage skipping
+      history.rs                   #   read_undo_history() — standalone disk reader (no UndoInterceptor
+                                   #   instance needed), FileDetail, StepDetail, UndoHistoryData
+      undo_interceptor.rs          #   UndoConfig, UndoInterceptor (impl StepManager + WriteInterceptor),
+                                   #   RecoveryInfo, recover(), per-step barrier storage (BarrierEntry),
                                    #   notify_external_modification(), barriers(), rollback(count, force),
-                                   #   with_safeguard(), rollback_current_step(), safeguard checks in pre_*,
-                                   #   with_resource_limits(), with_gitignore(), with_symlink_policy(),
+                                   #   rollback_current_step(), safeguard checks in pre_*, evict_if_needed(),
                                    #   discard(), is_undo_disabled(), version check
     tests/
       common/mod.rs                #   shared test helpers: OperationApplier, compare_opts
@@ -250,7 +250,6 @@ crates/
                                    #   agent_execute sends commands through control channel when VM
                                    #   available, fs_status reports backend/VM info; holds
                                    #   CommandClassifier for configurable command classification
-      step_adapter.rs              #   StepManagerAdapter: wraps UndoInterceptor as StepManager
       safeguard_bridge.rs          #   SafeguardBridge: sync SafeguardHandler → async channel bridge
       event_bridge.rs              #   HandlerEvent → STDIO Event translation + run_event_bridge()
       control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
@@ -412,7 +411,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
                                    #   barrier indicators, rollback with confirmation dialog + force option
   src-tauri/                        # Tauri Rust backend (standalone Cargo.toml)
     Cargo.toml                     #   deps: tauri 2, tauri-plugin-{dialog,shell,process,updater},
-                                   #   serde, serde_json, toml, dirs, which
+                                   #   serde, serde_json, toml, dirs, which,
+                                   #   codeagent-interceptor (path), codeagent-common (path)
     build.rs                       #   tauri_build::build()
     tauri.conf.json                #   window 1024x768, identifier com.codeagent.desktop, bundle config,
                                    #   updater plugin config, NSIS/macOS/deb/AppImage installer settings
@@ -434,7 +434,8 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
         vm.rs                      #   VmState (separate Mutex for process/stdin/stdout), VmStatus,
                                    #   start_vm (spawn + extract I/O handles), stop_vm (kill + cleanup),
                                    #   get_vm_status (try_wait), send_mcp_request (JSON-RPC passthrough)
-        undo.rs                    #   read_undo_history (scans steps/ manifests + barriers.json)
+        undo.rs                    #   read_undo_history (delegates to codeagent_interceptor::history),
+                                   #   clear_undo_history
         claude.rs                  #   ClaudeConfigInfo, McpServerEntry, detect/write/remove for
                                    #   Claude Desktop + Code configs, generate_claude_code_cli_command
 ```
@@ -459,13 +460,15 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   {undo_dir}/wal/in_progress/   # active step (promoted to steps/ on close)
   {undo_dir}/steps/{id}/        # completed steps
     manifest.json
+    barriers.json                 # optional, per-step barrier entries
     preimages/{hash}.dat          # zstd level 3 compressed file contents
     preimages/{hash}.meta.json    # PreimageMetadata (path, type, mode, mtime, etc.)
   ```
-- **Undo barriers**: Barriers are placed "after" a specific completed step. A barrier with
+- **Undo barriers**: Barriers are stored per-step in `steps/{id}/barriers.json`. A barrier with
   `after_step_id = S` blocks rollback of step S (because the external modification happened
   after S and rolling back S would destroy it). `rollback(count, force)` checks barriers;
-  `force: true` crosses and removes them. Barriers persist in `{undo_dir}/barriers.json`.
+  `force: true` crosses and removes them. Barrier IDs are synthesized as
+  `step_id * 1000 + entry_index`.
 - **Safeguards**: Configurable thresholds (delete count, overwrite-large-file, rename-over-existing)
   checked in `pre_*` methods. On trigger, calls `SafeguardHandler::on_safeguard_triggered()` which
   blocks until Allow/Deny. On Deny, `rollback_current_step()` undoes all operations in the current
@@ -477,12 +480,12 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   (`version` file ≠ `CURRENT_VERSION`) disables undo; `discard()` re-enables it.
 - **Test pattern**: snapshot → open step → apply operations via OperationApplier → close step →
   rollback → `assert_tree_eq(before, after, opts)` with large mtime tolerance.
-- **Gitignore filtering**: Opt-in via `UndoInterceptor::with_gitignore()`. When enabled, the
+- **Gitignore filtering**: Opt-in via `UndoConfig { gitignore: true, .. }`. When enabled, the
   `ignore` crate loads `.gitignore` files and `.git/info/exclude` once at construction time.
   Paths matching ignore rules are silently skipped in `ensure_preimage`, `record_creation`,
   and `capture_tree_preimages` — no preimage, no manifest entry.
 - **Symlink policy**: Three-state `SymlinkPolicy` enum (`Ignore`, `ReadOnly`, `ReadWrite`),
-  default `Ignore`. Configured via `UndoInterceptor::with_symlink_policy()`. `Ignore` skips
+  default `Ignore`. Configured via `UndoConfig { symlink_policy: ..., .. }`. `Ignore` skips
   symlinks in `ensure_preimage`, `record_creation`, `capture_tree_preimages`, `post_symlink`,
   and `pre_link`. `ReadOnly` allows preimage capture (read-side) but skips symlink restore on
   rollback (write-side). `ReadWrite` enables full symlink support. Write is conditional on
@@ -581,7 +584,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `UndoInterceptor::notify_external_modification()` — creates barriers under `Barrier` policy
   - `UndoInterceptor::rollback(count, force)` — checks barriers, blocks or force-crosses
   - `UndoInterceptor::barriers()` — query all barriers
-  - `UndoInterceptor::with_policy()` — constructor with configurable policy
+  - `UndoConfig::policy` — configurable external modification policy
   - Integration tests EB-01..EB-06, EB-08 covering: barrier creation, rollback blocking,
     force rollback, barrier querying, internal writes no-barrier, multiple barriers,
     warn policy (7 tests)
@@ -592,8 +595,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `SafeguardHandler` trait — synchronous blocking callback for safeguard decisions
   - `SafeguardTracker` — per-step counters (delete count, overwrite, rename-over), threshold checks,
     allowed-kind tracking to prevent re-triggering after Allow
-  - `StepTracker::cancel_step()` — clears active step without adding to completed list
-  - `UndoInterceptor::with_safeguard()` — constructor with configurable safeguard config + handler
+  - `UndoConfig::safeguard_config` + `UndoConfig::safeguard_handler` — configurable safeguard
   - `UndoInterceptor::rollback_current_step()` — mid-step rollback on deny (writes manifest,
     rolls back WAL, cancels step)
   - Safeguard checks in `pre_unlink` (delete threshold), `pre_write`/`pre_open_trunc` (overwrite
@@ -617,9 +619,9 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `StepManifest::unprotected` field marks steps that exceeded single-step size limit
   - Atomic preimage writes (temp-file-then-rename) for `.meta.json` and `.dat` files
   - `capture_preimage` returns `(PreimageMetadata, u64)` — includes compressed data size
-  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size`, `evict_if_needed`
-    (FIFO eviction by step count and log size)
-  - `UndoInterceptor::with_resource_limits()` — constructor with limits config
+  - `resource_limits` module: `calculate_step_size`, `calculate_total_log_size` (size utilities)
+  - `UndoInterceptor::evict_if_needed()` — FIFO eviction by step count and log size
+  - `UndoConfig::resource_limits` — configurable limits
   - `close_step` returns `Result<Vec<StepId>>` — list of evicted step IDs
   - Unprotected step tracking: skips preimage capture after threshold exceeded, blocks rollback
   - Version mismatch detection on construction, `is_undo_disabled()`, `discard()` to re-enable
@@ -804,7 +806,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - Filesystem operations: direct host filesystem access (no VM needed)
   - `SafeguardBridge`: bridges sync `SafeguardHandler` to async via mpsc + oneshot channels
   - `event_bridge`: translates `HandlerEvent` → STDIO `Event`
-  - `StepManagerAdapter`: wraps `Arc<UndoInterceptor>` as `StepManager` trait
+  - `UndoInterceptor` implements `StepManager` directly (no adapter needed)
   - MCP `write_file`/`edit_file`: opens synthetic API step on interceptor, writes file, closes step
   - MCP `glob`: pattern matching via `glob` crate, results sorted by mtime (newest first)
   - MCP `grep`: regex search via `regex` + `walkdir` crates, 3 output modes (files_with_matches, content, count)

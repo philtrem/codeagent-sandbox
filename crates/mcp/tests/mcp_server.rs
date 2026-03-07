@@ -614,7 +614,7 @@ impl McpHandler for UndoMcpHandler {
 
 /// Create an UndoInterceptor + handler pair for a TempWorkspace.
 fn make_undo_harness(ws: &TempWorkspace) -> (Arc<UndoInterceptor>, UndoMcpHandler) {
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));
@@ -943,7 +943,7 @@ async fn mc06_multiple_notifications_delivered() {
 async fn mc08_concurrent_operations_share_undo_state() {
     let ws = TempWorkspace::new();
 
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));
@@ -1002,7 +1002,7 @@ async fn mc08_concurrent_operations_share_undo_state() {
 async fn mc08_concurrent_write_and_query_no_deadlock() {
     let ws = TempWorkspace::new();
 
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
     ));

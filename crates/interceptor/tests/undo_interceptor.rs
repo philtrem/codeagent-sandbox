@@ -14,7 +14,7 @@ use common::{OperationApplier, compare_opts};
 #[test]
 fn ui_01_write_same_file_3x_in_one_step() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -42,7 +42,7 @@ fn ui_01_write_same_file_3x_in_one_step() {
 #[test]
 fn ui_02_create_new_file_and_write() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -69,7 +69,7 @@ fn ui_02_create_new_file_and_write() {
 #[test]
 fn ui_03_create_nested_dirs() {
     let ws = TempWorkspace::new();
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -100,7 +100,7 @@ fn ui_03_create_nested_dirs() {
 #[test]
 fn ui_04_delete_file() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -126,7 +126,7 @@ fn ui_04_delete_file() {
 #[test]
 fn ui_05_delete_tree() {
     let ws = TempWorkspace::with_fixture(fixtures::deep_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -151,7 +151,7 @@ fn ui_05_delete_tree() {
 #[test]
 fn ui_06_rename_file_dest_absent() {
     let ws = TempWorkspace::with_fixture(fixtures::rename_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Remove b.txt so destination is absent
@@ -183,7 +183,7 @@ fn ui_06_rename_file_dest_absent() {
 #[test]
 fn ui_07_rename_file_dest_exists() {
     let ws = TempWorkspace::with_fixture(fixtures::rename_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -215,7 +215,7 @@ fn ui_07_rename_file_dest_exists() {
 #[test]
 fn ui_08_rename_dir_with_nested_files() {
     let ws = TempWorkspace::new();
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Set up a directory tree to rename
@@ -264,7 +264,7 @@ fn ui_08_rename_dir_with_nested_files() {
 #[test]
 fn ui_09_truncate_open() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -289,7 +289,7 @@ fn ui_09_truncate_open() {
 #[test]
 fn ui_10_truncate_setattr() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -320,7 +320,7 @@ fn ui_11_chmod() {
     use std::os::unix::fs::PermissionsExt;
 
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let target = ws.working_dir.join("run.sh");
@@ -351,7 +351,7 @@ fn ui_11_chmod() {
 #[test]
 fn ui_12_xattr_set() {
     let ws = TempWorkspace::new();
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let target = ws.working_dir.join("test.txt");
@@ -389,7 +389,7 @@ fn ui_12_xattr_set() {
 #[test]
 fn ui_13_xattr_remove() {
     let ws = TempWorkspace::new();
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let target = ws.working_dir.join("test.txt");
@@ -427,7 +427,7 @@ fn ui_13_xattr_remove() {
 #[test]
 fn ui_14_fallocate() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -455,7 +455,7 @@ fn ui_14_fallocate() {
 #[test]
 fn ui_15_copy_file_range() {
     let ws = TempWorkspace::new();
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let src = ws.working_dir.join("source.txt");

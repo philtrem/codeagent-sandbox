@@ -462,6 +462,7 @@ dependencies = [
  "codeagent-virtiofs-backend",
  "dirs",
  "glob",
+ "ignore",
  "notify",
  "regex",
  "serde",

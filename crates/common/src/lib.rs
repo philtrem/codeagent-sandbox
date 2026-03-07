@@ -6,6 +6,18 @@ use serde::{Deserialize, Serialize};
 /// Identifies an undo step. Positive IDs are command steps; negative IDs are ambient steps.
 pub type StepId = i64;
 
+/// Abstraction over the undo interceptor's step lifecycle.
+///
+/// The control channel handler uses this trait to open and close undo steps
+/// in response to protocol events.
+pub trait StepManager: Send + Sync {
+    fn open_step(&self, id: StepId) -> Result<()>;
+    fn close_step(&self, id: StepId) -> Result<Vec<StepId>>;
+    fn current_step(&self) -> Option<StepId>;
+    /// Store the command string associated with the current step in the manifest.
+    fn set_step_command(&self, _id: StepId, _command: String) {}
+}
+
 /// Identifies an undo barrier. Monotonically increasing within a session.
 pub type BarrierId = u64;
 
@@ -135,7 +147,7 @@ pub struct ResourceLimitsConfig {
 
 /// Configuration for safeguard thresholds. Each threshold is optional — `None` means
 /// the safeguard is disabled for that kind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SafeguardConfig {
     /// Maximum number of delete operations in a single step before triggering.
     pub delete_threshold: Option<u64>,
@@ -143,19 +155,6 @@ pub struct SafeguardConfig {
     pub overwrite_file_size_threshold: Option<u64>,
     /// Trigger when a rename would overwrite an existing destination file.
     pub rename_over_existing: bool,
-    /// Seconds to wait for a confirmation before auto-denying.
-    pub timeout_seconds: u64,
-}
-
-impl Default for SafeguardConfig {
-    fn default() -> Self {
-        Self {
-            delete_threshold: None,
-            overwrite_file_size_threshold: None,
-            rename_over_existing: false,
-            timeout_seconds: 30,
-        }
-    }
 }
 
 /// Information about a triggered safeguard, sent to the handler for a decision.
@@ -347,7 +346,6 @@ mod tests {
         assert_eq!(config.delete_threshold, None);
         assert_eq!(config.overwrite_file_size_threshold, None);
         assert!(!config.rename_over_existing);
-        assert_eq!(config.timeout_seconds, 30);
     }
 
     #[test]

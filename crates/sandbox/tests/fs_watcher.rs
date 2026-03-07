@@ -469,7 +469,7 @@ fn fw_12_write_tracking_interceptor_records() {
 
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
-    let interceptor = Arc::new(UndoInterceptor::new(
+    let interceptor = Arc::new(UndoInterceptor::new_default(
         working.path().to_path_buf(),
         undo.path().to_path_buf(),
     ));

@@ -12,4 +12,3 @@ pub mod qemu;
 pub mod recent_writes;
 pub mod safeguard_bridge;
 pub mod session;
-pub mod step_adapter;

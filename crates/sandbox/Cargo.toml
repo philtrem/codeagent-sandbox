@@ -24,6 +24,7 @@ toml = { workspace = true }
 dirs = { workspace = true }
 blake3 = { workspace = true }
 notify = { workspace = true }
+ignore = { workspace = true }
 
 codeagent-common = { path = "../common" }
 codeagent-interceptor = { path = "../interceptor" }

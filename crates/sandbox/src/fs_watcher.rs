@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use codeagent_common::BarrierReason;
-use codeagent_interceptor::gitignore::GitignoreFilter;
+use codeagent_interceptor::gitignore::build_gitignore;
+use ignore::gitignore::Gitignore;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
@@ -93,10 +94,10 @@ pub fn spawn_fs_watcher(
         .collect();
 
     // Build gitignore filters per working directory if enabled.
-    let gitignore_filters: Vec<Option<GitignoreFilter>> = if config.use_gitignore {
+    let gitignore_filters: Vec<Option<Gitignore>> = if config.use_gitignore {
         working_dirs
             .iter()
-            .map(|dir| GitignoreFilter::build(dir))
+            .map(|dir| build_gitignore(dir))
             .collect()
     } else {
         working_dirs.iter().map(|_| None).collect()
@@ -166,7 +167,7 @@ struct WatcherLoopParams<'a> {
     event_sender: &'a mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &'a [String],
     exclude_patterns: &'a [String],
-    gitignore_filters: &'a [Option<GitignoreFilter>],
+    gitignore_filters: &'a [Option<Gitignore>],
 }
 
 /// Main watcher loop: reads batched events from the bridge channel, debounces
@@ -248,7 +249,7 @@ struct ProcessParams<'a> {
     event_sender: &'a mpsc::UnboundedSender<Event>,
     undo_dir_prefixes: &'a [String],
     exclude_patterns: &'a [String],
-    gitignore_filters: &'a [Option<GitignoreFilter>],
+    gitignore_filters: &'a [Option<Gitignore>],
 }
 
 /// Process accumulated paths: filter, group by working dir, and emit events.
@@ -297,7 +298,7 @@ fn process_pending_paths(pending_paths: &mut HashSet<PathBuf>, params: &ProcessP
                     if let Ok(relative) = path.strip_prefix(working_dir) {
                         let relative_str = relative.to_string_lossy().replace('\\', "/");
                         let is_dir = path.is_dir();
-                        if filter.is_ignored(&relative_str, is_dir) {
+                        if filter.matched_path_or_any_parents(&relative_str, is_dir).is_ignore() {
                             break;
                         }
                     }

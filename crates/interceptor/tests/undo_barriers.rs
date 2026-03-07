@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use codeagent_common::{BarrierReason, CodeAgentError, ExternalModificationPolicy};
-use codeagent_interceptor::undo_interceptor::UndoInterceptor;
+use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_test_support::fixtures;
 use codeagent_test_support::snapshot::assert_tree_eq;
 use codeagent_test_support::workspace::TempWorkspace;
@@ -17,7 +17,7 @@ use common::{OperationApplier, compare_opts};
 #[test]
 fn eb_01_external_modification_creates_barrier() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Complete a step so there's a step to place the barrier after
@@ -38,7 +38,8 @@ fn eb_01_external_modification_creates_barrier() {
     let barrier = result.unwrap();
     assert_eq!(barrier.after_step_id, 1);
     assert_eq!(barrier.affected_paths, affected);
-    assert_eq!(barrier.barrier_id, 1);
+    // barrier_id is synthesized as after_step_id * 1000 + entry_index
+    assert_eq!(barrier.barrier_id, 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ fn eb_01_external_modification_creates_barrier() {
 #[test]
 fn eb_02_rollback_blocked_by_barrier() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Step 1: modify file
@@ -105,7 +106,7 @@ fn eb_02_rollback_blocked_by_barrier() {
 #[test]
 fn eb_03_force_rollback_crosses_barrier() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     let before = ws.snapshot();
@@ -141,7 +142,7 @@ fn eb_03_force_rollback_crosses_barrier() {
 #[test]
 fn eb_04_barriers_queryable_with_correct_data() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Complete two steps
@@ -164,7 +165,8 @@ fn eb_04_barriers_queryable_with_correct_data() {
     assert_eq!(barriers.len(), 1);
 
     let barrier = &barriers[0];
-    assert_eq!(barrier.barrier_id, 1);
+    // barrier_id is synthesized as after_step_id * 1000 + entry_index
+    assert_eq!(barrier.barrier_id, 2000);
     assert_eq!(barrier.after_step_id, 2);
     assert_eq!(barrier.affected_paths, paths);
     // Timestamp should be recent (within last 5 seconds)
@@ -179,7 +181,7 @@ fn eb_04_barriers_queryable_with_correct_data() {
 #[test]
 fn eb_05_internal_writes_do_not_create_barriers() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Perform various internal operations
@@ -213,7 +215,7 @@ fn eb_05_internal_writes_do_not_create_barriers() {
 #[test]
 fn eb_06_multiple_barriers_all_reported() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::new(ws.working_dir.clone(), ws.undo_dir.clone());
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
     let ops = OperationApplier::new(&interceptor);
 
     // Step 1
@@ -289,10 +291,13 @@ fn eb_06_multiple_barriers_all_reported() {
 #[test]
 fn eb_08_warn_policy_no_barrier() {
     let ws = TempWorkspace::with_fixture(fixtures::small_tree);
-    let interceptor = UndoInterceptor::with_policy(
+    let interceptor = UndoInterceptor::new(
         ws.working_dir.clone(),
         ws.undo_dir.clone(),
-        ExternalModificationPolicy::Warn,
+        UndoConfig {
+            policy: ExternalModificationPolicy::Warn,
+            ..Default::default()
+        },
     );
     let ops = OperationApplier::new(&interceptor);
 
