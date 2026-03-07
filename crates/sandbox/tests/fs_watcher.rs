@@ -34,7 +34,7 @@ async fn fw_01_external_creation_detected() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -95,7 +95,7 @@ async fn fw_02_backend_writes_suppressed() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -172,7 +172,7 @@ async fn fw_04_excluded_patterns_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -221,7 +221,7 @@ async fn fw_05_undo_dir_changes_filtered() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -263,7 +263,7 @@ async fn fw_06_events_emitted_without_completed_steps() {
     let working = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -310,7 +310,7 @@ async fn fw_07_ttl_expiry_allows_detection() {
     let undo = TempDir::new().unwrap();
 
     // Very short TTL
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_millis(50), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_millis(50)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -366,7 +366,7 @@ async fn fw_08_multiple_working_dirs() {
     let working2 = TempDir::new().unwrap();
     let undo = TempDir::new().unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -474,7 +474,7 @@ fn fw_12_write_tracking_interceptor_records() {
         undo.path().to_path_buf(),
     ));
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(10)));
     let tracking = WriteTrackingInterceptor::new(interceptor.clone(), recent_writes.clone());
 
     // Open a step so pre_write doesn't fail
@@ -488,7 +488,7 @@ fn fw_12_write_tracking_interceptor_records() {
 
     // The path should be recorded
     assert!(
-        recent_writes.was_recent(&test_file),
+        recent_writes.should_suppress(&test_file, std::time::Instant::now()),
         "WriteTrackingInterceptor should record mutated paths"
     );
 
@@ -506,7 +506,7 @@ async fn fw_13_gitignored_paths_filtered() {
     // Create a .gitignore that ignores *.log files and the build/ directory
     std::fs::write(working.path().join(".gitignore"), "*.log\nbuild/\n").unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -593,7 +593,7 @@ async fn fw_14_gitignore_disabled() {
     // Create a .gitignore that ignores *.log files
     std::fs::write(working.path().join(".gitignore"), "*.log\n").unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {
@@ -655,7 +655,7 @@ async fn fw_15_parent_dir_deduplication() {
     let subdir = working.path().join("subdir");
     std::fs::create_dir(&subdir).unwrap();
 
-    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5), Duration::from_millis(200)));
+    let recent_writes = Arc::new(RecentBackendWrites::new(Duration::from_secs(5)));
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
 
     let config = FsWatcherConfig {

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
@@ -14,6 +14,14 @@ use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
 use crate::recent_writes::RecentBackendWrites;
+
+/// An `AffectedPath` stamped with the instant the OS delivered the event to
+/// our notify callback. Used to compare against the suppression window rather
+/// than relying on wall-clock time at processing.
+struct TimestampedEvent {
+    affected: AffectedPath,
+    observed_at: Instant,
+}
 
 /// Configuration for the filesystem watcher.
 #[derive(Debug, Clone)]
@@ -59,7 +67,7 @@ pub fn spawn_fs_watcher(
     }
 
     // Create a channel to bridge the synchronous notify callback to async tokio.
-    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Vec<AffectedPath>>();
+    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Vec<TimestampedEvent>>();
 
     // Build the watcher with a batching event handler.
     let watcher_result = build_watcher(bridge_tx);
@@ -128,9 +136,11 @@ pub fn spawn_fs_watcher(
 }
 
 /// Build a `notify::RecommendedWatcher` that collects changed paths into a
-/// sync channel. The watcher batches events internally.
+/// sync channel. Each event is stamped with `Instant::now()` at delivery time
+/// so the suppression check can compare against the event's arrival time
+/// rather than the (later) processing time.
 fn build_watcher(
-    bridge_tx: std::sync::mpsc::Sender<Vec<AffectedPath>>,
+    bridge_tx: std::sync::mpsc::Sender<Vec<TimestampedEvent>>,
 ) -> Result<RecommendedWatcher, notify::Error> {
     // Buffer for pairing consecutive From→To rename events (Windows delivers
     // renames as two separate events; Linux inotify uses RenameMode::Both).
@@ -140,9 +150,14 @@ fn build_watcher(
         if let Ok(event) = result {
             // Only care about modification events — not access-only events.
             if is_mutation_event(&event) {
+                let observed_at = Instant::now();
                 let entries = event_to_affected_paths(event, &mut pending_rename_from);
                 if !entries.is_empty() {
-                    let _ = bridge_tx.send(entries);
+                    let timestamped: Vec<TimestampedEvent> = entries
+                        .into_iter()
+                        .map(|affected| TimestampedEvent { affected, observed_at })
+                        .collect();
+                    let _ = bridge_tx.send(timestamped);
                 }
             }
         }
@@ -268,7 +283,7 @@ fn is_mutation_event(event: &notify::Event) -> bool {
 
 /// Grouped parameters for `run_watcher_loop` to satisfy clippy's argument limit.
 struct WatcherLoopParams<'a> {
-    bridge_rx: std::sync::mpsc::Receiver<Vec<AffectedPath>>,
+    bridge_rx: std::sync::mpsc::Receiver<Vec<TimestampedEvent>>,
     debounce: Duration,
     working_dirs: &'a [PathBuf],
     interceptors: &'a [Arc<UndoInterceptor>],
@@ -295,7 +310,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         gitignore_filters,
     } = params;
     // Use a tokio mpsc to forward from blocking recv to async select.
-    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<Vec<AffectedPath>>();
+    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<Vec<TimestampedEvent>>();
 
     // Spawn a blocking task that reads from the sync channel and forwards.
     let _reader = tokio::task::spawn_blocking(move || {
@@ -306,7 +321,7 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         }
     });
 
-    let mut pending: Vec<AffectedPath> = Vec::new();
+    let mut pending: Vec<TimestampedEvent> = Vec::new();
     let mut pending_seen: HashSet<PathBuf> = HashSet::new();
     let mut debounce_timer = tokio::time::interval(debounce);
     debounce_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -321,10 +336,20 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
     loop {
         tokio::select! {
             Some(entries) = async_rx.recv() => {
-                for ap in entries {
-                    if !pending_seen.contains(&ap.path) {
-                        pending_seen.insert(ap.path.clone());
-                        pending.push(ap);
+                for te in entries {
+                    if pending_seen.contains(&te.affected.path) {
+                        // Same path seen again in this debounce window — keep the
+                        // latest observed_at so the suppression check uses the
+                        // most recent event arrival time for this path.
+                        if let Some(existing) = pending.iter_mut().find(|p| p.affected.path == te.affected.path) {
+                            if te.observed_at > existing.observed_at {
+                                existing.observed_at = te.observed_at;
+                                existing.affected.kind = te.affected.kind;
+                            }
+                        }
+                    } else {
+                        pending_seen.insert(te.affected.path.clone());
+                        pending.push(te);
                     }
                 }
                 // No timer reset: use fixed-interval throttling instead of
@@ -371,7 +396,7 @@ struct ProcessParams<'a> {
 
 /// Process accumulated paths: filter, group by working dir, and emit events.
 fn process_pending_paths(
-    pending: &mut Vec<AffectedPath>,
+    pending: &mut Vec<TimestampedEvent>,
     params: &ProcessParams<'_>,
 ) {
     let ProcessParams {
@@ -393,7 +418,9 @@ fn process_pending_paths(
     // we can remove them from the final set.
     let mut excluded_ancestors: HashSet<PathBuf> = HashSet::new();
 
-    for ap in pending.drain(..) {
+    for te in pending.drain(..) {
+        let ap = te.affected;
+        let observed_at = te.observed_at;
         let path_str = ap.path.to_string_lossy().replace('\\', "/");
 
         // Skip paths inside undo directories.
@@ -414,13 +441,15 @@ fn process_pending_paths(
             continue;
         }
 
-        // Skip if this was a recent backend write (check both dest and source for renames).
-        if recent_writes.was_recent(&ap.path) {
+        // Skip if this event should be suppressed — compares the event's
+        // arrival time against the suppression window, not the current
+        // wall-clock time (which would race with the debounce delay).
+        if recent_writes.should_suppress(&ap.path, observed_at) {
             record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
         if let Some(ref from) = ap.renamed_from {
-            if recent_writes.was_recent(from) {
+            if recent_writes.should_suppress(from, observed_at) {
                 record_ancestors(&ap.path, &mut excluded_ancestors);
                 record_ancestors(from, &mut excluded_ancestors);
                 continue;

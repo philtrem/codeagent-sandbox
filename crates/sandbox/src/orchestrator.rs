@@ -269,7 +269,7 @@ impl Orchestrator {
             std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
         let watcher_tick =
             std::time::Duration::from_millis(self.file_watcher_config.debounce_ms);
-        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl, watcher_tick));
+        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl));
 
         let watcher_config = {
             let mut config = fs_watcher::FsWatcherConfig {
@@ -1461,6 +1461,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
 
         let target = working_dir.join(&args.path);
 
+        if let Some(rw) = self.recent_writes() {
+            rw.record(&target);
+        }
+
         let step_id = self.with_api_step(&interceptor, |_| {
             Self::do_write_file(&interceptor, &target, &args)
         })?;
@@ -1541,6 +1545,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         } else {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
+
+        if let Some(rw) = self.recent_writes() {
+            rw.record(&target);
+        }
 
         self.with_api_step(&interceptor, |_| {
             Self::do_edit_file(&interceptor, &target, &args.path, &new_content)
