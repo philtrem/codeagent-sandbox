@@ -22,10 +22,11 @@ const ARRIVAL_JITTER_BUFFER: Duration = Duration::from_millis(50);
 ///
 /// Provides two suppression layers:
 /// 1. **Per-path**: `record()` / `should_suppress()` — used by `WriteTrackingInterceptor`
-///    for VM filesystem writes where we know the exact paths.
+///    for VM filesystem writes, and by the orchestrator for MCP `write_file`/`edit_file`
+///    where we know the exact paths and can `record()` at write time.
 /// 2. **Blanket**: `begin_suppression()` / `end_suppression()` — used by the
 ///    orchestrator for operations where we cannot enumerate the affected paths
-///    (rollback, host bash, MCP write_file/edit_file).
+///    (rollback, host bash).
 ///
 /// Blanket suppression is counter-based: while any guard is held, `should_suppress`
 /// returns true for all paths. When the last guard drops, the end timestamp is

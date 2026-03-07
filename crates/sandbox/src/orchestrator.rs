@@ -910,6 +910,7 @@ impl Orchestrator {
         interceptor: &UndoInterceptor,
         target: &std::path::Path,
         args: &WriteFileArgs,
+        recent_writes: Option<&RecentBackendWrites>,
     ) -> Result<(), McpError> {
         interceptor.set_step_command(format!("write_file {}", args.path));
 
@@ -937,6 +938,9 @@ impl Orchestrator {
         std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
+        if let Some(rw) = recent_writes {
+            rw.record(target);
+        }
 
         if !existed_before {
             let _ = interceptor.post_create(target);
@@ -950,6 +954,7 @@ impl Orchestrator {
         target: &std::path::Path,
         path: &str,
         new_content: &str,
+        recent_writes: Option<&RecentBackendWrites>,
     ) -> Result<(), McpError> {
         interceptor.set_step_command(format!("edit_file {}", path));
 
@@ -958,6 +963,9 @@ impl Orchestrator {
         std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
+        if let Some(rw) = recent_writes {
+            rw.record(target);
+        }
 
         Ok(())
     }
@@ -1460,13 +1468,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             .map_err(Self::agent_error_to_mcp)?;
 
         let target = working_dir.join(&args.path);
-
-        if let Some(rw) = self.recent_writes() {
-            rw.record(&target);
-        }
+        let rw = self.recent_writes();
 
         let step_id = self.with_api_step(&interceptor, |_| {
-            Self::do_write_file(&interceptor, &target, &args)
+            Self::do_write_file(&interceptor, &target, &args, rw.as_deref())
         })?;
 
         Ok(json!({ "written": true, "step_id": step_id }))
@@ -1546,12 +1551,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
 
-        if let Some(rw) = self.recent_writes() {
-            rw.record(&target);
-        }
+        let rw = self.recent_writes();
 
         self.with_api_step(&interceptor, |_| {
-            Self::do_edit_file(&interceptor, &target, &args.path, &new_content)
+            Self::do_edit_file(&interceptor, &target, &args.path, &new_content, rw.as_deref())
         })?;
 
         Ok(json!(format!(
