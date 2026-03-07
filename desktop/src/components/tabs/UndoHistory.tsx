@@ -149,9 +149,9 @@ function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
   const [expanded, setExpanded] = useState(true);
 
   const label =
-    barrier.after_step_id === 0
-      ? "Barrier (before any step)"
-      : `Barrier (after step ${barrier.after_step_id})`;
+    barrier.reason === "session_start"
+      ? "Session start — files may have changed between sessions"
+      : "External change — files modified outside the sandbox";
 
   return (
     <div className="px-2 py-1">
