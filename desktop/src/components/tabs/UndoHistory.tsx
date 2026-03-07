@@ -68,7 +68,7 @@ function StepCard({
   onRollback: (stepsToRollBack: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const rollbackCount = stepIndex + 1;
+  const rollbackCount = stepIndex;
   const hasFiles = step.files.length > 0;
 
   return (
@@ -106,12 +106,15 @@ function StepCard({
 
         {!step.unprotected && (
           <button
-            onClick={() => onRollback(rollbackCount)}
+            onClick={() => onRollback(stepIndex === 0 ? 1 : rollbackCount)}
             className="flex shrink-0 items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-tertiary)]"
-            title={`Undo the most recent ${rollbackCount} step${rollbackCount > 1 ? "s" : ""}, restoring files to the state before this step`}
+            title={stepIndex === 0
+              ? "Undo this step, restoring files to the state before it"
+              : `Undo the ${rollbackCount} most recent step${rollbackCount > 1 ? "s" : ""}, restoring files to the state after this step`
+            }
           >
             <RotateCcw size={12} />
-            Undo to here
+            {stepIndex === 0 ? "Undo this step" : "Undo to here"}
           </button>
         )}
       </div>
