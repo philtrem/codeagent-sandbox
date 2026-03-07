@@ -475,15 +475,43 @@ impl UndoInterceptor {
         match self.policy {
             ExternalModificationPolicy::Barrier => {
                 let completed = self.inner.lock().unwrap().completed_steps.clone();
-                // No barrier needed if there are no completed steps to protect.
-                let Some(&after_step_id) = completed.last() else {
-                    return Ok(None);
-                };
+                // Use step 0 as sentinel when no steps exist yet, so
+                // pre-step host modifications are still visible in history.
+                let after_step_id = completed.last().copied().unwrap_or(0);
 
                 let step_dir = self.step_dir(after_step_id);
+                // Ensure the step directory exists (step 0 is never
+                // opened via open_step, so its directory may not exist).
+                if !step_dir.exists() {
+                    fs::create_dir_all(&step_dir)?;
+                }
                 let mut entries = read_step_barriers(&step_dir);
-                let index = entries.len();
 
+                // Merge into the last barrier if it has the same reason.
+                // This coalesces watcher ticks between the same VM steps into
+                // one barrier instead of creating a separate barrier per tick.
+                if let Some(last) = entries.last_mut() {
+                    if last.reason == reason {
+                        for path in &affected_paths {
+                            if !last.affected_paths.contains(path) {
+                                last.affected_paths.push(path.clone());
+                            }
+                        }
+                        last.timestamp = Utc::now();
+                        write_step_barriers(&step_dir, &entries)?;
+
+                        let index = entries.len() - 1;
+                        return Ok(Some(BarrierInfo {
+                            barrier_id: synthesize_barrier_id(after_step_id, index),
+                            after_step_id,
+                            timestamp: entries[index].timestamp,
+                            affected_paths: entries[index].affected_paths.clone(),
+                            reason,
+                        }));
+                    }
+                }
+
+                let index = entries.len();
                 entries.push(BarrierEntry {
                     timestamp: Utc::now(),
                     affected_paths: affected_paths.clone(),
@@ -508,7 +536,22 @@ impl UndoInterceptor {
     pub fn barriers(&self) -> Vec<BarrierInfo> {
         let completed = self.inner.lock().unwrap().completed_steps.clone();
         let steps_dir = self.undo_dir.join("steps");
-        load_barriers_for_steps(&steps_dir, &completed)
+        let mut barriers = Vec::new();
+        // Include pre-step barriers (step 0 sentinel) if any exist.
+        let step_0_dir = steps_dir.join("0");
+        if step_0_dir.exists() {
+            for (i, entry) in read_step_barriers(&step_0_dir).into_iter().enumerate() {
+                barriers.push(BarrierInfo {
+                    barrier_id: synthesize_barrier_id(0, i),
+                    after_step_id: 0,
+                    timestamp: entry.timestamp,
+                    affected_paths: entry.affected_paths,
+                    reason: entry.reason,
+                });
+            }
+        }
+        barriers.extend(load_barriers_for_steps(&steps_dir, &completed));
+        barriers
     }
 
     /// Whether undo is disabled due to a version mismatch.

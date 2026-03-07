@@ -325,3 +325,173 @@ fn eb_08_warn_policy_no_barrier() {
     let after = ws.snapshot();
     assert_tree_eq(&before, &after, &compare_opts());
 }
+
+// ---------------------------------------------------------------------------
+// EB-09: contiguous external modifications merge into one barrier
+// ---------------------------------------------------------------------------
+#[test]
+fn eb_09_contiguous_external_modifications_merge() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    // Step 1
+    interceptor.open_step(1).unwrap();
+    ops.write_file(&ws.working_dir.join("small.txt"), b"step 1");
+    interceptor.close_step(1).unwrap();
+
+    // Two separate external modification calls (simulating two watcher ticks).
+    interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("file_a.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+    let result = interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("file_b.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap()
+        .unwrap();
+
+    // Should still be one barrier (merged), not two.
+    let barriers = interceptor.barriers();
+    assert_eq!(barriers.len(), 1, "contiguous external modifications should merge: {barriers:?}");
+    assert_eq!(barriers[0].affected_paths.len(), 2);
+    assert!(barriers[0].affected_paths.contains(&PathBuf::from("file_a.txt")));
+    assert!(barriers[0].affected_paths.contains(&PathBuf::from("file_b.txt")));
+
+    // The returned BarrierInfo should reflect the merged state.
+    assert_eq!(result.affected_paths.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// EB-10: merge does not cross different barrier reasons
+// ---------------------------------------------------------------------------
+#[test]
+fn eb_10_session_start_not_merged_with_external() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    // Step 1
+    interceptor.open_step(1).unwrap();
+    ops.write_file(&ws.working_dir.join("small.txt"), b"step 1");
+    interceptor.close_step(1).unwrap();
+
+    // SessionStart barrier
+    interceptor
+        .notify_external_modification(vec![], BarrierReason::SessionStart)
+        .unwrap();
+
+    // ExternalModification barrier — different reason, should NOT merge.
+    interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("external.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+
+    let barriers = interceptor.barriers();
+    assert_eq!(barriers.len(), 2, "different reasons should not merge: {barriers:?}");
+}
+
+// ---------------------------------------------------------------------------
+// EB-11: merge deduplicates paths
+// ---------------------------------------------------------------------------
+#[test]
+fn eb_11_merge_deduplicates_paths() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    interceptor.open_step(1).unwrap();
+    ops.write_file(&ws.working_dir.join("small.txt"), b"data");
+    interceptor.close_step(1).unwrap();
+
+    // Same path reported twice across two watcher ticks.
+    interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("shared.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+    interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("shared.txt"), PathBuf::from("new.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+
+    let barriers = interceptor.barriers();
+    assert_eq!(barriers.len(), 1);
+    assert_eq!(
+        barriers[0].affected_paths.len(),
+        2,
+        "duplicate should be removed: {:?}",
+        barriers[0].affected_paths
+    );
+    assert!(barriers[0].affected_paths.contains(&PathBuf::from("shared.txt")));
+    assert!(barriers[0].affected_paths.contains(&PathBuf::from("new.txt")));
+}
+
+// ---------------------------------------------------------------------------
+// EB-12: external modification before any step uses step 0 sentinel
+// ---------------------------------------------------------------------------
+#[test]
+fn eb_12_pre_step_barrier_uses_step_zero() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
+
+    // No steps opened/closed yet.
+    let result = interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("pre_step.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+
+    // Should create a barrier with after_step_id = 0.
+    let barrier = result.expect("pre-step modifications should create a barrier");
+    assert_eq!(barrier.after_step_id, 0);
+    assert_eq!(barrier.affected_paths, vec![PathBuf::from("pre_step.txt")]);
+
+    // barriers() should include it.
+    let all = interceptor.barriers();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].after_step_id, 0);
+
+    // read_undo_history should also include it.
+    let history = codeagent_interceptor::history::read_undo_history(&ws.undo_dir).unwrap();
+    assert_eq!(history.barriers.len(), 1);
+    assert_eq!(history.barriers[0].after_step_id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// EB-13: pre-step barrier does not block rollback of step 1
+// ---------------------------------------------------------------------------
+#[test]
+fn eb_13_pre_step_barrier_does_not_block_rollback() {
+    let ws = TempWorkspace::with_fixture(fixtures::small_tree);
+    let interceptor = UndoInterceptor::new_default(ws.working_dir.clone(), ws.undo_dir.clone());
+    let ops = OperationApplier::new(&interceptor);
+
+    // External modification before any step.
+    interceptor
+        .notify_external_modification(
+            vec![PathBuf::from("pre_step.txt")],
+            BarrierReason::ExternalModification,
+        )
+        .unwrap();
+
+    // Step 1
+    interceptor.open_step(1).unwrap();
+    ops.write_file(&ws.working_dir.join("small.txt"), b"step 1 data");
+    interceptor.close_step(1).unwrap();
+
+    // Rollback step 1 should succeed — pre-step barrier is on step 0, not step 1.
+    let result = interceptor.rollback(1, false).unwrap();
+    assert_eq!(result.steps_rolled_back, 1);
+    assert!(result.barriers_crossed.is_empty());
+}
