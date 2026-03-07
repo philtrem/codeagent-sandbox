@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -18,16 +19,26 @@ const OS_EVENT_DELIVERY_BUFFER: Duration = Duration::from_millis(300);
 /// channel or MCP API). The filesystem watcher checks this map to distinguish
 /// backend-originated writes from genuine external modifications.
 ///
-/// Also provides a deadline-based suppression mechanism that the orchestrator
-/// activates during rollback. While the deadline has not expired, `was_recent`
-/// returns true for all paths, causing the watcher to skip all events.
+/// Provides two suppression layers:
+/// 1. **Per-path**: `record()` / `was_recent()` — used by `WriteTrackingInterceptor`
+///    for VM filesystem writes where we know the exact paths.
+/// 2. **Blanket**: `begin_suppression()` / `end_suppression()` — used by the
+///    orchestrator for operations where we cannot enumerate the affected paths
+///    (rollback, host bash, MCP write_file/edit_file).
+///
+/// Blanket suppression is counter-based: while any guard is held, `was_recent`
+/// returns true for all paths. When the last guard drops, a deadline is set to
+/// cover late-arriving OS events.
 pub struct RecentBackendWrites {
     entries: Mutex<HashMap<PathBuf, Instant>>,
     ttl: Duration,
-    /// Grace period for rollback suppression, derived from the watcher tick
+    /// Grace period after the last guard drops, derived from the watcher tick
     /// interval plus an OS event delivery buffer.
     suppress_grace: Duration,
-    /// When set, all paths are suppressed until this instant passes.
+    /// Number of active suppression guards. While > 0, all paths are suppressed.
+    active_suppressions: AtomicUsize,
+    /// Deadline set when `active_suppressions` drops back to zero, covering
+    /// late-arriving OS events after the operation finishes.
     suppress_until: Mutex<Option<Instant>>,
 }
 
@@ -37,6 +48,7 @@ impl RecentBackendWrites {
             entries: Mutex::new(HashMap::new()),
             ttl,
             suppress_grace: watcher_tick + OS_EVENT_DELIVERY_BUFFER,
+            active_suppressions: AtomicUsize::new(0),
             suppress_until: Mutex::new(None),
         }
     }
@@ -63,9 +75,12 @@ impl RecentBackendWrites {
     }
 
     /// Returns true if `path` should be suppressed by the watcher — either
-    /// because it was written by the sandbox within the TTL window, or because
-    /// the suppression deadline has not yet expired (e.g. during/after rollback).
+    /// because a suppression guard is active, or the post-suppression deadline
+    /// has not expired, or the path was written by the sandbox within the TTL.
     pub fn was_recent(&self, path: &Path) -> bool {
+        if self.active_suppressions.load(Ordering::Acquire) > 0 {
+            return true;
+        }
         if let Some(deadline) = *self.suppress_until.lock().unwrap() {
             if Instant::now() < deadline {
                 return true;
@@ -78,18 +93,20 @@ impl RecentBackendWrites {
             .is_some_and(|timestamp| timestamp.elapsed() < self.ttl)
     }
 
-    /// Begin suppressing all watcher events. Suppression lasts until the
-    /// grace period (watcher tick + OS buffer) expires. Call
-    /// `extend_suppression` to push the deadline further into the future
-    /// (e.g. after rollback completes).
+    /// Increment the active suppression counter. While any guard is active,
+    /// `was_recent` returns true for all paths.
     pub fn begin_suppression(&self) {
-        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+        self.active_suppressions.fetch_add(1, Ordering::Release);
     }
 
-    /// Extend the suppression deadline by the grace period from now. Called
-    /// when rollback completes to cover late-arriving filesystem events.
-    pub fn extend_suppression(&self) {
-        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+    /// Decrement the active suppression counter. When the counter reaches zero,
+    /// sets a deadline to cover late-arriving OS events.
+    pub fn end_suppression(&self) {
+        let prev = self.active_suppressions.fetch_sub(1, Ordering::Release);
+        debug_assert!(prev > 0, "end_suppression called without matching begin_suppression");
+        if prev == 1 {
+            *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+        }
     }
 
     /// Remove entries older than the TTL.

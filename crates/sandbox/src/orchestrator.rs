@@ -68,14 +68,16 @@ fn check_paths_overlap(working_dir: &std::path::Path, undo_dir: &std::path::Path
     Ok(())
 }
 
-/// RAII guard that extends the watcher suppression deadline on drop.
-/// This ensures late-arriving filesystem events from rollback are still
-/// suppressed even after the rollback function returns.
+/// RAII guard that suppresses all watcher events while held.
+///
+/// On creation, increments the active suppression counter. On drop, decrements
+/// it — and when the count reaches zero, sets a grace-period deadline to cover
+/// late-arriving OS filesystem events.
 struct WatcherSuppressGuard(Arc<RecentBackendWrites>);
 
 impl Drop for WatcherSuppressGuard {
     fn drop(&mut self) {
-        self.0.extend_suppression();
+        self.0.end_suppression();
     }
 }
 
@@ -853,10 +855,10 @@ impl Orchestrator {
     }
 
     /// Begin suppressing all watcher events and return a guard that extends
-    /// the suppression deadline on drop. This prevents rollback-originated
+    /// the suppression deadline on drop. This prevents sandbox-originated
     /// filesystem changes from being misidentified as external modifications,
-    /// including late-arriving OS events after the rollback returns.
-    fn suppress_watcher_during_rollback(&self) -> Option<WatcherSuppressGuard> {
+    /// including late-arriving OS events after the operation returns.
+    fn suppress_watcher(&self) -> Option<WatcherSuppressGuard> {
         let rw = self.recent_writes()?;
         rw.begin_suppression();
         Some(WatcherSuppressGuard(rw))
@@ -873,6 +875,9 @@ impl Orchestrator {
     }
 
     /// Open a synthetic API step, run `f`, then close or rollback on error.
+    ///
+    /// Suppresses the filesystem watcher for the duration of the step so that
+    /// writes made inside `f` are not misidentified as external modifications.
     fn with_api_step<F>(
         &self,
         interceptor: &UndoInterceptor,
@@ -881,6 +886,8 @@ impl Orchestrator {
     where
         F: FnOnce(i64) -> Result<(), McpError>,
     {
+        let _guard = self.suppress_watcher();
+
         let step_id = self.next_api_step_id()?;
         interceptor
             .open_step(step_id)
@@ -900,7 +907,6 @@ impl Orchestrator {
     }
 
     fn do_write_file(
-        &self,
         interceptor: &UndoInterceptor,
         target: &std::path::Path,
         args: &WriteFileArgs,
@@ -911,32 +917,26 @@ impl Orchestrator {
 
         if existed_before {
             let _ = interceptor.pre_write(target);
-        } else {
+        } else if let Some(parent) = target.parent() {
             let mut dirs_to_track = Vec::new();
-            if let Some(parent) = target.parent() {
-                let mut ancestor = parent.to_path_buf();
-                while !ancestor.exists() {
-                    dirs_to_track.push(ancestor.clone());
-                    if !ancestor.pop() {
-                        break;
-                    }
+            let mut ancestor = parent.to_path_buf();
+            while !ancestor.exists() {
+                dirs_to_track.push(ancestor.clone());
+                if !ancestor.pop() {
+                    break;
                 }
-                std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
-                    message: e.to_string(),
-                })?;
-                for dir in dirs_to_track.iter().rev() {
-                    let _ = interceptor.post_mkdir(dir);
-                }
+            }
+            std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
+                message: e.to_string(),
+            })?;
+            for dir in dirs_to_track.iter().rev() {
+                let _ = interceptor.post_mkdir(dir);
             }
         }
 
         std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
-
-        if let Some(rw) = self.recent_writes() {
-            rw.record(target);
-        }
 
         if !existed_before {
             let _ = interceptor.post_create(target);
@@ -946,7 +946,6 @@ impl Orchestrator {
     }
 
     fn do_edit_file(
-        &self,
         interceptor: &UndoInterceptor,
         target: &std::path::Path,
         path: &str,
@@ -959,10 +958,6 @@ impl Orchestrator {
         std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
-
-        if let Some(rw) = self.recent_writes() {
-            rw.record(target);
-        }
 
         Ok(())
     }
@@ -979,6 +974,12 @@ impl Orchestrator {
         let working_dir = self
             .primary_working_dir()
             .map_err(Self::agent_error_to_mcp)?;
+
+        // Suppress watcher events for the duration of the command (and a grace
+        // period after) so that filesystem changes made by the command are not
+        // misidentified as external modifications. The guard extends the
+        // suppression deadline on drop to cover late-arriving OS events.
+        let _guard = self.suppress_watcher();
 
         let shell = if cfg!(windows) { "bash" } else { "sh" };
         let output = std::process::Command::new(shell)
@@ -1075,7 +1076,7 @@ impl RequestHandler for Orchestrator {
             .resolve_interceptor(payload.directory.as_deref())
             .map_err(Self::agent_error_to_stdio)?;
 
-        let _guard = self.suppress_watcher_during_rollback();
+        let _guard = self.suppress_watcher();
 
         let result = interceptor
             .rollback(payload.count as usize, payload.force)
@@ -1461,7 +1462,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let target = working_dir.join(&args.path);
 
         let step_id = self.with_api_step(&interceptor, |_| {
-            self.do_write_file(&interceptor, &target, &args)
+            Self::do_write_file(&interceptor, &target, &args)
         })?;
 
         Ok(json!({ "written": true, "step_id": step_id }))
@@ -1542,7 +1543,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         };
 
         self.with_api_step(&interceptor, |_| {
-            self.do_edit_file(&interceptor, &target, &args.path, &new_content)
+            Self::do_edit_file(&interceptor, &target, &args.path, &new_content)
         })?;
 
         Ok(json!(format!(
@@ -1724,7 +1725,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let count = args.count as usize;
         let force = args.force;
 
-        let _guard = self.suppress_watcher_during_rollback();
+        let _guard = self.suppress_watcher();
 
         let result = interceptor
             .rollback(count, force)
