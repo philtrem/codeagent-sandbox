@@ -261,11 +261,13 @@ crates/
       control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
                                    #   spawn_control_reader (socket reader → ControlChannelHandler),
                                    #   serialize_host_message
-      recent_writes.rs             #   RecentBackendWrites (Mutex<HashMap<PathBuf, Instant>> + TTL),
-                                   #   WriteTrackingInterceptor (WriteInterceptor decorator that
-                                   #   records mutated paths for watcher suppression)
+      recent_writes.rs             #   RecentBackendWrites (event-time-based suppression:
+                                   #   per-path TTL + blanket counter + suppress_ended_at),
+                                   #   should_suppress(path, event_time), WriteTrackingInterceptor
+                                   #   (WriteInterceptor decorator for watcher suppression)
       fs_watcher.rs                #   FsWatcherConfig, spawn_fs_watcher() — notify crate v8,
-                                   #   debounced event processing, RecentBackendWrites filtering,
+                                   #   TimestampedEvent (Instant-stamped at OS delivery),
+                                   #   debounced event processing, event-time suppression,
                                    #   exclude patterns, undo dir filtering, barrier creation
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns external
