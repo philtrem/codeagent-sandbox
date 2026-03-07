@@ -24,6 +24,12 @@
 - Use clear, descriptive names for all variables.
 - Avoid obscure abbreviations (e.g., use `isCollection` instead of `isColl`).
 
+## Constants & Configuration
+- **No hard-coded values**: Use named constants or derive values from existing configuration
+  rather than embedding magic numbers or durations directly in logic. If a value depends on
+  another configurable parameter, compute it from that parameter rather than hard-coding a
+  value that assumes a specific default.
+
 ## Workflow
 - **Write plans to a file before implementing**: For non-trivial tasks, write the plan to a
   markdown file in the repo before starting implementation. Delete when done.
