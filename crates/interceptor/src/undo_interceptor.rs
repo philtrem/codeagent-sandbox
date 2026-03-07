@@ -5,9 +5,9 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use codeagent_common::{
-    BarrierInfo, BarrierReason, CodeAgentError, ExternalModificationPolicy, ResourceLimitsConfig,
-    Result, RollbackResult, SafeguardConfig, SafeguardDecision, SafeguardEvent, StepId,
-    StepManager, SymlinkPolicy,
+    AffectedPath, BarrierInfo, BarrierReason, CodeAgentError, ExternalModificationPolicy,
+    ResourceLimitsConfig, Result, RollbackResult, SafeguardConfig, SafeguardDecision,
+    SafeguardEvent, StepId, StepManager, SymlinkPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ const CURRENT_VERSION: &str = "1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BarrierEntry {
     pub(crate) timestamp: DateTime<Utc>,
-    pub(crate) affected_paths: Vec<PathBuf>,
+    pub(crate) affected_paths: Vec<AffectedPath>,
     pub(crate) reason: BarrierReason,
 }
 
@@ -469,7 +469,7 @@ impl UndoInterceptor {
     /// Under `Warn` policy, returns `None` (no barrier created).
     pub fn notify_external_modification(
         &self,
-        affected_paths: Vec<PathBuf>,
+        affected_paths: Vec<AffectedPath>,
         reason: BarrierReason,
     ) -> Result<Option<BarrierInfo>> {
         match self.policy {
@@ -492,9 +492,9 @@ impl UndoInterceptor {
                 // one barrier instead of creating a separate barrier per tick.
                 if let Some(last) = entries.last_mut() {
                     if last.reason == reason {
-                        for path in &affected_paths {
-                            if !last.affected_paths.contains(path) {
-                                last.affected_paths.push(path.clone());
+                        for ap in &affected_paths {
+                            if !last.affected_paths.iter().any(|existing| existing.path == ap.path) {
+                                last.affected_paths.push(ap.clone());
                             }
                         }
                         last.timestamp = Utc::now();

@@ -152,11 +152,17 @@ export interface UndoStepDetail {
   unprotected: boolean;
 }
 
+export interface AffectedPathDetail {
+  path: string;
+  kind: "created" | "modified" | "deleted" | "renamed";
+  renamed_from?: string;
+}
+
 export interface BarrierDetail {
   barrier_id: number;
   after_step_id: number;
   timestamp: string;
-  affected_paths: string[];
+  affected_paths: AffectedPathDetail[];
   reason: "session_start" | "external_modification";
 }
 

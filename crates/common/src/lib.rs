@@ -84,6 +84,39 @@ pub enum BarrierReason {
     ExternalModification,
 }
 
+/// What kind of filesystem change was detected.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Created,
+    #[default]
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// A path affected by an external modification, with the type of change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AffectedPath {
+    pub path: PathBuf,
+    /// Defaults to `Modified` for backward compat with old barriers.json files.
+    #[serde(default)]
+    pub kind: FileChangeKind,
+    /// For rename operations, the original path before the rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<PathBuf>,
+}
+
+impl From<PathBuf> for AffectedPath {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            path,
+            kind: FileChangeKind::default(),
+            renamed_from: None,
+        }
+    }
+}
+
 /// A marker in the undo history that prevents rollback from crossing it.
 ///
 /// Barriers are created when external modifications are detected in the working
@@ -96,7 +129,7 @@ pub struct BarrierInfo {
     /// Rolling back this step would cross the barrier.
     pub after_step_id: StepId,
     pub timestamp: DateTime<Utc>,
-    pub affected_paths: Vec<PathBuf>,
+    pub affected_paths: Vec<AffectedPath>,
     /// Why this barrier was created.
     #[serde(default)]
     pub reason: BarrierReason,
@@ -296,7 +329,10 @@ mod tests {
             barrier_id: 1,
             after_step_id: 42,
             timestamp: Utc::now(),
-            affected_paths: vec![PathBuf::from("src/main.rs"), PathBuf::from("Cargo.toml")],
+            affected_paths: vec![
+                AffectedPath { path: PathBuf::from("src/main.rs"), kind: FileChangeKind::Modified, renamed_from: None },
+                AffectedPath { path: PathBuf::from("Cargo.toml"), kind: FileChangeKind::Created, renamed_from: None },
+            ],
             reason: BarrierReason::SessionStart,
         };
         let json = serde_json::to_string_pretty(&info).unwrap();
