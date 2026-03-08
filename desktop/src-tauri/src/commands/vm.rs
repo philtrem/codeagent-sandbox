@@ -168,6 +168,14 @@ fn build_sandbox_args(config: &SandboxConfig, kernel_path: &str, initrd_path: &s
         args.push(config.vm.virtiofsd_binary.clone());
     }
 
+    // When Claude Code integration is enabled, Claude Code spawns its own
+    // sandbox process (via the registered MCP server config). That process
+    // handles filesystem watching. Disable the watcher in THIS process to
+    // prevent duplicate watchers creating spurious undo barriers.
+    if config.claude_code.enabled {
+        args.push("--no-watcher".into());
+    }
+
     args
 }
 
@@ -235,12 +243,28 @@ pub(super) fn find_sandbox_binary() -> Result<String, String> {
         }
 
         // Development fallback: workspace target directory
-        // In dev, the Tauri exe is in target/debug/desktop.exe
-        // The sandbox binary is in target/release/sandbox.exe or target/debug/sandbox.exe
+        // In dev, the Tauri exe is in desktop/src-tauri/target/debug/desktop.exe.
+        // Walk up to the workspace root and check target/{release,debug}/.
         if let Ok(exe) = std::env::current_exe() {
+            // First try the Tauri-local target (parent of parent of exe).
             if let Some(target_dir) = exe.parent().and_then(|p| p.parent()) {
                 for profile in &["release", "debug"] {
                     let candidate = target_dir.join(profile).join(sandbox_name);
+                    if candidate.exists() {
+                        return Ok(candidate.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            // Then try the workspace root target directory.
+            // Tauri exe: <root>/desktop/src-tauri/target/debug/exe
+            // Workspace target: <root>/target/{release,debug}/sandbox
+            if let Some(workspace_root) = exe.parent()
+                .and_then(|p| p.parent())   // target/
+                .and_then(|p| p.parent())   // src-tauri/
+                .and_then(|p| p.parent())   // desktop/
+            {
+                for profile in &["release", "debug"] {
+                    let candidate = workspace_root.join("target").join(profile).join(sandbox_name);
                     if candidate.exists() {
                         return Ok(candidate.to_string_lossy().into_owned());
                     }

@@ -275,7 +275,7 @@ impl Orchestrator {
             let mut config = fs_watcher::FsWatcherConfig {
                 debounce: watcher_tick,
                 exclude_patterns: fs_watcher::FsWatcherConfig::default().exclude_patterns,
-                enabled: self.file_watcher_config.enabled,
+                enabled: self.file_watcher_config.enabled && !self.cli_args.no_watcher,
                 use_gitignore: self.file_watcher_config.use_gitignore,
             };
             config

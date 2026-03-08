@@ -58,6 +58,12 @@ pub struct CliArgs {
     /// (`{config_dir}/CodeAgent/codeagent.toml`).
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+
+    /// Disable the filesystem watcher. Use when another sandbox process on the
+    /// same working directory already handles external modification detection
+    /// (e.g., when Claude Code integration spawns a separate sandbox instance).
+    #[arg(long)]
+    pub no_watcher: bool,
 }
 
 #[cfg(test)]
@@ -79,6 +85,21 @@ mod tests {
         assert_eq!(args.vm_mode, "ephemeral");
         assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
+        assert!(!args.no_watcher);
+    }
+
+    #[test]
+    fn no_watcher_flag_parse() {
+        let args = CliArgs::try_parse_from([
+            "sandbox",
+            "--working-dir",
+            "/tmp/work",
+            "--undo-dir",
+            "/tmp/undo",
+            "--no-watcher",
+        ])
+        .unwrap();
+        assert!(args.no_watcher);
     }
 
     #[test]
