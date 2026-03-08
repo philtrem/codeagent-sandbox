@@ -29,6 +29,7 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         config_file: None,
         socket_path: None,
         log_file: None,
+        disable_builtin_tools: false,
     }
 }
 
@@ -675,6 +676,7 @@ fn ao_16_undo_inside_working_dir_rejected() {
         config_file: None,
         socket_path: None,
         log_file: None,
+        disable_builtin_tools: false,
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
@@ -711,6 +713,7 @@ fn ao_17_working_inside_undo_dir_rejected() {
         config_file: None,
         socket_path: None,
         log_file: None,
+        disable_builtin_tools: false,
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 

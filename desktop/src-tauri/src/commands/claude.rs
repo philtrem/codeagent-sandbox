@@ -295,6 +295,10 @@ fn build_mcp_args(config: &crate::config::SandboxConfig) -> Vec<String> {
         args.push(config.vm.rootfs_path.clone());
     }
 
+    if config.claude_code.disable_builtin_tools {
+        args.push("--disable-builtin-tools".into());
+    }
+
     // Side-channel socket for desktop app connectivity
     if let Some(socket) = crate::paths::socket_path() {
         args.push("--socket-path".into());
@@ -334,11 +338,6 @@ pub fn register_mcp_server(config: &crate::config::SandboxConfig) {
         let mut value = read_json_file(&path);
         merge_mcp_entry(&mut value, &entry);
         let _ = write_json_file(&path, &value);
-    }
-
-    if config.claude_code.disable_builtin_tools {
-        let tools: Vec<String> = DENIED_TOOLS.iter().map(|s| (*s).into()).collect();
-        let _ = set_claude_code_denied_tools(tools);
     }
 
     // Always allow read tools; conditionally allow write tools
@@ -381,6 +380,32 @@ pub fn unregister_mcp_server() {
     let _ = remove_claude_code_allowed_tools(config.claude_code.server_name.clone());
 
     // Claude Code: remove our deny entries from settings.json
+    if let Some(path) = claude_code_settings_path() {
+        if path.exists() {
+            let mut value = read_json_file(&path);
+            if let Some(arr) = value
+                .pointer_mut("/permissions/deny")
+                .and_then(|v| v.as_array_mut())
+            {
+                let before_len = arr.len();
+                arr.retain(|v| {
+                    v.as_str()
+                        .map(|s| !DENIED_TOOLS.contains(&s))
+                        .unwrap_or(true)
+                });
+                if arr.len() != before_len {
+                    let _ = write_json_file(&path, &value);
+                }
+            }
+        }
+    }
+}
+
+/// Remove stale denied-tool entries from `~/.claude/settings.json`.
+///
+/// Called unconditionally on desktop app startup as a failsafe for crashed
+/// sandbox processes that didn't get a chance to restore built-in tools.
+pub fn remove_stale_denied_tools() {
     if let Some(path) = claude_code_settings_path() {
         if path.exists() {
             let mut value = read_json_file(&path);

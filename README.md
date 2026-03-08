@@ -140,6 +140,18 @@ desktop/              Tauri v2 desktop app (React + TypeScript + Zustand)
 - **Two-channel separation.** The filesystem channel and control channel are completely independent. The control channel never sees filesystem operations. Correlation happens on the host: all filesystem writes between `step_started(N)` and `step_completed(N)` belong to undo step N.
 - **Host-only fallback.** When QEMU or guest images are unavailable, the sandbox operates without a VM. Filesystem tools work directly on the host with full undo support. Commands execute directly on the host via a shell (without VM isolation).
 
+## Troubleshooting
+
+### Claude Code's built-in tools stopped working
+
+**Symptom:** Claude Code cannot use its built-in tools (Read, Edit, Write, Glob, Grep, Bash) — they appear blocked or unavailable.
+
+**Cause:** The sandbox process adds these tools to the deny list in `~/.claude/settings.json` while running (so all operations go through the sandbox instead). If the sandbox process crashes or is killed before it can restore the settings, the deny entries remain.
+
+**Fix — manual:** Open `~/.claude/settings.json` in a text editor and remove `"Read"`, `"Edit"`, `"Write"`, `"Glob"`, `"Grep"`, and `"Bash"` from the `permissions.deny` array.
+
+**Fix — automatic:** Launch the Code Agent desktop app. It automatically cleans up stale denied-tool entries on startup.
+
 ## License
 
 MIT OR Apache-2.0

@@ -1,3 +1,4 @@
+pub mod claude_settings;
 pub mod cli;
 pub mod command_classifier;
 pub mod command_waiter;

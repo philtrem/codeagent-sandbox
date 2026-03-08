@@ -51,6 +51,7 @@ fn make_args(working_dir: &Path, undo_dir: &Path) -> CliArgs {
         config_file: None,
         socket_path: None,
         log_file: None,
+        disable_builtin_tools: false,
     }
 }
 

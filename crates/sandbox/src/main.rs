@@ -50,6 +50,7 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
     let socket_path = args.socket_path.clone();
     let log_file = args.log_file.clone();
+    let builtin_tools_denied = args.disable_builtin_tools;
     let working_directories: Vec<_> = args
         .working_dirs
         .iter()
@@ -72,6 +73,10 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if let Err(e) = orchestrator.session_start(payload) {
         eprintln!("{{\"level\":\"error\",\"message\":\"session auto-start failed: {e}\"}}");
         std::process::exit(1);
+    }
+
+    if builtin_tools_denied {
+        codeagent_sandbox::claude_settings::deny_builtin_tools();
     }
 
     // Drain any events emitted during session start (e.g., VM launch warnings)
@@ -133,6 +138,10 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if let Err(e) = server.run(stdin, stdout).await {
         eprintln!("{{\"level\":\"error\",\"message\":\"{e}\"}}");
         std::process::exit(1);
+    }
+
+    if builtin_tools_denied {
+        codeagent_sandbox::claude_settings::restore_builtin_tools();
     }
 
     // Shut down socket server when stdin/stdout server exits

@@ -67,6 +67,11 @@ pub struct CliArgs {
     /// Path to a log file. When set, stderr output is also teed to this file.
     #[arg(long)]
     pub log_file: Option<PathBuf>,
+
+    /// Block Claude Code's built-in file/command tools (Read, Edit, Write, Glob,
+    /// Grep, Bash) while the sandbox is running, restoring them on exit.
+    #[arg(long)]
+    pub disable_builtin_tools: bool,
 }
 
 #[cfg(test)]

@@ -7,6 +7,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Clean up any stale denied tools left by a crashed sandbox process.
+    // This is a failsafe — the sandbox binary normally restores them on exit.
+    claude::remove_stale_denied_tools();
+
     let config = config_cmd::read_config_internal();
 
     if config.claude_code.enabled {
