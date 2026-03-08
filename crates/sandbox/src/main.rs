@@ -138,11 +138,13 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    if let Err(e) = server.run(stdin, stdout).await {
+    let server_result = server.run(stdin, stdout).await;
+    if let Err(ref e) = server_result {
         eprintln!("{{\"level\":\"error\",\"message\":\"{e}\"}}");
-        std::process::exit(1);
     }
 
+    // Always restore Claude settings, even if the server exited with an error
+    // (e.g. broken pipe when Claude Code terminates).
     if builtin_tools_denied {
         codeagent_sandbox::claude_settings::restore_builtin_tools();
     }
@@ -152,5 +154,9 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if let Some((handle, shutdown_tx)) = _socket_handle {
         let _ = shutdown_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    if server_result.is_err() {
+        std::process::exit(1);
     }
 }
