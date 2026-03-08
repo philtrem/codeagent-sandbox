@@ -72,6 +72,16 @@ pub struct CliArgs {
     /// Grep, Bash) while the sandbox is running, restoring them on exit.
     #[arg(long)]
     pub disable_builtin_tools: bool,
+
+    /// Auto-allow MCP write tools (Bash, write_file, edit_file, undo) in
+    /// Claude Code's permissions while the sandbox is running.
+    #[arg(long)]
+    pub auto_allow_write_tools: bool,
+
+    /// MCP server name used for registering allowed-tool entries in Claude Code
+    /// (e.g. `MCP(codeagent-sandbox:read_file)`).
+    #[arg(long, default_value = "codeagent-sandbox")]
+    pub server_name: String,
 }
 
 #[cfg(test)]

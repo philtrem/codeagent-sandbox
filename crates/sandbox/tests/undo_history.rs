@@ -52,6 +52,8 @@ fn make_args(working_dir: &Path, undo_dir: &Path) -> CliArgs {
         socket_path: None,
         log_file: None,
         disable_builtin_tools: false,
+        auto_allow_write_tools: false,
+        server_name: "codeagent-sandbox".into(),
     }
 }
 

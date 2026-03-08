@@ -51,6 +51,8 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     let socket_path = args.socket_path.clone();
     let log_file = args.log_file.clone();
     let builtin_tools_denied = args.disable_builtin_tools;
+    let auto_allow_write = args.auto_allow_write_tools;
+    let server_name = args.server_name.clone();
     let working_directories: Vec<_> = args
         .working_dirs
         .iter()
@@ -78,6 +80,7 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if builtin_tools_denied {
         codeagent_sandbox::claude_settings::deny_builtin_tools();
     }
+    codeagent_sandbox::claude_settings::set_allowed_tools(&server_name, auto_allow_write);
 
     // Drain any events emitted during session start (e.g., VM launch warnings)
     // and log them to stderr so they're visible in diagnostic output.
@@ -143,6 +146,7 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if builtin_tools_denied {
         codeagent_sandbox::claude_settings::restore_builtin_tools();
     }
+    codeagent_sandbox::claude_settings::remove_allowed_tools(&server_name);
 
     // Shut down socket server when stdin/stdout server exits
     if let Some((handle, shutdown_tx)) = _socket_handle {

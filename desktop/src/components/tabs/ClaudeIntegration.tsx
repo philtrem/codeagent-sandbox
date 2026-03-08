@@ -9,7 +9,6 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
-import { useToastStore } from "../../hooks/useToastStore";
 import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
 
 function CopyButton({ text }: { text: string }) {
@@ -50,6 +49,13 @@ function buildMcpEntry(
   args.push("--protocol", "mcp");
   args.push("--memory-mb", String(config.vm.memory_mb));
   args.push("--cpus", String(config.vm.cpus));
+  args.push("--server-name", serverName);
+  if (config.claude_code.disable_builtin_tools) {
+    args.push("--disable-builtin-tools");
+  }
+  if (config.claude_code.auto_allow_write_tools) {
+    args.push("--auto-allow-write-tools");
+  }
 
   return {
     server_name: serverName,
@@ -70,17 +76,8 @@ function generatePreviewJson(entry: McpServerEntry): string {
   return JSON.stringify(config, null, 2);
 }
 
-const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
-
-const READ_TOOLS = [
-  "read_file", "list_directory", "glob", "grep",
-  "get_undo_history", "get_session_status", "get_working_directory",
-];
-const WRITE_TOOLS = ["Bash", "write_file", "edit_file", "undo"];
-
 export default function ClaudeIntegration() {
   const { config, updateSection } = useSandboxConfig();
-  const addToast = useToastStore((s) => s.addToast);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
   const [cliCommand, setCliCommand] = useState("");
@@ -117,41 +114,8 @@ export default function ClaudeIntegration() {
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
 
-  const handleToggle = async (enabled: boolean) => {
+  const handleToggle = (enabled: boolean) => {
     updateSection("claude_code", { enabled });
-    try {
-      if (enabled) {
-        await invoke("write_claude_code_config", {
-          entry,
-          scope: config.claude_code.scope,
-        });
-        if (config.claude_code.disable_builtin_tools) {
-          await invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
-        }
-        const allowTools = [
-          ...READ_TOOLS,
-          ...(config.claude_code.auto_allow_write_tools ? WRITE_TOOLS : []),
-        ];
-        await invoke("set_claude_code_allowed_tools", {
-          serverName: config.claude_code.server_name,
-          tools: allowTools,
-        });
-        addToast("warning", "Restart Claude Code for changes to take effect.");
-      } else {
-        await invoke("remove_claude_code_config", {
-          serverName: config.claude_code.server_name,
-          scope: config.claude_code.scope,
-        });
-        await invoke("remove_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
-        await invoke("remove_claude_code_allowed_tools", {
-          serverName: config.claude_code.server_name,
-        });
-        addToast("warning", "Restart Claude Code for changes to take effect.");
-      }
-      detect();
-    } catch (e) {
-      addToast("error", `Failed to update Claude Code config: ${e}`);
-    }
   };
 
   return (
@@ -283,27 +247,11 @@ export default function ClaudeIntegration() {
             <button
               role="switch"
               aria-checked={config.claude_code.auto_allow_write_tools}
-              onClick={async () => {
-                const next = !config.claude_code.auto_allow_write_tools;
-                updateSection("claude_code", { auto_allow_write_tools: next });
-                if (config.claude_code.enabled) {
-                  try {
-                    await invoke("remove_claude_code_allowed_tools", {
-                      serverName: config.claude_code.server_name,
-                    });
-                    const tools = [
-                      ...READ_TOOLS,
-                      ...(next ? WRITE_TOOLS : []),
-                    ];
-                    await invoke("set_claude_code_allowed_tools", {
-                      serverName: config.claude_code.server_name,
-                      tools,
-                    });
-                  } catch (e) {
-                    addToast("error", `Failed to update allowed tools: ${e}`);
-                  }
-                }
-              }}
+              onClick={() =>
+                updateSection("claude_code", {
+                  auto_allow_write_tools: !config.claude_code.auto_allow_write_tools,
+                })
+              }
               className={`relative h-5 w-9 rounded-full transition-colors ${
                 config.claude_code.auto_allow_write_tools
                   ? "bg-[var(--color-accent)]"

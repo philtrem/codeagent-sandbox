@@ -7,21 +7,6 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Clean up any stale denied tools left by a crashed sandbox process.
-    // This is a failsafe — the sandbox binary normally restores them on exit.
-    claude::remove_stale_denied_tools();
-
-    let config = config_cmd::read_config_internal();
-
-    if config.claude_code.enabled {
-        // MCP mode: sync Claude Code's config with current desktop settings.
-        // Claude Code spawns the sandbox — we just keep the config up to date.
-        claude::register_mcp_server(&config);
-    } else {
-        // Manual mode: clean up any stale MCP registration from a previous session.
-        claude::unregister_mcp_server();
-    }
-
     // Kill any orphaned sandbox.exe left over from a previous crash (manual mode only)
     vm::kill_orphaned_sandbox();
 
@@ -41,13 +26,7 @@ pub fn run() {
             vm::get_vm_status,
             // Claude commands
             claude::detect_claude_code_config,
-            claude::write_claude_code_config,
-            claude::remove_claude_code_config,
             claude::generate_claude_code_cli_command,
-            claude::set_claude_code_denied_tools,
-            claude::remove_claude_code_denied_tools,
-            claude::set_claude_code_allowed_tools,
-            claude::remove_claude_code_allowed_tools,
             // System commands
             system::get_platform,
             system::get_cpu_count,
@@ -88,10 +67,6 @@ pub fn run() {
                     let _ = std::fs::remove_file(&pid_path);
                 }
 
-                // Always restore Claude settings on exit — remove our MCP server
-                // entry, denied tools, and allowed tools. The startup code will
-                // re-register if claude_code.enabled is still true next launch.
-                claude::unregister_mcp_server();
             }
         });
 }
