@@ -935,12 +935,12 @@ impl Orchestrator {
             }
         }
 
-        std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
-            message: e.to_string(),
-        })?;
         if let Some(rw) = recent_writes {
             rw.record(target);
         }
+        std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
 
         if !existed_before {
             let _ = interceptor.post_create(target);
@@ -960,12 +960,12 @@ impl Orchestrator {
 
         let _ = interceptor.pre_write(target);
 
-        std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
-            message: e.to_string(),
-        })?;
         if let Some(rw) = recent_writes {
             rw.record(target);
         }
+        std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
+            message: e.to_string(),
+        })?;
 
         Ok(())
     }

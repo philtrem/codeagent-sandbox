@@ -456,14 +456,6 @@ fn process_pending_paths(
             }
         }
 
-        // Log paths not suppressed — helps diagnose watcher vs. interceptor mismatches.
-        eprintln!(
-            "{{\"level\":\"debug\",\"component\":\"fs_watcher\",\"action\":\"external_candidate\",\"raw_path\":\"{}\",\"normalized_path\":\"{}\",\"kind\":\"{:?}\"}}",
-            ap.path.display(),
-            path_str,
-            ap.kind
-        );
-
         // Find which working directory this path belongs to.
         for (index, working_dir) in working_dirs.iter().enumerate() {
             if ap.path.starts_with(working_dir) {

@@ -60,10 +60,6 @@ impl RecentBackendWrites {
     /// and we need to suppress those too.
     pub fn record(&self, path: &Path) {
         let canonical = normalize_path(path);
-        eprintln!(
-            "{{\"level\":\"trace\",\"component\":\"recent_writes\",\"action\":\"record\",\"path\":\"{}\"}}",
-            canonical.display()
-        );
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
         if let Some(parent) = canonical.parent() {
