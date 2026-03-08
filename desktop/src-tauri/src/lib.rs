@@ -26,6 +26,8 @@ pub fn run() {
             vm::get_vm_status,
             // Claude commands
             claude::detect_claude_code_config,
+            claude::write_claude_code_config,
+            claude::remove_claude_code_config,
             claude::generate_claude_code_cli_command,
             // System commands
             system::get_platform,

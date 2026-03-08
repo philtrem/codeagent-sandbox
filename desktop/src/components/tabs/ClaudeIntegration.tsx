@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Copy,
@@ -9,6 +9,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
+import { useToastStore } from "../../hooks/useToastStore";
 import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
 
 function CopyButton({ text }: { text: string }) {
@@ -78,9 +79,12 @@ function generatePreviewJson(entry: McpServerEntry): string {
 
 export default function ClaudeIntegration() {
   const { config, updateSection } = useSandboxConfig();
+  const addToast = useToastStore((s) => s.addToast);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
   const [cliCommand, setCliCommand] = useState("");
+  const prevScope = useRef(config.claude_code.scope);
+  const prevServerName = useRef(config.claude_code.server_name);
 
   const detect = useCallback(async () => {
     try {
@@ -114,7 +118,46 @@ export default function ClaudeIntegration() {
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
 
-  const handleToggle = (enabled: boolean) => {
+  // Sync MCP entry to Claude config whenever enabled and entry content changes.
+  const entryKey = entry.args.join(",");
+  useEffect(() => {
+    if (!config.claude_code.enabled) return;
+
+    const scope = config.claude_code.scope;
+    const serverName = config.claude_code.server_name;
+
+    // If scope or server name changed, remove the old entry first.
+    if (prevScope.current !== scope) {
+      invoke("remove_claude_code_config", {
+        serverName: prevServerName.current,
+        scope: prevScope.current,
+      }).catch(() => {});
+    } else if (prevServerName.current !== serverName) {
+      invoke("remove_claude_code_config", {
+        serverName: prevServerName.current,
+        scope,
+      }).catch(() => {});
+    }
+    prevScope.current = scope;
+    prevServerName.current = serverName;
+
+    invoke("write_claude_code_config", { entry, scope })
+      .then(() => detect())
+      .catch((e) => addToast("error", `Failed to write Claude config: ${e}`));
+  }, [config.claude_code.enabled, config.claude_code.scope, entry.server_name, entryKey]);
+
+  const handleToggle = async (enabled: boolean) => {
+    if (!enabled) {
+      try {
+        await invoke("remove_claude_code_config", {
+          serverName: config.claude_code.server_name,
+          scope: config.claude_code.scope,
+        });
+        detect();
+      } catch (e) {
+        addToast("error", `Failed to remove Claude config: ${e}`);
+      }
+    }
     updateSection("claude_code", { enabled });
   };
 
