@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::watch;
 
-use codeagent_mcp::protocol::JsonRpcNotification;
-use codeagent_mcp::{McpHandler, McpRouter, McpServer};
+use codeagent_mcp::protocol::JsonRpcResponse;
+use codeagent_mcp::{parse_jsonrpc, McpHandler, McpRouter};
+
+use crate::config::{load_config, SandboxTomlConfig};
 
 /// Run a side-channel MCP server for desktop app connections.
 ///
@@ -177,13 +180,153 @@ async fn handle_connection<R, W>(
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let (_notification_sender, notification_receiver) =
-        mpsc::unbounded_channel::<JsonRpcNotification>();
     let router = McpRouter::with_working_dirs(root_dir, &working_dirs, handler);
-    let mut server = McpServer::new(router, notification_receiver);
+    let mut reader = BufReader::new(reader);
+    let mut writer = writer;
 
-    if let Err(e) = server.run(reader, writer).await {
-        eprintln!("{{\"level\":\"warn\",\"message\":\"socket connection closed: {e}\"}}");
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"message\":\"socket read error: {e}\"}}"
+                );
+                break;
+            }
+            _ => {}
+        }
+
+        let response = match parse_jsonrpc(&line) {
+            Ok(request) => {
+                if request.method.starts_with("sandbox/") {
+                    Some(handle_sandbox_method(&request.method, request.id, request.params))
+                } else {
+                    router.dispatch(request)
+                }
+            }
+            Err(error) => {
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").cloned());
+                Some(JsonRpcResponse::error(id, error.to_jsonrpc_error()))
+            }
+        };
+
+        if let Some(resp) = response {
+            let json = match serde_json::to_string(&resp) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            if writer.write_all(json.as_bytes()).await.is_err() {
+                break;
+            }
+            if writer.write_all(b"\n").await.is_err() {
+                break;
+            }
+            if writer.flush().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Handle `sandbox/*` JSON-RPC methods (only available on the side-channel socket).
+fn handle_sandbox_method(
+    method: &str,
+    id: Option<serde_json::Value>,
+    params: serde_json::Value,
+) -> JsonRpcResponse {
+    match method {
+        "sandbox/get_config" => {
+            let config_path = params
+                .get("config_path")
+                .and_then(|v| v.as_str())
+                .map(std::path::Path::new);
+            let config = load_config(config_path);
+            match serde_json::to_value(&config) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    codeagent_mcp::JsonRpcError {
+                        code: -32603,
+                        message: format!("failed to serialize config: {e}"),
+                        data: None,
+                    },
+                ),
+            }
+        }
+        "sandbox/set_config" => {
+            let config: SandboxTomlConfig = match serde_json::from_value(
+                params.get("config").cloned().unwrap_or_default(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        id,
+                        codeagent_mcp::JsonRpcError {
+                            code: -32602,
+                            message: format!("invalid config: {e}"),
+                            data: None,
+                        },
+                    );
+                }
+            };
+
+            let config_path = params
+                .get("config_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .or_else(crate::config::default_config_file_path);
+
+            let Some(path) = config_path else {
+                return JsonRpcResponse::error(
+                    id,
+                    codeagent_mcp::JsonRpcError {
+                        code: -32603,
+                        message: "cannot determine config file path".into(),
+                        data: None,
+                    },
+                );
+            };
+
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            match toml::to_string_pretty(&config) {
+                Ok(contents) => match std::fs::write(&path, &contents) {
+                    Ok(()) => {
+                        JsonRpcResponse::success(id, serde_json::json!({"written": true}))
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        id,
+                        codeagent_mcp::JsonRpcError {
+                            code: -32603,
+                            message: format!("failed to write config: {e}"),
+                            data: None,
+                        },
+                    ),
+                },
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    codeagent_mcp::JsonRpcError {
+                        code: -32603,
+                        message: format!("failed to serialize config: {e}"),
+                        data: None,
+                    },
+                ),
+            }
+        }
+        _ => JsonRpcResponse::error(
+            id,
+            codeagent_mcp::JsonRpcError {
+                code: -32601,
+                message: format!("unknown sandbox method: {method}"),
+                data: None,
+            },
+        ),
     }
 }
 
@@ -196,7 +339,7 @@ mod tests {
     };
     use codeagent_mcp::McpError;
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::AsyncBufReadExt;
 
     struct StubHandler;
 
