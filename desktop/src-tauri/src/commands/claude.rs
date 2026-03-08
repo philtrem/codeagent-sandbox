@@ -260,11 +260,7 @@ const WRITE_TOOLS: &[&str] = &["Bash", "write_file", "edit_file", "undo"];
 // --- Lifecycle helpers (called from start_vm, stop_vm, and exit handler) ---
 
 /// Build the MCP server entry args from config (mirrors the frontend's buildMcpEntry).
-fn build_mcp_args(
-    config: &crate::config::SandboxConfig,
-    kernel_path: &str,
-    initrd_path: &str,
-) -> Vec<String> {
+fn build_mcp_args(config: &crate::config::SandboxConfig) -> Vec<String> {
     let mut args = Vec::new();
     for dir in &config.sandbox.working_dirs {
         if !dir.is_empty() {
@@ -286,40 +282,52 @@ fn build_mcp_args(
         args.push("--qemu-binary".into());
         args.push(config.vm.qemu_binary.clone());
     }
-    if !kernel_path.is_empty() {
+    if !config.vm.kernel_path.is_empty() {
         args.push("--kernel-path".into());
-        args.push(kernel_path.into());
+        args.push(config.vm.kernel_path.clone());
     }
-    if !initrd_path.is_empty() {
+    if !config.vm.initrd_path.is_empty() {
         args.push("--initrd-path".into());
-        args.push(initrd_path.into());
+        args.push(config.vm.initrd_path.clone());
     }
     if !config.vm.rootfs_path.is_empty() {
         args.push("--rootfs-path".into());
         args.push(config.vm.rootfs_path.clone());
     }
+
+    // Side-channel socket for desktop app connectivity
+    if let Some(socket) = crate::paths::socket_path() {
+        args.push("--socket-path".into());
+        args.push(socket.to_string_lossy().into_owned());
+    }
+
+    // Log file for desktop debug console
+    if let Some(log) = crate::paths::log_file_path() {
+        args.push("--log-file".into());
+        args.push(log.to_string_lossy().into_owned());
+    }
+
     args
 }
 
 /// Register the MCP server in Claude Code config and set denied tools.
-/// Called from `start_vm` when Claude Code integration is enabled.
 ///
-/// `kernel_path` and `initrd_path` are the resolved (not raw config) paths
-/// so that Claude Code's spawned sandbox instance can find the guest images.
-pub fn register_mcp_server(
-    config: &crate::config::SandboxConfig,
-    binary_path: &str,
-    kernel_path: &str,
-    initrd_path: &str,
-) {
+/// Called from the MCP toggle, app startup, and app exit to sync config.
+/// Resolves the sandbox binary path automatically.
+pub fn register_mcp_server(config: &crate::config::SandboxConfig) {
     if !config.claude_code.enabled {
         return;
     }
 
+    let binary_path = match super::vm::find_sandbox_binary() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
     let entry = McpServerEntry {
         server_name: config.claude_code.server_name.clone(),
-        command: binary_path.into(),
-        args: build_mcp_args(config, kernel_path, initrd_path),
+        command: binary_path,
+        args: build_mcp_args(config),
     };
 
     if let Ok(path) = resolve_claude_code_path(&config.claude_code.scope) {

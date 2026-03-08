@@ -123,6 +123,7 @@ export interface VmStatus {
   state: "stopped" | "starting" | "running" | "error";
   pid: number | null;
   error: string | null;
+  socket_connected: boolean;
 }
 
 export interface ClaudeConfigInfo {

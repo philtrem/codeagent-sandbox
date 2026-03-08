@@ -59,11 +59,14 @@ pub struct CliArgs {
     #[arg(long)]
     pub config_file: Option<PathBuf>,
 
-    /// Disable the filesystem watcher. Use when another sandbox process on the
-    /// same working directory already handles external modification detection
-    /// (e.g., when Claude Code integration spawns a separate sandbox instance).
+    /// Path to a Unix domain socket for side-channel access from the desktop app.
+    /// When set, the sandbox listens on this socket for additional MCP connections.
     #[arg(long)]
-    pub no_watcher: bool,
+    pub socket_path: Option<PathBuf>,
+
+    /// Path to a log file. When set, stderr output is also teed to this file.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -85,21 +88,26 @@ mod tests {
         assert_eq!(args.vm_mode, "ephemeral");
         assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
-        assert!(!args.no_watcher);
+        assert!(args.socket_path.is_none());
+        assert!(args.log_file.is_none());
     }
 
     #[test]
-    fn no_watcher_flag_parse() {
+    fn socket_and_log_file_parse() {
         let args = CliArgs::try_parse_from([
             "sandbox",
             "--working-dir",
             "/tmp/work",
             "--undo-dir",
             "/tmp/undo",
-            "--no-watcher",
+            "--socket-path",
+            "/tmp/mcp.sock",
+            "--log-file",
+            "/tmp/sandbox.log",
         ])
         .unwrap();
-        assert!(args.no_watcher);
+        assert_eq!(args.socket_path, Some(PathBuf::from("/tmp/mcp.sock")));
+        assert_eq!(args.log_file, Some(PathBuf::from("/tmp/sandbox.log")));
     }
 
     #[test]

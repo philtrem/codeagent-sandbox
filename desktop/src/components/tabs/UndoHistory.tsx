@@ -459,9 +459,10 @@ export default function UndoHistory() {
   const addToast = useToastStore((s) => s.addToast);
 
   const vmRunning = vmStatus.state === "running";
+  const socketConnected = vmStatus.socket_connected;
   const undoDir = config.sandbox.undo_dir;
 
-  useUndoHistoryPolling(undoDir, vmRunning);
+  useUndoHistoryPolling(undoDir, vmRunning, socketConnected);
 
   const [pendingRollback, setPendingRollback] = useState<number | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -492,7 +493,7 @@ export default function UndoHistory() {
   const confirmClear = async () => {
     setShowClearConfirm(false);
     try {
-      await clearHistory(undoDir, vmRunning);
+      await clearHistory(undoDir, vmRunning || socketConnected);
       addToast("success", "Undo history cleared");
     } catch (e) {
       addToast("error", `Failed to clear history: ${e}`);

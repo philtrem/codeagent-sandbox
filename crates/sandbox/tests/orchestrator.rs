@@ -27,7 +27,8 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
-        no_watcher: false,
+        socket_path: None,
+        log_file: None,
     }
 }
 
@@ -672,7 +673,8 @@ fn ao_16_undo_inside_working_dir_rejected() {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
-        no_watcher: false,
+        socket_path: None,
+        log_file: None,
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
@@ -707,7 +709,8 @@ fn ao_17_working_inside_undo_dir_rejected() {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
-        no_watcher: false,
+        socket_path: None,
+        log_file: None,
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 

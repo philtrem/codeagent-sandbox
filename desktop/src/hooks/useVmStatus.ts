@@ -12,7 +12,16 @@ interface VmState {
   start: (config: SandboxConfig) => Promise<void>;
   stop: () => Promise<void>;
   poll: () => Promise<void>;
+  connectSocket: () => Promise<void>;
+  disconnectSocket: () => Promise<void>;
 }
+
+const STOPPED_STATUS: VmStatus = {
+  state: "stopped",
+  pid: null,
+  error: null,
+  socket_connected: false,
+};
 
 /** Query the sandbox process for its session status via MCP. */
 async function querySandboxMode(): Promise<SandboxMode> {
@@ -39,13 +48,13 @@ async function querySandboxMode(): Promise<SandboxMode> {
 }
 
 export const useVmStore = create<VmState>((set) => ({
-  status: { state: "stopped", pid: null, error: null },
+  status: { ...STOPPED_STATUS },
   sandboxMode: null,
   polling: false,
 
   start: async (config: SandboxConfig) => {
     set({
-      status: { state: "starting", pid: null, error: null },
+      status: { state: "starting", pid: null, error: null, socket_connected: false },
       sandboxMode: null,
     });
     try {
@@ -58,7 +67,7 @@ export const useVmStore = create<VmState>((set) => ({
       }, 1000);
     } catch (e) {
       set({
-        status: { state: "error", pid: null, error: String(e) },
+        status: { state: "error", pid: null, error: String(e), socket_connected: false },
         sandboxMode: null,
       });
     }
@@ -70,7 +79,7 @@ export const useVmStore = create<VmState>((set) => ({
       set({ status, sandboxMode: null });
     } catch (e) {
       set({
-        status: { state: "error", pid: null, error: String(e) },
+        status: { state: "error", pid: null, error: String(e), socket_connected: false },
         sandboxMode: null,
       });
     }
@@ -84,15 +93,45 @@ export const useVmStore = create<VmState>((set) => ({
       // Silently ignore polling errors
     }
   },
+
+  connectSocket: async () => {
+    try {
+      const status = await invoke<VmStatus>("connect_to_sandbox");
+      set({ status });
+      // Query sandbox mode once connected
+      const mode = await querySandboxMode();
+      set({ sandboxMode: mode });
+    } catch (_) {
+      // Socket not available yet — ignore
+    }
+  },
+
+  disconnectSocket: async () => {
+    try {
+      await invoke("disconnect_from_sandbox");
+      set({ status: { ...STOPPED_STATUS }, sandboxMode: null });
+    } catch (_) {
+      // Ignore
+    }
+  },
 }));
 
-/** Hook that polls VM status on a 2-second interval. */
-export function useVmPolling() {
+/** Hook that polls VM status on a 2-second interval.
+ *  In MCP mode (mcpEnabled=true), also attempts socket connection if not connected. */
+export function useVmPolling(mcpEnabled = false) {
   const poll = useVmStore((s) => s.poll);
+  const connectSocket = useVmStore((s) => s.connectSocket);
+  const socketConnected = useVmStore((s) => s.status.socket_connected);
 
   useEffect(() => {
     poll();
-    const interval = setInterval(poll, 2000);
+    const interval = setInterval(() => {
+      poll();
+      // In MCP mode, attempt socket connection if not yet connected
+      if (mcpEnabled && !socketConnected) {
+        connectSocket();
+      }
+    }, 2000);
     return () => clearInterval(interval);
-  }, [poll]);
+  }, [poll, connectSocket, mcpEnabled, socketConnected]);
 }

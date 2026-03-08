@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use tokio::sync::mpsc;
 
@@ -21,7 +23,8 @@ async fn run_stdio(args: CliArgs, config: codeagent_sandbox::config::SandboxToml
 
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let working_dir = args.working_dirs[0].clone();
-    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
+    let orchestrator =
+        Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
 
     let router = Router::new(working_dir, Box::new(orchestrator));
     let mut server = StdioServer::new(router, event_receiver);
@@ -45,6 +48,8 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     let working_dir = args.working_dirs[0].clone();
     let vm_mode = args.vm_mode.clone();
     let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
+    let socket_path = args.socket_path.clone();
+    let log_file = args.log_file.clone();
     let working_directories: Vec<_> = args
         .working_dirs
         .iter()
@@ -53,7 +58,8 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
             label: None,
         })
         .collect();
-    let orchestrator = Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
+    let orchestrator =
+        Orchestrator::new(args, event_sender, config.command_classifier, config.file_watcher);
 
     // MCP mode auto-starts the session from CLI args since MCP has no
     // session.start concept — the client expects tools to be ready immediately.
@@ -80,8 +86,45 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
         }
     }
 
+    // Wrap orchestrator in Arc for sharing between stdin/stdout and socket servers
+    let orchestrator: Arc<dyn codeagent_mcp::McpHandler> = Arc::new(orchestrator);
+
+    // If --log-file is set, open the file for tee-ing stderr output
+    if let Some(ref path) = log_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Truncate on startup so the desktop always reads fresh output
+        if let Ok(f) = std::fs::File::create(path) {
+            drop(f);
+        }
+    }
+
+    // If --socket-path is set, spawn the side-channel socket server
+    let _socket_handle = if let Some(ref path) = socket_path {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let handler = Arc::clone(&orchestrator);
+        let root = working_dir.clone();
+        let dirs = all_dirs.clone();
+        let socket = path.clone();
+        let handle = tokio::spawn(async move {
+            codeagent_sandbox::socket_server::run_socket_server(
+                socket,
+                handler,
+                root.clone(),
+                dirs,
+                shutdown_rx,
+            )
+            .await;
+        });
+        Some((handle, shutdown_tx))
+    } else {
+        None
+    };
+
     let (_notification_sender, notification_receiver) = mpsc::unbounded_channel();
-    let mcp_router = McpRouter::with_working_dirs(working_dir, &all_dirs, Box::new(orchestrator));
+    let mcp_router =
+        McpRouter::with_working_dirs(working_dir, &all_dirs, Arc::clone(&orchestrator));
     let mut server = McpServer::new(mcp_router, notification_receiver);
 
     let stdin = tokio::io::stdin();
@@ -90,5 +133,11 @@ async fn run_mcp(args: CliArgs, config: codeagent_sandbox::config::SandboxTomlCo
     if let Err(e) = server.run(stdin, stdout).await {
         eprintln!("{{\"level\":\"error\",\"message\":\"{e}\"}}");
         std::process::exit(1);
+    }
+
+    // Shut down socket server when stdin/stdout server exits
+    if let Some((handle, shutdown_tx)) = _socket_handle {
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
     }
 }

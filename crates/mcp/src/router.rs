@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::McpError;
@@ -192,13 +193,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 pub struct McpRouter {
     root_dir: PathBuf,
     working_dirs: Vec<PathBuf>,
-    handler: Box<dyn McpHandler>,
+    handler: Arc<dyn McpHandler>,
     initialized: AtomicBool,
     instructions: String,
 }
 
 impl McpRouter {
-    pub fn new(root_dir: PathBuf, handler: Box<dyn McpHandler>) -> Self {
+    pub fn new(root_dir: PathBuf, handler: Arc<dyn McpHandler>) -> Self {
         let instructions = format!(
             "IMPORTANT: You are operating inside a sandboxed environment. \
              Your working directory is NOT the project open in your editor. \
@@ -224,7 +225,7 @@ impl McpRouter {
     pub fn with_working_dirs(
         root_dir: PathBuf,
         all_dirs: &[PathBuf],
-        handler: Box<dyn McpHandler>,
+        handler: Arc<dyn McpHandler>,
     ) -> Self {
         let dir_list: Vec<String> = all_dirs.iter().map(|d| format!("  - {}", d.display())).collect();
         let instructions = format!(

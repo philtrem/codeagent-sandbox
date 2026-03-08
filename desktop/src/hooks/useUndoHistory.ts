@@ -84,15 +84,20 @@ export const useUndoHistoryStore = create<UndoHistoryState>((set, get) => ({
   },
 }));
 
-/** Hook that polls undo history on a 500ms interval when undoDir is set. */
-export function useUndoHistoryPolling(undoDir: string, vmRunning: boolean) {
+/** Hook that polls undo history on a 500ms interval when sandbox is reachable.
+ *  Polls when the VM is running (manual mode) or when connected via socket (MCP mode). */
+export function useUndoHistoryPolling(
+  undoDir: string,
+  vmRunning: boolean,
+  socketConnected = false,
+) {
   const fetch = useUndoHistoryStore((s) => s.fetch);
 
   useEffect(() => {
-    if (!undoDir || !vmRunning) return;
+    if (!undoDir || (!vmRunning && !socketConnected)) return;
 
     fetch(undoDir);
     const interval = setInterval(() => fetch(undoDir), 500);
     return () => clearInterval(interval);
-  }, [undoDir, vmRunning, fetch]);
+  }, [undoDir, vmRunning, socketConnected, fetch]);
 }

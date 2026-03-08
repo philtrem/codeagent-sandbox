@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { useToastStore } from "../../hooks/useToastStore";
-import { useVmStore } from "../../hooks/useVmStatus";
 import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
 
 function CopyButton({ text }: { text: string }) {
@@ -71,15 +70,20 @@ function generatePreviewJson(entry: McpServerEntry): string {
   return JSON.stringify(config, null, 2);
 }
 
+const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
+
+const READ_TOOLS = [
+  "read_file", "list_directory", "glob", "grep",
+  "get_undo_history", "get_session_status", "get_working_directory",
+];
+const WRITE_TOOLS = ["Bash", "write_file", "edit_file", "undo"];
+
 export default function ClaudeIntegration() {
   const { config, updateSection } = useSandboxConfig();
   const addToast = useToastStore((s) => s.addToast);
-  const vmStatus = useVmStore((s) => s.status);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
   const [cliCommand, setCliCommand] = useState("");
-
-  const isVmRunning = vmStatus.state === "running";
 
   const detect = useCallback(async () => {
     try {
@@ -113,21 +117,8 @@ export default function ClaudeIntegration() {
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
 
-  const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
-
-  // MCP registration is handled by the backend on VM start/stop.
-  // The toggle saves the preference; immediate effect only if the VM is running.
   const handleToggle = async (enabled: boolean) => {
     updateSection("claude_code", { enabled });
-    if (!isVmRunning) {
-      addToast(
-        "info",
-        enabled
-          ? "MCP server will be registered when the sandbox starts."
-          : "MCP server preference disabled.",
-      );
-      return;
-    }
     try {
       if (enabled) {
         await invoke("write_claude_code_config", {
@@ -137,13 +128,9 @@ export default function ClaudeIntegration() {
         if (config.claude_code.disable_builtin_tools) {
           await invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
         }
-        // Set allowed tools (read always; write if toggled)
         const allowTools = [
-          "read_file", "list_directory", "glob", "grep",
-          "get_undo_history", "get_session_status", "get_working_directory",
-          ...(config.claude_code.auto_allow_write_tools
-            ? ["Bash", "write_file", "edit_file", "undo"]
-            : []),
+          ...READ_TOOLS,
+          ...(config.claude_code.auto_allow_write_tools ? WRITE_TOOLS : []),
         ];
         await invoke("set_claude_code_allowed_tools", {
           serverName: config.claude_code.server_name,
@@ -223,8 +210,8 @@ export default function ClaudeIntegration() {
           </button>
         </div>
         <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-          The MCP server is automatically registered when the sandbox starts
-          and removed when it stops.
+          When enabled, Claude Code spawns the sandbox process. The desktop app
+          connects via a side-channel socket for terminal, debug, and rollback.
         </p>
 
         <div className="space-y-3">
@@ -299,16 +286,14 @@ export default function ClaudeIntegration() {
               onClick={async () => {
                 const next = !config.claude_code.auto_allow_write_tools;
                 updateSection("claude_code", { auto_allow_write_tools: next });
-                if (isVmRunning && config.claude_code.enabled) {
+                if (config.claude_code.enabled) {
                   try {
-                    // Remove existing allow entries and re-add with correct set
                     await invoke("remove_claude_code_allowed_tools", {
                       serverName: config.claude_code.server_name,
                     });
                     const tools = [
-                      "read_file", "list_directory", "glob", "grep",
-                      "get_undo_history", "get_session_status", "get_working_directory",
-                      ...(next ? ["Bash", "write_file", "edit_file", "undo"] : []),
+                      ...READ_TOOLS,
+                      ...(next ? WRITE_TOOLS : []),
                     ];
                     await invoke("set_claude_code_allowed_tools", {
                       serverName: config.claude_code.server_name,

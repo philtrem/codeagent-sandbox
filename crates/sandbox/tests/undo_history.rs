@@ -49,7 +49,8 @@ fn make_args(working_dir: &Path, undo_dir: &Path) -> CliArgs {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
-        no_watcher: false,
+        socket_path: None,
+        log_file: None,
     }
 }
 

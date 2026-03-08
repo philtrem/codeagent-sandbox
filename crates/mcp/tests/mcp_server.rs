@@ -81,10 +81,10 @@ struct McpTestHarness {
 
 impl McpTestHarness {
     fn new() -> Self {
-        Self::with_handler(Box::new(StubMcpHandler), test_root())
+        Self::with_handler(Arc::new(StubMcpHandler), test_root())
     }
 
-    fn with_handler(handler: Box<dyn McpHandler>, root: PathBuf) -> Self {
+    fn with_handler(handler: Arc<dyn McpHandler>, root: PathBuf) -> Self {
         let (input_writer, input_reader) = tokio::io::duplex(8192);
         let (output_writer, output_reader) = tokio::io::duplex(8192);
 
@@ -628,7 +628,7 @@ async fn mc03_write_file_creates_api_step() {
 
     let (_interceptor, handler) = make_undo_harness(&ws);
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     // Write a new file
@@ -672,7 +672,7 @@ async fn mc03_write_file_overwrites_existing() {
 
     let (_interceptor, handler) = make_undo_harness(&ws);
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     let resp = harness
@@ -697,7 +697,7 @@ async fn mc03_write_file_creates_parent_directories() {
 
     let (_interceptor, handler) = make_undo_harness(&ws);
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     let resp = harness
@@ -729,7 +729,7 @@ async fn mc04_write_file_then_rollback_restores_original() {
 
     let (_interceptor, handler) = make_undo_harness(&ws);
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     // Overwrite the file
@@ -776,7 +776,7 @@ async fn mc04_write_new_file_then_rollback_removes_it() {
 
     let (_interceptor, handler) = make_undo_harness(&ws);
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     // Create a new file
@@ -953,9 +953,9 @@ async fn mc08_concurrent_operations_share_undo_state() {
     let handler_stdio = UndoMcpHandler::new(Arc::clone(&interceptor), ws.working_dir.clone());
 
     let mut harness_mcp =
-        McpTestHarness::with_handler(Box::new(handler_mcp), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler_mcp), ws.working_dir.clone());
     let mut harness_stdio =
-        McpTestHarness::with_handler(Box::new(handler_stdio), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler_stdio), ws.working_dir.clone());
 
     harness_mcp.initialize().await;
     harness_stdio.initialize().await;
@@ -1009,7 +1009,7 @@ async fn mc08_concurrent_write_and_query_no_deadlock() {
 
     let handler = UndoMcpHandler::new(Arc::clone(&interceptor), ws.working_dir.clone());
     let mut harness =
-        McpTestHarness::with_handler(Box::new(handler), ws.working_dir.clone());
+        McpTestHarness::with_handler(Arc::new(handler), ws.working_dir.clone());
     harness.initialize().await;
 
     // Perform multiple writes sequentially (concurrent writes within a single

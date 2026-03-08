@@ -7,12 +7,18 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Clean up any stale MCP registration from a previous session that wasn't
-    // shut down cleanly (e.g., the app or sandbox was killed). At startup no
-    // sandbox is running yet, so the config should not be registered.
-    claude::unregister_mcp_server();
+    let config = config_cmd::read_config_internal();
 
-    // Kill any orphaned sandbox.exe left over from a previous crash
+    if config.claude_code.enabled {
+        // MCP mode: sync Claude Code's config with current desktop settings.
+        // Claude Code spawns the sandbox — we just keep the config up to date.
+        claude::register_mcp_server(&config);
+    } else {
+        // Manual mode: clean up any stale MCP registration from a previous session.
+        claude::unregister_mcp_server();
+    }
+
+    // Kill any orphaned sandbox.exe left over from a previous crash (manual mode only)
     vm::kill_orphaned_sandbox();
 
     tauri::Builder::default()
@@ -52,6 +58,9 @@ pub fn run() {
             undo::clear_undo_history,
             // VM MCP passthrough
             vm::send_mcp_request,
+            // Socket connection (MCP mode)
+            vm::connect_to_sandbox,
+            vm::disconnect_from_sandbox,
             // Terminal + Debug console
             vm::get_debug_log,
             vm::clear_debug_log,
@@ -62,19 +71,27 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                // Kill the sandbox child process before exiting
-                if let Some(vm_state) = app.try_state::<vm::VmState>() {
-                    if let Ok(mut guard) = vm_state.process.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                let config = config_cmd::read_config_internal();
+
+                if config.claude_code.enabled {
+                    // MCP mode: sync latest settings but do NOT unregister or kill.
+                    // The sandbox belongs to Claude Code, not to us.
+                    claude::register_mcp_server(&config);
+                } else {
+                    // Manual mode: kill our sandbox and clean up.
+                    if let Some(vm_state) = app.try_state::<vm::VmState>() {
+                        if let Ok(mut guard) = vm_state.process.lock() {
+                            if let Some(mut child) = guard.take() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
                         }
                     }
+                    if let Some(pid_path) = paths::pid_file_path() {
+                        let _ = std::fs::remove_file(&pid_path);
+                    }
+                    claude::unregister_mcp_server();
                 }
-                if let Some(pid_path) = paths::pid_file_path() {
-                    let _ = std::fs::remove_file(&pid_path);
-                }
-                claude::unregister_mcp_server();
             }
         });
 }
