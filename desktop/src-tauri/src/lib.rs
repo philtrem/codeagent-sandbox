@@ -71,27 +71,23 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                let config = config_cmd::read_config_internal();
-
-                if config.claude_code.enabled {
-                    // MCP mode: sync latest settings but do NOT unregister or kill.
-                    // The sandbox belongs to Claude Code, not to us.
-                    claude::register_mcp_server(&config);
-                } else {
-                    // Manual mode: kill our sandbox and clean up.
-                    if let Some(vm_state) = app.try_state::<vm::VmState>() {
-                        if let Ok(mut guard) = vm_state.process.lock() {
-                            if let Some(mut child) = guard.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
+                // Clean up any VM process we spawned (manual mode)
+                if let Some(vm_state) = app.try_state::<vm::VmState>() {
+                    if let Ok(mut guard) = vm_state.process.lock() {
+                        if let Some(mut child) = guard.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
                         }
                     }
-                    if let Some(pid_path) = paths::pid_file_path() {
-                        let _ = std::fs::remove_file(&pid_path);
-                    }
-                    claude::unregister_mcp_server();
                 }
+                if let Some(pid_path) = paths::pid_file_path() {
+                    let _ = std::fs::remove_file(&pid_path);
+                }
+
+                // Always restore Claude settings on exit — remove our MCP server
+                // entry, denied tools, and allowed tools. The startup code will
+                // re-register if claude_code.enabled is still true next launch.
+                claude::unregister_mcp_server();
             }
         });
 }
