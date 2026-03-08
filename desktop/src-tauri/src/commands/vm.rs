@@ -70,7 +70,7 @@ static TERMINAL_REQUEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Check that a guest image file exists and is non-empty (0-byte files are invalid).
 fn is_valid_guest_image(path: &std::path::Path) -> bool {
-    path.exists() && std::fs::metadata(path).map_or(false, |m| m.len() > 0)
+    path.exists() && std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
 
 /// Resolve guest image paths: prefer user config, fall back to bundled resources,
@@ -361,8 +361,7 @@ pub fn start_vm(
 
         let handle = std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            let mut index = 0usize;
-            for line in reader.lines().map_while(Result::ok) {
+            for (index, line) in reader.lines().map_while(Result::ok).enumerate() {
                 let entry = DebugLogLine {
                     index,
                     timestamp: chrono::Local::now().to_rfc3339(),
@@ -375,7 +374,6 @@ pub fn start_vm(
                     }
                 }
                 let _ = app_handle.emit("vm-debug-log", &entry);
-                index += 1;
             }
         });
         if let Ok(mut guard) = state.stderr_handle.lock() {
