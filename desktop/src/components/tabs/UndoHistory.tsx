@@ -331,9 +331,9 @@ function StepList({
     <div className="space-y-2">
       {steps.map((step, index) => {
         const stepIndex = startIndex + index;
-        const barriersAfterStep = barriers.filter(
-          (b) => b.after_step_id === step.step_id,
-        );
+        const barriersAfterStep = barriers
+          .filter((b) => b.after_step_id === step.step_id)
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return (
           <div key={step.step_id}>
             {barriersAfterStep.map((barrier) => (
