@@ -206,30 +206,68 @@ pub fn should_show_tray() -> bool {
 }
 
 /// Try to launch the desktop app.
+///
+/// Searches for the binary in several locations: next to the sandbox binary,
+/// in workspace target directories, and then on PATH.
 pub fn open_desktop_app() {
-    let binary = "codeagent-desktop";
-    if which::which(binary).is_err() {
-        eprintln!("{{\"level\":\"warn\",\"message\":\"desktop app not found in PATH\"}}");
+    let Some(path) = find_desktop_binary() else {
+        eprintln!("{{\"level\":\"warn\",\"message\":\"desktop app not found\"}}");
         return;
-    }
+    };
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", binary])
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new(&path)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
 
     #[cfg(target_os = "macos")]
     {
+        // Try macOS `open -a` for .app bundles first, fall back to direct exec
         let _ = std::process::Command::new("open")
             .arg("-a")
-            .arg("CodeAgent")
-            .spawn();
+            .arg("Code Agent Sandbox")
+            .spawn()
+            .or_else(|_| std::process::Command::new(&path).spawn());
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new(binary).spawn();
+        let _ = std::process::Command::new(&path).spawn();
     }
+}
+
+/// Search for the desktop app binary in several locations.
+fn find_desktop_binary() -> Option<std::path::PathBuf> {
+    let exe_name = if cfg!(windows) {
+        "codeagent-desktop.exe"
+    } else {
+        "codeagent-desktop"
+    };
+
+    // Search next to the current (sandbox) executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(exe_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+
+            // Search workspace target/{debug,release} directories
+            if let Some(target_dir) = dir.parent() {
+                for profile in &["release", "debug"] {
+                    let candidate = target_dir.join(profile).join(exe_name);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to PATH
+    which::which("codeagent-desktop").ok()
 }

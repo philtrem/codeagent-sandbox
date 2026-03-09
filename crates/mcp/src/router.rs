@@ -187,6 +187,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Callback type for handling custom JSON-RPC methods (e.g. `sandbox/*`).
+///
+/// Receives the method name, optional request id, and params. Returns a
+/// response, or `None` to fall through to the default dispatch.
+pub type CustomMethodHandler = Box<
+    dyn Fn(&str, Option<serde_json::Value>, serde_json::Value) -> Option<JsonRpcResponse>
+        + Send
+        + Sync,
+>;
+
 /// Routes JSON-RPC requests to the `McpHandler`, performing path validation
 /// for filesystem operations and implementing the MCP lifecycle (initialize,
 /// tools/list, tools/call).
@@ -196,6 +206,7 @@ pub struct McpRouter {
     handler: Arc<dyn McpHandler>,
     initialized: AtomicBool,
     instructions: String,
+    custom_method_handler: Option<CustomMethodHandler>,
 }
 
 impl McpRouter {
@@ -218,6 +229,7 @@ impl McpRouter {
             handler,
             initialized: AtomicBool::new(false),
             instructions,
+            custom_method_handler: None,
         }
     }
 
@@ -246,7 +258,17 @@ impl McpRouter {
             handler,
             initialized: AtomicBool::new(false),
             instructions,
+            custom_method_handler: None,
         }
+    }
+
+    /// Register a handler for custom JSON-RPC methods (e.g. `sandbox/*`).
+    ///
+    /// The handler is called for any method not recognized by the standard
+    /// MCP dispatch. If it returns `Some`, that response is used; if `None`,
+    /// the default MethodNotFound error is returned.
+    pub fn set_custom_method_handler(&mut self, handler: CustomMethodHandler) {
+        self.custom_method_handler = Some(handler);
     }
 
     /// Dispatch a parsed JSON-RPC request, returning a response.
@@ -287,6 +309,15 @@ impl McpRouter {
             }
 
             _ => {
+                // Check custom method handler before returning MethodNotFound
+                if let Some(ref handler) = self.custom_method_handler {
+                    if let Some(response) =
+                        handler(&request.method, id.clone(), request.params)
+                    {
+                        return Some(response);
+                    }
+                }
+
                 if is_notification {
                     // Unknown notifications are silently ignored per JSON-RPC 2.0
                     None

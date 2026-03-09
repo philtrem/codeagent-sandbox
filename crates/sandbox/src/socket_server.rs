@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-use codeagent_mcp::protocol::JsonRpcResponse;
-use codeagent_mcp::{parse_jsonrpc, McpHandler, McpRouter};
+use codeagent_mcp::protocol::{JsonRpcNotification, JsonRpcResponse};
+use codeagent_mcp::{McpHandler, McpRouter, McpServer};
 
 use crate::config::{load_config, SandboxTomlConfig};
 
@@ -180,65 +179,27 @@ async fn handle_connection<R, W>(
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let router = McpRouter::with_working_dirs(root_dir, &working_dirs, handler);
-    let mut reader = BufReader::new(reader);
-    let mut writer = writer;
+    let (_notification_sender, notification_receiver) =
+        mpsc::unbounded_channel::<JsonRpcNotification>();
+    let mut router = McpRouter::with_working_dirs(root_dir, &working_dirs, handler);
+    router.set_custom_method_handler(Box::new(handle_sandbox_method));
+    let mut server = McpServer::new(router, notification_receiver);
 
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Err(e) => {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"message\":\"socket read error: {e}\"}}"
-                );
-                break;
-            }
-            _ => {}
-        }
-
-        let response = match parse_jsonrpc(&line) {
-            Ok(request) => {
-                if request.method.starts_with("sandbox/") {
-                    Some(handle_sandbox_method(&request.method, request.id, request.params))
-                } else {
-                    router.dispatch(request)
-                }
-            }
-            Err(error) => {
-                let id = serde_json::from_str::<serde_json::Value>(&line)
-                    .ok()
-                    .and_then(|v| v.get("id").cloned());
-                Some(JsonRpcResponse::error(id, error.to_jsonrpc_error()))
-            }
-        };
-
-        if let Some(resp) = response {
-            let json = match serde_json::to_string(&resp) {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            if writer.write_all(json.as_bytes()).await.is_err() {
-                break;
-            }
-            if writer.write_all(b"\n").await.is_err() {
-                break;
-            }
-            if writer.flush().await.is_err() {
-                break;
-            }
-        }
+    if let Err(e) = server.run(reader, writer).await {
+        eprintln!("{{\"level\":\"warn\",\"message\":\"socket connection closed: {e}\"}}");
     }
 }
 
 /// Handle `sandbox/*` JSON-RPC methods (only available on the side-channel socket).
+///
+/// Returns `Some` for recognized sandbox methods, `None` to fall through to
+/// the standard MCP dispatch.
 fn handle_sandbox_method(
     method: &str,
     id: Option<serde_json::Value>,
     params: serde_json::Value,
-) -> JsonRpcResponse {
-    match method {
+) -> Option<JsonRpcResponse> {
+    let response = match method {
         "sandbox/get_config" => {
             let config_path = params
                 .get("config_path")
@@ -263,14 +224,14 @@ fn handle_sandbox_method(
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    return JsonRpcResponse::error(
+                    return Some(JsonRpcResponse::error(
                         id,
                         codeagent_mcp::JsonRpcError {
                             code: -32602,
                             message: format!("invalid config: {e}"),
                             data: None,
                         },
-                    );
+                    ));
                 }
             };
 
@@ -281,14 +242,14 @@ fn handle_sandbox_method(
                 .or_else(crate::config::default_config_file_path);
 
             let Some(path) = config_path else {
-                return JsonRpcResponse::error(
+                return Some(JsonRpcResponse::error(
                     id,
                     codeagent_mcp::JsonRpcError {
                         code: -32603,
                         message: "cannot determine config file path".into(),
                         data: None,
                     },
-                );
+                ));
             };
 
             if let Some(parent) = path.parent() {
@@ -319,15 +280,9 @@ fn handle_sandbox_method(
                 ),
             }
         }
-        _ => JsonRpcResponse::error(
-            id,
-            codeagent_mcp::JsonRpcError {
-                code: -32601,
-                message: format!("unknown sandbox method: {method}"),
-                data: None,
-            },
-        ),
-    }
+        _ => return None,
+    };
+    Some(response)
 }
 
 #[cfg(test)]
@@ -339,7 +294,7 @@ mod tests {
     };
     use codeagent_mcp::McpError;
     use serde_json::json;
-    use tokio::io::AsyncBufReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     struct StubHandler;
 
@@ -491,6 +446,25 @@ mod tests {
         reader.read_line(&mut line3).await.unwrap();
         let resp3: serde_json::Value = serde_json::from_str(&line3).unwrap();
         assert_eq!(resp3["id"], 3);
+
+        // Send sandbox/get_config (custom method handled via pre-dispatch hook)
+        let config_req = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "sandbox/get_config",
+            "params": {}
+        });
+        writer
+            .write_all(format!("{}\n", config_req).as_bytes())
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let mut line4 = String::new();
+        reader.read_line(&mut line4).await.unwrap();
+        let resp4: serde_json::Value = serde_json::from_str(&line4).unwrap();
+        assert_eq!(resp4["id"], 4);
+        assert!(resp4["result"].is_object(), "sandbox/get_config should return config");
 
         // Clean up
         drop(writer);
