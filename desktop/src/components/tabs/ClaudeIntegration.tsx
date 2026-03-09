@@ -7,6 +7,8 @@ import {
   Terminal,
   ShieldOff,
   ShieldCheck,
+  X,
+  AlertTriangle,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { useToastStore } from "../../hooks/useToastStore";
@@ -36,6 +38,8 @@ function buildMcpEntry(
   config: SandboxConfig,
   serverName: string,
   sandboxBinary: string,
+  socketPath?: string,
+  logFilePath?: string,
 ): McpServerEntry {
   const args: string[] = [];
 
@@ -51,6 +55,12 @@ function buildMcpEntry(
   args.push("--memory-mb", String(config.vm.memory_mb));
   args.push("--cpus", String(config.vm.cpus));
   args.push("--server-name", serverName);
+  if (socketPath) {
+    args.push("--socket-path", socketPath);
+  }
+  if (logFilePath) {
+    args.push("--log-file", logFilePath);
+  }
   if (config.claude_code.disable_builtin_tools) {
     args.push("--disable-builtin-tools");
   }
@@ -63,6 +73,57 @@ function buildMcpEntry(
     command: sandboxBinary,
     args,
   };
+}
+
+function KillProcessesDialog({
+  count,
+  onConfirm,
+  onCancel,
+}: {
+  count: number;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-96 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-6 shadow-xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <AlertTriangle size={16} className="text-[var(--color-warning)]" />
+            Running Sandbox Processes
+          </h3>
+          <button
+            onClick={onCancel}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+          {count === 1
+            ? "There is 1 sandbox process still running."
+            : `There are ${count} sandbox processes still running.`}{" "}
+          Disabling the MCP server will end {count === 1 ? "it" : "them"}.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-bg-tertiary)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="rounded bg-[var(--color-error)] px-4 py-2 text-sm text-white hover:opacity-90"
+          >
+            End {count === 1 ? "Process" : "Processes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function generatePreviewJson(entry: McpServerEntry): string {
@@ -82,7 +143,10 @@ export default function ClaudeIntegration() {
   const addToast = useToastStore((s) => s.addToast);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
+  const [socketPath, setSocketPath] = useState<string | undefined>();
+  const [logFilePath, setLogFilePath] = useState<string | undefined>();
   const [cliCommand, setCliCommand] = useState("");
+  const [killConfirm, setKillConfirm] = useState<number | null>(null);
   const prevScope = useRef(config.claude_code.scope);
   const prevServerName = useRef(config.claude_code.server_name);
 
@@ -103,12 +167,20 @@ export default function ClaudeIntegration() {
     invoke<string>("resolve_sandbox_binary")
       .then(setSandboxBinary)
       .catch(() => {});
+    invoke<string>("get_socket_path")
+      .then(setSocketPath)
+      .catch(() => {});
+    invoke<string>("get_log_file_path")
+      .then(setLogFilePath)
+      .catch(() => {});
   }, [detect]);
 
   const entry = buildMcpEntry(
     config,
     config.claude_code.server_name,
     sandboxBinary,
+    socketPath,
+    logFilePath,
   );
   const preview = generatePreviewJson(entry);
 
@@ -146,19 +218,42 @@ export default function ClaudeIntegration() {
       .catch((e) => addToast("error", `Failed to write Claude config: ${e}`));
   }, [config.claude_code.enabled, config.claude_code.scope, entry.server_name, entryKey]);
 
+  const disableMcp = async (killPids?: number[]) => {
+    try {
+      if (killPids && killPids.length > 0) {
+        await invoke("cleanup_claude_settings", {
+          serverName: config.claude_code.server_name,
+        });
+        await invoke("kill_sandbox_processes", { pids: killPids });
+      }
+      await invoke("remove_claude_code_config", {
+        serverName: config.claude_code.server_name,
+        scope: config.claude_code.scope,
+      });
+      detect();
+    } catch (e) {
+      addToast("error", `Failed to disable MCP server: ${e}`);
+    }
+    updateSection("claude_code", { enabled: false });
+  };
+
   const handleToggle = async (enabled: boolean) => {
     if (!enabled) {
-      try {
-        await invoke("remove_claude_code_config", {
-          serverName: config.claude_code.server_name,
-          scope: config.claude_code.scope,
-        });
-        detect();
-      } catch (e) {
-        addToast("error", `Failed to remove Claude config: ${e}`);
+      const pids = await invoke<number[]>("find_sandbox_processes");
+      if (pids.length > 0) {
+        setKillConfirm(pids.length);
+        return;
       }
+      await disableMcp();
+      return;
     }
     updateSection("claude_code", { enabled });
+  };
+
+  const confirmKill = async () => {
+    const pids = await invoke<number[]>("find_sandbox_processes");
+    setKillConfirm(null);
+    await disableMcp(pids);
   };
 
   return (
@@ -343,6 +438,14 @@ export default function ClaudeIntegration() {
           </div>
         )}
       </div>
+
+      {killConfirm !== null && (
+        <KillProcessesDialog
+          count={killConfirm}
+          onConfirm={confirmKill}
+          onCancel={() => setKillConfirm(null)}
+        />
+      )}
     </div>
   );
 }

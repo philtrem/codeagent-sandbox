@@ -128,6 +128,69 @@ pub fn remove_claude_code_config(server_name: String, scope: String) -> Result<(
     write_json_file(&path, &value)
 }
 
+/// Clean up Claude Code settings that the sandbox process would have restored
+/// on exit. Call this before killing sandbox processes to ensure
+/// `~/.claude/settings.json` is left in a clean state.
+#[tauri::command]
+pub fn cleanup_claude_settings(server_name: String) -> Result<(), String> {
+    let Some(settings_path) = dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
+    else {
+        return Ok(());
+    };
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let contents = fs::read_to_string(&settings_path)
+        .map_err(|e| format!("Failed to read settings: {e}"))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}));
+    let mut changed = false;
+
+    // Remove denied built-in tools (mirrors sandbox's apply_shutdown_settings)
+    const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
+    if let Some(arr) = value
+        .pointer_mut("/permissions/deny")
+        .and_then(|v| v.as_array_mut())
+    {
+        let before_len = arr.len();
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !DENIED_TOOLS.contains(&s))
+                .unwrap_or(true)
+        });
+        if arr.len() != before_len {
+            changed = true;
+        }
+    }
+
+    // Remove MCP allowed-tool entries for this server name
+    let prefix = format!("MCP({server_name}:");
+    if let Some(arr) = value
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut())
+    {
+        let before_len = arr.len();
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !s.starts_with(&prefix))
+                .unwrap_or(true)
+        });
+        if arr.len() != before_len {
+            changed = true;
+        }
+    }
+
+    if changed {
+        let contents = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+        fs::write(&settings_path, contents)
+            .map_err(|e| format!("Failed to write settings: {e}"))?;
+    }
+
+    Ok(())
+}
+
 /// Generate a `claude mcp add` CLI command string.
 #[tauri::command]
 pub fn generate_claude_code_cli_command(entry: McpServerEntry) -> String {

@@ -87,6 +87,22 @@ pub fn resolve_sandbox_binary() -> Result<String, String> {
     super::vm::find_sandbox_binary()
 }
 
+/// Return the platform-specific socket path for side-channel sandbox communication.
+#[tauri::command]
+pub fn get_socket_path() -> Result<String, String> {
+    crate::paths::socket_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "Could not determine socket path".into())
+}
+
+/// Return the platform-specific log file path for sandbox stderr output.
+#[tauri::command]
+pub fn get_log_file_path() -> Result<String, String> {
+    crate::paths::log_file_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "Could not determine log file path".into())
+}
+
 /// Resolve a binary name to its full path via the system PATH.
 #[tauri::command]
 pub fn resolve_binary(name: String) -> Result<Option<String>, String> {
@@ -95,4 +111,98 @@ pub fn resolve_binary(name: String) -> Result<Option<String>, String> {
         Err(which::Error::CannotFindBinaryPath) => Ok(None),
         Err(e) => Err(format!("Failed to resolve binary '{name}': {e}")),
     }
+}
+
+/// Find running sandbox processes and return their PIDs.
+#[tauri::command]
+pub fn find_sandbox_processes() -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        find_sandbox_processes_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        find_sandbox_processes_unix()
+    }
+}
+
+#[cfg(windows)]
+fn find_sandbox_processes_windows() -> Vec<u32> {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq sandbox.exe", "/FO", "CSV", "/NH"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut pids = Vec::new();
+
+    for line in stdout.lines() {
+        // CSV format: "sandbox.exe","1234","Console","1","12,345 K"
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() >= 2 {
+            let pid_field = fields[1].trim().trim_matches('"');
+            if let Ok(pid) = pid_field.parse::<u32>() {
+                pids.push(pid);
+            }
+        }
+    }
+
+    pids
+}
+
+#[cfg(not(windows))]
+fn find_sandbox_processes_unix() -> Vec<u32> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-x", "sandbox"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// Kill sandbox processes by PID.
+#[tauri::command]
+pub fn kill_sandbox_processes(pids: Vec<u32>) -> Result<(), String> {
+    for pid in &pids {
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
+        #[cfg(not(windows))]
+        {
+            unsafe {
+                libc::kill(*pid as i32, libc::SIGTERM);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        for pid in &pids {
+            unsafe {
+                libc::kill(*pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+
+    Ok(())
 }

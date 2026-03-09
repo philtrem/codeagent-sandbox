@@ -29,6 +29,7 @@ pub fn run() {
             claude::write_claude_code_config,
             claude::remove_claude_code_config,
             claude::generate_claude_code_cli_command,
+            claude::cleanup_claude_settings,
             // System commands
             system::get_platform,
             system::get_cpu_count,
@@ -38,6 +39,10 @@ pub fn run() {
             system::validate_directory,
             system::validate_paths_overlap,
             system::ensure_directory,
+            system::get_socket_path,
+            system::get_log_file_path,
+            system::find_sandbox_processes,
+            system::kill_sandbox_processes,
             // Undo commands
             undo::read_undo_history,
             undo::clear_undo_history,
