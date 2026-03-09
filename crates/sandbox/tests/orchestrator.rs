@@ -15,7 +15,7 @@ use codeagent_stdio::{Event, RequestHandler};
 fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliArgs {
     CliArgs {
         working_dirs: vec![working_dir.to_path_buf()],
-        undo_dir: undo_dir.to_path_buf(),
+        undo_dir: Some(undo_dir.to_path_buf()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -664,7 +664,7 @@ fn ao_16_undo_inside_working_dir_rejected() {
     let (event_sender, _rx) = mpsc::unbounded_channel();
     let args = CliArgs {
         working_dirs: vec![working.path().to_path_buf()],
-        undo_dir: undo.clone(),
+        undo_dir: Some(undo.clone()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -703,7 +703,7 @@ fn ao_17_working_inside_undo_dir_rejected() {
     let (event_sender, _rx) = mpsc::unbounded_channel();
     let args = CliArgs {
         working_dirs: vec![working.clone()],
-        undo_dir: undo.path().to_path_buf(),
+        undo_dir: Some(undo.path().to_path_buf()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -1175,7 +1175,7 @@ fn ao_21_reordered_dirs_stable_mapping() {
         let (event_sender, _rx) = mpsc::unbounded_channel();
         let args = CliArgs {
             working_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
-            undo_dir: undo.path().to_path_buf(),
+            undo_dir: Some(undo.path().to_path_buf()),
             ..make_args(dir_a.path(), undo.path())
         };
         let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
@@ -1206,7 +1206,7 @@ fn ao_21_reordered_dirs_stable_mapping() {
         let (event_sender, _rx) = mpsc::unbounded_channel();
         let args = CliArgs {
             working_dirs: vec![dir_b.path().to_path_buf(), dir_a.path().to_path_buf()],
-            undo_dir: undo.path().to_path_buf(),
+            undo_dir: Some(undo.path().to_path_buf()),
             ..make_args(dir_b.path(), undo.path())
         };
         let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });

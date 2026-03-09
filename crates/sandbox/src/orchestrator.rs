@@ -176,8 +176,11 @@ impl Orchestrator {
         }
 
         // Validate undo directory does not overlap with any working directory
+        let undo_dir = self.cli_args.undo_dir.as_ref().ok_or_else(|| AgentError::Io(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "No undo directory configured"),
+        ))?;
         for dir in &working_dirs {
-            check_paths_overlap(dir, &self.cli_args.undo_dir)?;
+            check_paths_overlap(dir, undo_dir)?;
         }
 
         // Check VM availability early so we know whether to wire safeguards.
@@ -201,7 +204,7 @@ impl Orchestrator {
         let mut undo_dirs = Vec::with_capacity(working_dirs.len());
 
         for working_dir in &working_dirs {
-            let undo_dir = self.cli_args.undo_dir.join(undo_subdir_name(working_dir));
+            let undo_dir = undo_dir.join(undo_subdir_name(working_dir));
             let interceptor = if let Some(ref sender) = safeguard_sender {
                 use crate::safeguard_bridge::SafeguardBridge;
                 UndoInterceptor::new(
@@ -466,7 +469,9 @@ impl Orchestrator {
         kernel_path: PathBuf,
         initrd_path: PathBuf,
     ) -> Result<VmSessionParts, AgentError> {
-        let socket_dir = self.cli_args.undo_dir.join(".sockets");
+        let socket_dir = self.cli_args.undo_dir.as_ref()
+            .expect("undo_dir must be set before launching VM")
+            .join(".sockets");
         std::fs::create_dir_all(&socket_dir)?;
 
         let control_socket_path = socket_dir.join("control.sock");

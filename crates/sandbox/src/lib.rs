@@ -13,5 +13,6 @@ pub mod qemu;
 pub mod recent_writes;
 pub mod safeguard_bridge;
 pub mod session;
+pub mod singleton;
 pub mod socket_server;
 pub mod tray;

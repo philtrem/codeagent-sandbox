@@ -5,13 +5,15 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sandbox", about = "Sandboxed coding agent host")]
 pub struct CliArgs {
-    /// Host directories shared with the guest VM. At least one is required.
-    #[arg(long = "working-dir", required = true, num_args = 1..)]
+    /// Host directories shared with the guest VM.
+    /// If not provided, falls back to `[sandbox].working_dirs` in `codeagent.toml`.
+    #[arg(long = "working-dir")]
     pub working_dirs: Vec<PathBuf>,
 
     /// Directory for storing undo logs and preimages.
+    /// If not provided, falls back to `[sandbox].undo_dir` in `codeagent.toml`.
     #[arg(long)]
-    pub undo_dir: PathBuf,
+    pub undo_dir: Option<PathBuf>,
 
     /// VM lifecycle mode: "ephemeral" (destroyed on stop) or "persistent" (kept alive).
     #[arg(long, default_value = "ephemeral")]
@@ -89,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_args_parse() {
+    fn cli_args_parse() {
         let args = CliArgs::try_parse_from([
             "sandbox",
             "--working-dir",
@@ -99,7 +101,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.working_dirs, vec![PathBuf::from("/tmp/work")]);
-        assert_eq!(args.undo_dir, PathBuf::from("/tmp/undo"));
+        assert_eq!(args.undo_dir, Some(PathBuf::from("/tmp/undo")));
         assert_eq!(args.vm_mode, "ephemeral");
         assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
@@ -165,9 +167,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_args_fails() {
-        let result = CliArgs::try_parse_from(["sandbox"]);
-        assert!(result.is_err());
+    fn no_args_uses_defaults() {
+        let args = CliArgs::try_parse_from(["sandbox"]).unwrap();
+        assert!(args.working_dirs.is_empty());
+        assert!(args.undo_dir.is_none());
+        assert_eq!(args.vm_mode, "ephemeral");
+        assert_eq!(args.protocol, "stdio");
     }
 
     #[test]

@@ -10,8 +10,40 @@ use codeagent_sandbox::orchestrator::Orchestrator;
 use codeagent_sandbox::tray::{TrayCommand, TrayConfig, TrayUpdate};
 
 fn main() {
-    let args = CliArgs::parse();
+    let _instance_lock = match codeagent_sandbox::singleton::try_acquire_instance_lock() {
+        Ok(lock) => lock,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut args = CliArgs::parse();
     let config = load_config(args.config_file.as_deref());
+
+    // Merge CLI args with TOML config: CLI overrides TOML.
+    if args.working_dirs.is_empty() && !config.sandbox.working_dirs.is_empty() {
+        args.working_dirs = config
+            .sandbox
+            .working_dirs
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+    }
+    if args.undo_dir.is_none() && !config.sandbox.undo_dir.is_empty() {
+        args.undo_dir = Some(std::path::PathBuf::from(&config.sandbox.undo_dir));
+    }
+    if args.undo_dir.is_none() {
+        if let Some(data_dir) = dirs::data_local_dir() {
+            args.undo_dir = Some(data_dir.join("CodeAgent").join("undo"));
+        }
+    }
+
+    if args.working_dirs.is_empty() {
+        eprintln!("{{\"level\":\"error\",\"message\":\"No working directories specified. \
+            Provide --working-dir or set [sandbox].working_dirs in codeagent.toml.\"}}");
+        std::process::exit(1);
+    }
 
     match args.protocol.as_str() {
         "mcp" => {
@@ -182,13 +214,11 @@ async fn run_mcp(
     };
 
     // Spawn tray command handler if tray is active
-    let quit_rx = if let Some(mut cmd_rx) = tray_cmd_rx {
-        let (quit_tx, quit_rx) = tokio::sync::oneshot::channel::<()>();
+    if let Some(mut cmd_rx) = tray_cmd_rx {
         let denied = Arc::clone(&builtin_denied);
         let allow = Arc::clone(&auto_allow_enabled);
         let name = server_name.clone();
         tokio::spawn(async move {
-            let mut quit_tx = Some(quit_tx);
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     TrayCommand::ToggleBuiltinTools(enabled) => {
@@ -208,19 +238,10 @@ async fn run_mcp(
                     TrayCommand::OpenDesktopApp => {
                         codeagent_sandbox::tray::open_desktop_app();
                     }
-                    TrayCommand::Quit => {
-                        if let Some(tx) = quit_tx.take() {
-                            let _ = tx.send(());
-                        }
-                        return;
-                    }
                 }
             }
         });
-        Some(quit_rx)
-    } else {
-        None
-    };
+    }
 
     let (_notification_sender, notification_receiver) = mpsc::unbounded_channel();
     let mcp_router =
@@ -230,15 +251,7 @@ async fn run_mcp(
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let server_result = match quit_rx {
-        Some(quit_rx) => {
-            tokio::select! {
-                result = server.run(stdin, stdout) => result,
-                _ = quit_rx => Ok(()),
-            }
-        }
-        None => server.run(stdin, stdout).await,
-    };
+    let server_result = server.run(stdin, stdout).await;
 
     if let Err(ref e) = server_result {
         eprintln!("{{\"level\":\"error\",\"message\":\"{e}\"}}");

@@ -17,7 +17,6 @@ pub enum TrayCommand {
     ToggleBuiltinTools(bool),
     ToggleAutoAllowWrite(bool),
     OpenDesktopApp,
-    Quit,
 }
 
 /// Updates sent from the server to the tray UI.
@@ -39,8 +38,9 @@ pub struct TrayConfig {
 
 /// Run the tray icon event loop on the current thread.
 ///
-/// Blocks until the server sends `TrayUpdate::Shutdown` or the user clicks Quit
-/// (which triggers shutdown via the server round-trip).
+/// Blocks until the server sends `TrayUpdate::Shutdown` or the user clicks
+/// "Close Tray". Closing the tray does NOT stop the MCP server — it continues
+/// running until stdin closes (i.e., until Claude Code disconnects).
 pub fn run_tray(
     config: TrayConfig,
     command_tx: tokio::sync::mpsc::UnboundedSender<TrayCommand>,
@@ -64,7 +64,7 @@ pub fn run_tray(
         None,
     );
     let open_desktop = MenuItem::new("Open Desktop App", true, None);
-    let quit_item = MenuItem::new("Quit", true, None);
+    let close_tray_item = MenuItem::new("Close Tray", true, None);
 
     let _ = menu.append_items(&[
         &status_item,
@@ -75,7 +75,7 @@ pub fn run_tray(
         &PredefinedMenuItem::separator(),
         &open_desktop,
         &PredefinedMenuItem::separator(),
-        &quit_item,
+        &close_tray_item,
     ]);
 
     let _tray = match TrayIconBuilder::new()
@@ -98,7 +98,7 @@ pub fn run_tray(
     let disable_builtin_id = disable_builtin.id().clone();
     let auto_allow_id = auto_allow.id().clone();
     let open_desktop_id = open_desktop.id().clone();
-    let quit_id = quit_item.id().clone();
+    let close_tray_id = close_tray_item.id().clone();
 
     let menu_rx = MenuEvent::receiver();
 
@@ -115,8 +115,8 @@ pub fn run_tray(
                 let _ = command_tx.send(TrayCommand::ToggleAutoAllowWrite(checked));
             } else if event.id == open_desktop_id {
                 let _ = command_tx.send(TrayCommand::OpenDesktopApp);
-            } else if event.id == quit_id {
-                let _ = command_tx.send(TrayCommand::Quit);
+            } else if event.id == close_tray_id {
+                return;
             }
         }
 

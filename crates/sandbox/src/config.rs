@@ -13,13 +13,26 @@ use crate::command_classifier::CommandClassifierConfig;
 
 /// Top-level sandbox TOML config.
 ///
-/// Additional sections can be added here as the sandbox gains more
-/// configurable behaviour. For now only command classification is included.
+/// Mirrors the sections written by the desktop app. Unknown sections are
+/// ignored by `#[serde(default)]` so the sandbox only needs to declare the
+/// sections it cares about.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxTomlConfig {
+    pub sandbox: SandboxSection,
     pub command_classifier: CommandClassifierConfig,
     pub file_watcher: FileWatcherConfig,
+}
+
+/// Core sandbox settings: working directories and undo directory.
+///
+/// These are the same fields the desktop app writes under `[sandbox]`.
+/// CLI args override these values when provided.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxSection {
+    pub working_dirs: Vec<String>,
+    pub undo_dir: String,
 }
 
 /// Configuration for the filesystem watcher, loaded from TOML.
@@ -161,6 +174,25 @@ read_only_commands = ["ls", "cat", "mytool"]
             original.command_classifier.destructive_commands,
             deserialized.command_classifier.destructive_commands
         );
+    }
+
+    #[test]
+    fn sandbox_section_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sandbox.toml");
+        std::fs::write(
+            &path,
+            r#"
+[sandbox]
+working_dirs = ["/tmp/project", "/tmp/other"]
+undo_dir = "/tmp/undo"
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(Some(&path));
+        assert_eq!(config.sandbox.working_dirs, vec!["/tmp/project", "/tmp/other"]);
+        assert_eq!(config.sandbox.undo_dir, "/tmp/undo");
     }
 
     #[test]

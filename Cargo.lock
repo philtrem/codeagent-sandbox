@@ -539,6 +539,7 @@ dependencies = [
  "dirs",
  "glob",
  "ignore",
+ "libc",
  "notify",
  "regex",
  "serde",
