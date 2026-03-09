@@ -189,6 +189,14 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   cwd: ROOT_CWD,
 
   execute: async (command: string, timeout?: number) => {
+    const trimmed = command.trim();
+
+    // Handle shell-local commands that don't need to go to the VM.
+    if (trimmed === "clear" || trimmed === "cls") {
+      set({ entries: [], commandHistory: [...get().commandHistory, command], historyIndex: -1 });
+      return;
+    }
+
     const id = `entry-${nextEntryId++}`;
     const { cwd } = get();
 
