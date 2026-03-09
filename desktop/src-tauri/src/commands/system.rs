@@ -128,31 +128,60 @@ pub fn find_sandbox_processes() -> Vec<u32> {
 
 #[cfg(windows)]
 fn find_sandbox_processes_windows() -> Vec<u32> {
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq sandbox.exe", "/FO", "CSV", "/NH"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
+    use std::ffi::CStr;
+    use std::mem;
+    use std::os::raw::c_char;
 
-    let Ok(output) = output else {
-        return Vec::new();
-    };
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const MAX_PATH: usize = 260;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut pids = Vec::new();
-
-    for line in stdout.lines() {
-        // CSV format: "sandbox.exe","1234","Console","1","12,345 K"
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() >= 2 {
-            let pid_field = fields[1].trim().trim_matches('"');
-            if let Ok(pid) = pid_field.parse::<u32>() {
-                pids.push(pid);
-            }
-        }
+    #[repr(C)]
+    struct ProcessEntry32 {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [c_char; MAX_PATH],
     }
 
-    pids
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Process32First(h_snapshot: isize, lppe: *mut ProcessEntry32) -> i32;
+        fn Process32Next(h_snapshot: isize, lppe: *mut ProcessEntry32) -> i32;
+        fn CloseHandle(h_object: isize) -> i32;
+    }
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == -1 {
+            return Vec::new();
+        }
+
+        let mut entry: ProcessEntry32 = mem::zeroed();
+        entry.dw_size = mem::size_of::<ProcessEntry32>() as u32;
+
+        let mut pids = Vec::new();
+
+        if Process32First(snap, &mut entry) != 0 {
+            loop {
+                let exe = CStr::from_ptr(entry.sz_exe_file.as_ptr()).to_string_lossy();
+                if exe.eq_ignore_ascii_case("sandbox.exe") {
+                    pids.push(entry.th32_process_id);
+                }
+                if Process32Next(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snap);
+        pids
+    }
 }
 
 #[cfg(not(windows))]
@@ -179,11 +208,7 @@ pub fn kill_sandbox_processes(pids: Vec<u32>) -> Result<(), String> {
     for pid in &pids {
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            kill_process_windows(*pid);
         }
 
         #[cfg(not(windows))]
@@ -205,4 +230,23 @@ pub fn kill_sandbox_processes(pids: Vec<u32>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn kill_process_windows(pid: u32) {
+    const PROCESS_TERMINATE: u32 = 0x0001;
+
+    extern "system" {
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> isize;
+        fn TerminateProcess(h_process: isize, u_exit_code: u32) -> i32;
+        fn CloseHandle(h_object: isize) -> i32;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle != 0 {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
 }

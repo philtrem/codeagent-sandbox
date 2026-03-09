@@ -146,7 +146,7 @@ export default function ClaudeIntegration() {
   const [socketPath, setSocketPath] = useState<string | undefined>();
   const [logFilePath, setLogFilePath] = useState<string | undefined>();
   const [cliCommand, setCliCommand] = useState("");
-  const [killConfirm, setKillConfirm] = useState<number | null>(null);
+  const [killConfirm, setKillConfirm] = useState<number[] | null>(null);
   const prevScope = useRef(config.claude_code.scope);
   const prevServerName = useRef(config.claude_code.server_name);
 
@@ -241,7 +241,7 @@ export default function ClaudeIntegration() {
     if (!enabled) {
       const pids = await invoke<number[]>("find_sandbox_processes");
       if (pids.length > 0) {
-        setKillConfirm(pids.length);
+        setKillConfirm(pids);
         return;
       }
       await disableMcp();
@@ -251,7 +251,7 @@ export default function ClaudeIntegration() {
   };
 
   const confirmKill = async () => {
-    const pids = await invoke<number[]>("find_sandbox_processes");
+    const pids = killConfirm!;
     setKillConfirm(null);
     await disableMcp(pids);
   };
@@ -441,7 +441,7 @@ export default function ClaudeIntegration() {
 
       {killConfirm !== null && (
         <KillProcessesDialog
-          count={killConfirm}
+          count={killConfirm.length}
           onConfirm={confirmKill}
           onCancel={() => setKillConfirm(null)}
         />
