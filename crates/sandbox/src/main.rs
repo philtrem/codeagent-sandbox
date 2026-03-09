@@ -87,8 +87,14 @@ async fn run_mcp(
     let working_dir = args.working_dirs[0].clone();
     let vm_mode = args.vm_mode.clone();
     let all_dirs: Vec<std::path::PathBuf> = args.working_dirs.clone();
-    let socket_path = args.socket_path.clone();
-    let log_file = args.log_file.clone();
+    let socket_path = args
+        .socket_path
+        .clone()
+        .or_else(|| codeagent_sandbox::config::default_config_dir().map(|d| d.join("mcp.sock")));
+    let log_file = args
+        .log_file
+        .clone()
+        .or_else(|| codeagent_sandbox::config::default_config_dir().map(|d| d.join("sandbox.log")));
     let server_name = args.server_name.clone();
 
     // Track toggle states with atomics so the tray command handler and
@@ -120,11 +126,9 @@ async fn run_mcp(
         std::process::exit(1);
     }
 
-    if builtin_denied.load(Ordering::Relaxed) {
-        codeagent_sandbox::claude_settings::deny_builtin_tools();
-    }
-    codeagent_sandbox::claude_settings::set_allowed_tools(
+    codeagent_sandbox::claude_settings::apply_startup_settings(
         &server_name,
+        builtin_denied.load(Ordering::Relaxed),
         auto_allow_enabled.load(Ordering::Relaxed),
     );
 
@@ -241,11 +245,12 @@ async fn run_mcp(
     }
 
     // Always restore Claude settings, even if the server exited with an error
-    // (e.g. broken pipe when Claude Code terminates).
-    if builtin_denied.load(Ordering::Relaxed) {
-        codeagent_sandbox::claude_settings::restore_builtin_tools();
-    }
-    codeagent_sandbox::claude_settings::remove_allowed_tools(&server_name);
+    // (e.g. broken pipe when Claude Code terminates). Uses a single file write
+    // to minimize Claude Code's file watcher reload overhead.
+    codeagent_sandbox::claude_settings::apply_shutdown_settings(
+        &server_name,
+        builtin_denied.load(Ordering::Relaxed),
+    );
 
     // Signal tray to exit
     if let Some(tx) = tray_update_tx {

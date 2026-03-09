@@ -157,3 +157,92 @@ pub fn remove_allowed_tools(server_name: &str) {
         write_json(&path, &value);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Batched operations (single read-modify-write to minimize file watches)
+// ---------------------------------------------------------------------------
+
+/// Apply startup settings in a single write: deny built-in tools and add
+/// allowed MCP tool entries. This avoids triggering Claude Code's file watcher
+/// multiple times.
+pub fn apply_startup_settings(
+    server_name: &str,
+    deny_builtins: bool,
+    include_write_tools: bool,
+) {
+    let Some(path) = settings_path() else { return };
+    let mut value = read_json(&path);
+
+    if deny_builtins {
+        let deny = ensure_array(&mut value, &["permissions", "deny"]);
+        for tool in DENIED_TOOLS {
+            if !deny.iter().any(|v| v.as_str() == Some(tool)) {
+                deny.push(serde_json::Value::String((*tool).into()));
+            }
+        }
+    }
+
+    let allow = ensure_array(&mut value, &["permissions", "allow"]);
+    let mut tools: Vec<&str> = READ_TOOLS.to_vec();
+    if include_write_tools {
+        tools.extend_from_slice(WRITE_TOOLS);
+    }
+    for tool in tools {
+        let entry = format!("MCP({server_name}:{tool})");
+        if !allow.iter().any(|v| v.as_str() == Some(&entry)) {
+            allow.push(serde_json::Value::String(entry));
+        }
+    }
+
+    write_json(&path, &value);
+}
+
+/// Apply shutdown settings in a single write: restore denied tools and remove
+/// allowed MCP tool entries. This avoids triggering Claude Code's file watcher
+/// multiple times.
+pub fn apply_shutdown_settings(server_name: &str, restore_builtins: bool) {
+    let Some(path) = settings_path() else { return };
+    if !path.exists() {
+        return;
+    }
+
+    let mut value = read_json(&path);
+    let mut changed = false;
+
+    if restore_builtins {
+        if let Some(arr) = value
+            .pointer_mut("/permissions/deny")
+            .and_then(|v| v.as_array_mut())
+        {
+            let before_len = arr.len();
+            arr.retain(|v| {
+                v.as_str()
+                    .map(|s| !DENIED_TOOLS.contains(&s))
+                    .unwrap_or(true)
+            });
+            if arr.len() != before_len {
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(arr) = value
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut())
+    {
+        let prefix = format!("MCP({server_name}:");
+        let before_len = arr.len();
+        arr.retain(|v| {
+            v.as_str()
+                .map(|s| !s.starts_with(&prefix))
+                .unwrap_or(true)
+        });
+        if arr.len() != before_len {
+            changed = true;
+        }
+    }
+
+    if changed {
+        write_json(&path, &value);
+    }
+}
