@@ -204,11 +204,7 @@ pub fn kill_orphaned_sandbox() {
 
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        super::system::kill_process_windows(pid);
     }
 
     #[cfg(not(windows))]
@@ -325,7 +321,8 @@ pub fn start_vm(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
 
     let mut child = command
@@ -405,7 +402,8 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
         }
     }
 
-    // Manual mode: kill the child process
+    // Manual mode: close stdin to signal the sandbox to shut down gracefully,
+    // then wait briefly before force-killing.
     if let Ok(mut guard) = state.stdin.lock() {
         guard.take();
     }
@@ -427,8 +425,23 @@ pub fn stop_vm(state: State<'_, VmState>) -> Result<VmStatus, String> {
 
     match child {
         Some(mut child) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            // Give the process a chance to exit gracefully after stdin closed.
+            // The sandbox reads stdin in a loop; closing it causes the server
+            // to return, triggering cleanup (settings restore, socket shutdown).
+            let graceful = (|| {
+                for _ in 0..10 {
+                    if let Ok(Some(_)) = child.try_wait() {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                false
+            })();
+
+            if !graceful {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
 
             if let Some(pid_path) = paths::pid_file_path() {
                 let _ = std::fs::remove_file(&pid_path);

@@ -233,7 +233,7 @@ pub fn kill_sandbox_processes(pids: Vec<u32>) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn kill_process_windows(pid: u32) {
+pub(super) fn kill_process_windows(pid: u32) {
     const PROCESS_TERMINATE: u32 = 0x0001;
 
     extern "system" {
