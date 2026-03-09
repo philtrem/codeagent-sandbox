@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  AlertTriangle,
   Bug,
   Link2,
   Link2Off,
@@ -68,6 +69,7 @@ function Slider({
   max,
   step,
   suffix,
+  warning,
 }: {
   label: string;
   value: number;
@@ -76,6 +78,7 @@ function Slider({
   max: number;
   step: number;
   suffix?: string;
+  warning?: boolean;
 }) {
   return (
     <div>
@@ -83,7 +86,7 @@ function Slider({
         <label className="text-xs text-[var(--color-text-secondary)]">
           {label}
         </label>
-        <span className="text-xs font-medium">
+        <span className={`text-xs font-medium ${warning ? "text-amber-400" : ""}`}>
           {value}
           {suffix ? ` ${suffix}` : ""}
         </span>
@@ -95,7 +98,7 @@ function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-[var(--color-accent)]"
+        className={`w-full ${warning ? "accent-amber-500" : "accent-[var(--color-accent)]"}`}
       />
     </div>
   );
@@ -145,6 +148,7 @@ export default function VmManager() {
   const { config, loaded, updateSection } = useSandboxConfig();
   const [platform, setPlatform] = useState<string>("");
   const [cpuCount, setCpuCount] = useState<number>(16);
+  const [totalMemoryMb, setTotalMemoryMb] = useState<number>(16384);
 
   const mcpEnabled = config.claude_code.enabled;
 
@@ -153,6 +157,7 @@ export default function VmManager() {
   useEffect(() => {
     invoke<string>("get_platform").then(setPlatform);
     invoke<number>("get_cpu_count").then(setCpuCount);
+    invoke<number>("get_total_memory_mb").then(setTotalMemoryMb);
   }, []);
 
   const handleStart = () => start(config);
@@ -349,15 +354,27 @@ export default function VmManager() {
 
       {/* VM Settings */}
       <CollapsibleSection title="VM Settings" defaultOpen={true}>
-        <Slider
-          label="Memory"
-          value={config.vm.memory_mb}
-          onChange={(v) => updateSection("vm", { memory_mb: v })}
-          min={512}
-          max={16384}
-          step={256}
-          suffix="MB"
-        />
+        <div>
+          <Slider
+            label="Memory"
+            value={config.vm.memory_mb}
+            onChange={(v) => updateSection("vm", { memory_mb: v })}
+            min={256}
+            max={totalMemoryMb}
+            step={256}
+            suffix="MB"
+            warning={config.vm.memory_mb > totalMemoryMb / 2}
+          />
+          {config.vm.memory_mb > totalMemoryMb / 2 && (
+            <div className="mt-1.5 flex items-start gap-1.5 text-xs text-amber-400">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <span>
+                Exceeds 50% of system RAM ({Math.round(totalMemoryMb / 1024)} GB).
+                This may cause memory pressure, leading to paging and degraded system performance.
+              </span>
+            </div>
+          )}
+        </div>
         <Slider
           label="CPUs"
           value={config.vm.cpus}

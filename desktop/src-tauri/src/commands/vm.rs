@@ -321,8 +321,7 @@ pub fn start_vm(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
-        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 
     let mut child = command

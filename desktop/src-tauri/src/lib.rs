@@ -33,6 +33,7 @@ pub fn run() {
             // System commands
             system::get_platform,
             system::get_cpu_count,
+            system::get_total_memory_mb,
             system::get_default_undo_dir,
             system::resolve_binary,
             system::resolve_sandbox_binary,

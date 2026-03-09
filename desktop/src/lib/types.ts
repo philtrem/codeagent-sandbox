@@ -195,7 +195,7 @@ export function defaultConfig(): SandboxConfig {
       log_level: "info",
     },
     vm: {
-      memory_mb: 2048,
+      memory_mb: 512,
       cpus: 2,
       qemu_binary: "",
       kernel_path: "",

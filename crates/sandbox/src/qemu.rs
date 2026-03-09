@@ -441,18 +441,27 @@ impl QemuProcess {
             std::process::Stdio::null()
         };
 
-        let child = std::process::Command::new(&binary)
+        let mut command = std::process::Command::new(&binary);
+        command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(stdout_mode)
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|error| AgentError::QemuSpawnFailed {
-                reason: format!(
-                    "failed to start {}: {error}",
-                    binary.display()
-                ),
-            })?;
+            .stderr(std::process::Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+            command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        }
+
+        let child = command.spawn().map_err(|error| AgentError::QemuSpawnFailed {
+            reason: format!(
+                "failed to start {}: {error}",
+                binary.display()
+            ),
+        })?;
 
         #[cfg(target_os = "windows")]
         let _job = {

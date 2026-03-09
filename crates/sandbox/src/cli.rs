@@ -42,7 +42,7 @@ pub struct CliArgs {
     pub rootfs_path: Option<PathBuf>,
 
     /// VM memory in megabytes.
-    #[arg(long, default_value = "2048")]
+    #[arg(long, default_value = "512")]
     pub memory_mb: u32,
 
     /// Number of virtual CPUs.
@@ -223,7 +223,7 @@ mod tests {
         assert!(args.kernel_path.is_none());
         assert!(args.initrd_path.is_none());
         assert!(args.rootfs_path.is_none());
-        assert_eq!(args.memory_mb, 2048);
+        assert_eq!(args.memory_mb, 512);
         assert_eq!(args.cpus, 2);
         assert!(args.virtiofsd_binary.is_none());
     }

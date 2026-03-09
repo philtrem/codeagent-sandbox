@@ -54,7 +54,7 @@ pub struct VmSection {
 impl Default for VmSection {
     fn default() -> Self {
         Self {
-            memory_mb: 2048,
+            memory_mb: 512,
             cpus: 2,
             qemu_binary: String::new(),
             kernel_path: String::new(),
