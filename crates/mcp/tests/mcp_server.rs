@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use codeagent_mcp::protocol::{
     BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-    JsonRpcNotification, ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
+    JsonRpcNotification, ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_mcp::{McpError, McpHandler, McpRouter, McpServer};
 
@@ -37,10 +37,6 @@ impl McpHandler for StubMcpHandler {
 
     fn edit_file(&self, args: EditFileArgs) -> Result<Value, McpError> {
         Ok(json!(format!("The file {} has been updated successfully.", args.path)))
-    }
-
-    fn list_directory(&self, _args: ListDirectoryArgs) -> Result<Value, McpError> {
-        Ok(json!({ "entries": [] }))
     }
 
     fn glob(&self, _args: GlobArgs) -> Result<Value, McpError> {
@@ -284,13 +280,12 @@ async fn mc01_tools_list_returns_seven_tools() {
 
     let resp = harness.send_request(2, "tools/list", json!({})).await;
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 12);
+    assert_eq!(tools.len(), 11);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Bash"));
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
-    assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"undo"));
     assert!(names.contains(&"get_undo_history"));
     assert!(names.contains(&"discard_undo_history"));
@@ -369,7 +364,7 @@ async fn mc02_unknown_tool_returns_method_not_found() {
 }
 
 // ===========================================================================
-// MC-05: write_file / read_file / list_directory — path containment
+// MC-05: write_file / read_file — path containment
 // ===========================================================================
 
 #[tokio::test]
@@ -412,25 +407,6 @@ async fn mc05_read_file_path_outside_root_returns_error() {
             json!({
                 "name": "read_file",
                 "arguments": { "path": outside }
-            }),
-        )
-        .await;
-
-    assert_eq!(resp["error"]["code"], -32001);
-}
-
-#[tokio::test]
-async fn mc05_list_directory_path_traversal_returns_error() {
-    let mut harness = McpTestHarness::new();
-    harness.initialize().await;
-
-    let resp = harness
-        .send_request(
-            22,
-            "tools/call",
-            json!({
-                "name": "list_directory",
-                "arguments": { "path": "subdir/../../../etc" }
             }),
         )
         .await;
@@ -572,10 +548,6 @@ impl McpHandler for UndoMcpHandler {
         self.interceptor.close_step(step_id).map_err(to_internal)?;
 
         Ok(json!(format!("The file {} has been updated successfully.", args.path)))
-    }
-
-    fn list_directory(&self, _args: ListDirectoryArgs) -> Result<Value, McpError> {
-        Ok(json!({ "entries": [] }))
     }
 
     fn glob(&self, _args: GlobArgs) -> Result<Value, McpError> {

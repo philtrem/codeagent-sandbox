@@ -290,7 +290,7 @@ mod tests {
     use super::*;
     use codeagent_mcp::protocol::{
         BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-        ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
+        ReadFileArgs, UndoArgs, WriteFileArgs,
     };
     use codeagent_mcp::McpError;
     use serde_json::json;
@@ -310,9 +310,6 @@ mod tests {
         }
         fn edit_file(&self, _: EditFileArgs) -> Result<serde_json::Value, McpError> {
             Ok(json!("ok"))
-        }
-        fn list_directory(&self, _: ListDirectoryArgs) -> Result<serde_json::Value, McpError> {
-            Ok(json!({"entries": []}))
         }
         fn glob(&self, _: GlobArgs) -> Result<serde_json::Value, McpError> {
             Ok(json!(""))

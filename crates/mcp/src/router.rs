@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::McpError;
 use crate::parser::extract_missing_field;
-use crate::path_validation::validate_path;
+use crate::path_validation::validate_path_multi;
 use crate::protocol::{
     BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-    JsonRpcRequest, JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams,
+    JsonRpcRequest, JsonRpcResponse, ReadFileArgs, ToolCallParams,
     ToolCallResult, ToolDefinition, UndoArgs, WriteFileArgs,
 };
 
@@ -21,7 +21,6 @@ pub trait McpHandler: Send + Sync {
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError>;
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError>;
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError>;
-    fn list_directory(&self, args: ListDirectoryArgs) -> Result<serde_json::Value, McpError>;
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError>;
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError>;
     fn undo(&self, args: UndoArgs) -> Result<serde_json::Value, McpError>;
@@ -99,17 +98,6 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)", "default": false }
                 },
                 "required": ["path", "old_string", "new_string"]
-            }),
-        },
-        ToolDefinition {
-            name: "list_directory".to_string(),
-            description: "List directory contents".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path to the directory" }
-                },
-                "required": ["path"]
             }),
         },
         ToolDefinition {
@@ -351,32 +339,26 @@ impl McpRouter {
             }
             "read_file" => {
                 let args = parse_tool_args::<ReadFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.read_file(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "write_file" => {
                 let args = parse_tool_args::<WriteFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.write_file(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "edit_file" => {
                 let args = parse_tool_args::<EditFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.edit_file(args)?;
-                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
-            }
-            "list_directory" => {
-                let args = parse_tool_args::<ListDirectoryArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
-                let value = self.handler.list_directory(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "glob" => {
                 let args = parse_tool_args::<GlobArgs>(tool_params.arguments)?;
                 if let Some(ref path) = args.path {
-                    validate_path(path, &self.root_dir)?;
+                    validate_path_multi(path, &self.working_dirs)?;
                 }
                 let value = self.handler.glob(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
@@ -384,7 +366,7 @@ impl McpRouter {
             "grep" => {
                 let args = parse_tool_args::<GrepArgs>(tool_params.arguments)?;
                 if let Some(ref path) = args.path {
-                    validate_path(path, &self.root_dir)?;
+                    validate_path_multi(path, &self.working_dirs)?;
                 }
                 let value = self.handler.grep(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))

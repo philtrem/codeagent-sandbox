@@ -5,7 +5,6 @@ const DENIED_TOOLS: &[&str] = &["Read", "Edit", "Write", "Glob", "Grep", "Bash"]
 
 const READ_TOOLS: &[&str] = &[
     "read_file",
-    "list_directory",
     "glob",
     "grep",
     "get_undo_history",

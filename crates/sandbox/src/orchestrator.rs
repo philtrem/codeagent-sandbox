@@ -12,7 +12,7 @@ use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
 use codeagent_mcp::protocol::{
     BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-    ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
+    ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_stdio::protocol::{
     AgentExecutePayload, AgentPromptPayload, FsListPayload, FsReadPayload,
@@ -828,6 +828,53 @@ impl Orchestrator {
             })
     }
 
+    /// Get the interceptor for the working directory that contains the given path.
+    ///
+    /// For absolute paths, finds the working directory that contains the path.
+    /// For relative paths, returns the primary (index 0) interceptor.
+    fn resolve_interceptor_for_path(
+        &self,
+        path: &str,
+    ) -> Result<Arc<UndoInterceptor>, AgentError> {
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Idle => return Err(AgentError::SessionNotActive),
+            SessionState::Active(s) => s,
+        };
+
+        let requested = std::path::Path::new(path);
+        if requested.is_absolute() {
+            for (i, working_dir) in session.working_dirs.iter().enumerate() {
+                if requested.starts_with(working_dir) {
+                    return session
+                        .interceptors
+                        .get(i)
+                        .cloned()
+                        .ok_or(AgentError::InvalidWorkingDir {
+                            path: format!("directory index {i} out of range"),
+                        });
+                }
+                if let Ok(canonical) = std::fs::canonicalize(working_dir) {
+                    if requested.starts_with(&canonical) {
+                        return session
+                            .interceptors
+                            .get(i)
+                            .cloned()
+                            .ok_or(AgentError::InvalidWorkingDir {
+                                path: format!("directory index {i} out of range"),
+                            });
+                    }
+                }
+            }
+        }
+
+        session
+            .interceptors
+            .first()
+            .cloned()
+            .ok_or(AgentError::SessionNotActive)
+    }
+
     /// Get the primary working directory path.
     fn primary_working_dir(&self) -> Result<PathBuf, AgentError> {
         let state = self.state.lock().unwrap();
@@ -836,6 +883,20 @@ impl Orchestrator {
             SessionState::Active(s) => {
                 Ok(s.working_dirs.first().cloned().unwrap_or_default())
             }
+        }
+    }
+
+    /// Resolve a tool path to an absolute filesystem path.
+    ///
+    /// Absolute paths are returned as-is; relative paths are joined with the
+    /// appropriate working directory.
+    fn resolve_target_path(&self, path: &str) -> Result<PathBuf, AgentError> {
+        let requested = std::path::Path::new(path);
+        if requested.is_absolute() {
+            Ok(requested.to_path_buf())
+        } else {
+            let working_dir = self.primary_working_dir()?;
+            Ok(working_dir.join(path))
         }
     }
 
@@ -1463,11 +1524,9 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
         let content = std::fs::read_to_string(&target)
             .map_err(|e| McpError::InternalError {
                 message: e.to_string(),
@@ -1478,14 +1537,12 @@ impl codeagent_mcp::McpHandler for Orchestrator {
 
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError> {
         let interceptor = self
-            .resolve_interceptor(None)
+            .resolve_interceptor_for_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
 
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
         let rw = self.recent_writes();
 
         let step_id = self.with_api_step(&interceptor, |_| {
@@ -1495,52 +1552,14 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         Ok(json!({ "written": true, "step_id": step_id }))
     }
 
-    fn list_directory(
-        &self,
-        args: ListDirectoryArgs,
-    ) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
-
-        let entries: Vec<serde_json::Value> = std::fs::read_dir(&target)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| {
-                let file_type = entry.file_type().ok();
-                json!({
-                    "name": entry.file_name().to_string_lossy(),
-                    "type": if file_type.as_ref().is_some_and(|ft| ft.is_dir()) {
-                        "directory"
-                    } else if file_type.as_ref().is_some_and(|ft| ft.is_symlink()) {
-                        "symlink"
-                    } else {
-                        "file"
-                    },
-                })
-            })
-            .collect();
-
-        Ok(json!({
-            "working_directory": target.display().to_string(),
-            "entries": entries,
-        }))
-    }
-
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError> {
         let interceptor = self
-            .resolve_interceptor(None)
+            .resolve_interceptor_for_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
 
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
 
         let content = std::fs::read_to_string(&target).map_err(|e| McpError::InternalError {
             message: e.to_string(),
@@ -1582,13 +1601,13 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
         let search_dir = match &args.path {
-            Some(p) => working_dir.join(p),
-            None => working_dir.clone(),
+            Some(p) => self
+                .resolve_target_path(p)
+                .map_err(Self::agent_error_to_mcp)?,
+            None => self
+                .primary_working_dir()
+                .map_err(Self::agent_error_to_mcp)?,
         };
 
         let pattern_str = search_dir
@@ -1605,7 +1624,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 .filter_map(|path| {
                     let mtime = path.metadata().ok()?.modified().ok()?;
                     let relative = path
-                        .strip_prefix(&working_dir)
+                        .strip_prefix(&search_dir)
                         .ok()?
                         .to_string_lossy()
                         .replace('\\', "/");
@@ -1630,13 +1649,13 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
         let search_path = match &args.path {
-            Some(p) => working_dir.join(p),
-            None => working_dir.clone(),
+            Some(p) => self
+                .resolve_target_path(p)
+                .map_err(Self::agent_error_to_mcp)?,
+            None => self
+                .primary_working_dir()
+                .map_err(Self::agent_error_to_mcp)?,
         };
 
         let regex = regex::RegexBuilder::new(&args.pattern)
@@ -1701,7 +1720,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             }
 
             let relative = file_path
-                .strip_prefix(&working_dir)
+                .strip_prefix(&search_path)
                 .unwrap_or(file_path)
                 .to_string_lossy()
                 .replace('\\', "/");

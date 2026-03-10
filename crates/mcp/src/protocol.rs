@@ -143,12 +143,6 @@ pub struct WriteFileArgs {
     pub content: String,
 }
 
-/// Arguments for the `list_directory` tool.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListDirectoryArgs {
-    pub path: String,
-}
-
 /// Arguments for the `undo` tool.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UndoArgs {

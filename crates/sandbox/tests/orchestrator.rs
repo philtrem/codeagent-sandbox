@@ -321,7 +321,7 @@ fn ao_13_agent_execute_unavailable() {
 
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
-    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
     ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
@@ -339,23 +339,6 @@ fn mcp_01_read_file() {
         })
         .unwrap();
     assert_eq!(result["content"], "mcp content");
-}
-
-#[test]
-fn mcp_02_list_directory() {
-    let (orchestrator, _rx, working, _undo) = setup();
-    std::fs::write(working.path().join("file1.rs"), "").unwrap();
-
-    let payload = make_start_payload(&working.path().display().to_string());
-    let _ = orchestrator.session_start(payload);
-
-    let result = orchestrator
-        .list_directory(ListDirectoryArgs {
-            path: ".".to_string(),
-        })
-        .unwrap();
-    let entries = result["entries"].as_array().unwrap();
-    assert!(!entries.is_empty());
 }
 
 #[test]
