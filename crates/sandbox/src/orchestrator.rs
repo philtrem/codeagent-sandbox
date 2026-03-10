@@ -175,6 +175,9 @@ impl Orchestrator {
             }
         }
 
+        // Generate self-documenting mount names for each working directory.
+        let mount_names = crate::qemu::generate_mount_names(&working_dirs);
+
         // Validate undo directory does not overlap with any working directory
         let undo_dir = self.cli_args.undo_dir.as_ref().ok_or_else(|| AgentError::Io(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "No undo directory configured"),
@@ -300,6 +303,7 @@ impl Orchestrator {
         let (vm_status, backend_name) = if vm_available {
             match self.launch_vm(
                 &working_dirs,
+                &mount_names,
                 &interceptors,
                 &recent_writes,
                 resolved_kernel.unwrap(),
@@ -346,6 +350,7 @@ impl Orchestrator {
                     let session = Session {
                         interceptors,
                         working_dirs: working_dirs.clone(),
+                        mount_names: mount_names.clone(),
                         undo_dirs,
                         vm_mode: payload.vm_mode.clone(),
                         safeguard_config: SafeguardConfig::default(),
@@ -379,7 +384,7 @@ impl Orchestrator {
                         message: format!("VM launch failed, falling back to host-only mode: {error}"),
                     });
                     let session = Self::create_non_vm_session(
-                        interceptors, working_dirs.clone(), undo_dirs, payload,
+                        interceptors, working_dirs.clone(), mount_names.clone(), undo_dirs, payload,
                         fs_watcher_handle, Some(recent_writes), initial_command_id,
                     );
                     *state = SessionState::Active(Box::new(session));
@@ -404,7 +409,7 @@ impl Orchestrator {
                 ),
             });
             let session = Self::create_non_vm_session(
-                interceptors, working_dirs.clone(), undo_dirs, payload,
+                interceptors, working_dirs.clone(), mount_names.clone(), undo_dirs, payload,
                 fs_watcher_handle, Some(recent_writes), initial_command_id,
             );
             *state = SessionState::Active(Box::new(session));
@@ -419,16 +424,18 @@ impl Orchestrator {
                 json!({
                     "index": i,
                     "path": d.display().to_string(),
-                    "mount_path": if i == 0 { "/mnt/working".to_string() } else { format!("/mnt/working{i}") },
+                    "mount_path": format!("/mnt/working/{}", mount_names[i]),
                 })
             }).collect::<Vec<_>>(),
         }))
     }
 
     /// Create a session without VM components.
+    #[allow(clippy::too_many_arguments)]
     fn create_non_vm_session(
         interceptors: Vec<Arc<UndoInterceptor>>,
         working_dirs: Vec<PathBuf>,
+        mount_names: Vec<String>,
         undo_dirs: Vec<PathBuf>,
         payload: SessionStartPayload,
         fs_watcher_handle: Option<tokio::task::JoinHandle<()>>,
@@ -438,6 +445,7 @@ impl Orchestrator {
         Session {
             interceptors,
             working_dirs,
+            mount_names,
             undo_dirs,
             vm_mode: payload.vm_mode.clone(),
             safeguard_config: SafeguardConfig::default(),
@@ -464,6 +472,7 @@ impl Orchestrator {
     fn launch_vm(
         &self,
         working_dirs: &[PathBuf],
+        mount_names: &[String],
         interceptors: &[Arc<UndoInterceptor>],
         recent_writes: &Arc<RecentBackendWrites>,
         kernel_path: PathBuf,
@@ -559,6 +568,7 @@ impl Orchestrator {
             control_socket_path: control_socket_path.clone(),
             fs_socket_paths,
             vm_mode: self.cli_args.vm_mode.clone(),
+            mount_names: mount_names.to_vec(),
             extra_args: vec![],
         };
 
@@ -1030,9 +1040,9 @@ impl Orchestrator {
 
 /// Strip a `cd '<cwd>' && ` or `cd "<cwd>" && ` prefix from a command string.
 ///
-/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working' && ` to
-/// commands even though the sandbox already sets the working directory via the
-/// `cwd` field. This strips the redundant prefix for cleaner display and
+/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working/<name>' && `
+/// to commands even though the sandbox already sets the working directory via
+/// the `cwd` field. This strips the redundant prefix for cleaner display and
 /// execution.
 fn strip_cwd_prefix(command: &str, cwd: &str) -> String {
     for quote in ['\'', '"'] {
@@ -1163,7 +1173,9 @@ impl RequestHandler for Orchestrator {
         let exec_msg = codeagent_control::HostMessage::Exec {
             id: command_id,
             command: payload.command.clone(),
-            cwd: payload.cwd.or_else(|| Some("/mnt/working".to_string())),
+            cwd: payload.cwd.or_else(|| {
+                Some(format!("/mnt/working/{}", session.mount_names[0]))
+            }),
             env: payload.env,
         };
 
@@ -1336,7 +1348,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // Classify for response metadata (informational — no gate)
         let classification = self.classifier.classify(&args.command);
 
-        let (control_writer, control_handler, command_id) = {
+        let (control_writer, control_handler, command_id, default_cwd) = {
             let state = self.state.lock().unwrap();
             let session = match &*state {
                 SessionState::Active(s) => s,
@@ -1346,7 +1358,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             let writer = session.control_writer.clone();
             let handler = session.control_handler.clone();
             let id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
-            (writer, handler, id)
+            let cwd = format!("/mnt/working/{}", session.mount_names[0]);
+            (writer, handler, id, cwd)
         };
 
         // No VM available — execute directly on the host.
@@ -1363,7 +1376,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // (so it expects the StepStarted response from the VM) and get the
         // serializable HostMessage back. Uses block_in_place because send_exec
         // is async (may close an ambient step).
-        let cwd = "/mnt/working";
+        let cwd = &default_cwd;
         let command = strip_cwd_prefix(&args.command, cwd);
 
         let host_msg = tokio::task::block_in_place(|| {

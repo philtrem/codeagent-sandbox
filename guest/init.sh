@@ -46,36 +46,40 @@ setup_virtio_ports() {
 sleep 0.5
 setup_virtio_ports
 
-# Mount working directories
-# Virtiofs tags: "working" (index 0), "working1", "working2", ...
-# Virtio-serial 9P: /dev/virtio-ports/p9fsN (bridged by p9proxy)
-mount_working_dir() {
-    local index=$1
-    local tag mount_point
+# Parse mount_names= from kernel cmdline.
+# Returns comma-separated names in MOUNT_NAMES variable.
+parse_mount_names() {
+    MOUNT_NAMES=""
+    for param in $(cat /proc/cmdline); do
+        case "$param" in
+            mount_names=*)
+                MOUNT_NAMES="${param#mount_names=}"
+                ;;
+        esac
+    done
+}
 
-    if [ "$index" -eq 0 ]; then
-        tag="working"
-        mount_point="/mnt/working"
-    else
-        tag="working${index}"
-        mount_point="/mnt/working${index}"
-    fi
+# Mount a single working directory by name.
+# Uses the name as both the virtiofs tag and the virtio-serial port name.
+mount_working_dir() {
+    local name=$1
+    local mount_point="/mnt/working/${name}"
 
     mkdir -p "$mount_point"
 
     # Try virtiofs first (Linux/macOS hosts)
-    if mount -t virtiofs "$tag" "$mount_point" 2>/dev/null; then
-        echo "init: mounted $tag at $mount_point (virtiofs)"
+    if mount -t virtiofs "$name" "$mount_point" 2>/dev/null; then
+        echo "init: mounted $name at $mount_point (virtiofs)"
         return 0
     fi
 
     # Fall back to 9P over virtio-serial (Windows hosts).
     # The p9proxy binary bridges the virtio-serial port to a Unix
     # socketpair so the kernel's trans=fd transport can use it.
-    local port_dev="/dev/virtio-ports/p9fs${index}"
+    local port_dev="/dev/virtio-ports/${name}"
     if [ -e "$port_dev" ]; then
         if /bin/p9proxy "$port_dev" "$mount_point"; then
-            echo "init: mounted p9fs${index} at $mount_point (p9proxy)"
+            echo "init: mounted $name at $mount_point (p9proxy)"
             return 0
         fi
         echo "init: p9proxy mount failed for $port_dev"
@@ -84,15 +88,22 @@ mount_working_dir() {
     return 1
 }
 
-# Mount primary working directory (always present)
-if ! mount_working_dir 0; then
-    echo "init: WARNING: failed to mount primary working directory"
-fi
+# Mount working directories from kernel cmdline names
+parse_mount_names
 
-# Mount additional working directories until one fails
-for index in 1 2 3 4 5 6 7 8 9; do
-    mount_working_dir "$index" || break
-done
+if [ -z "$MOUNT_NAMES" ]; then
+    echo "init: WARNING: no mount_names= found in kernel cmdline"
+else
+    # Save and restore IFS to split on commas
+    OLD_IFS="$IFS"
+    IFS=","
+    for name in $MOUNT_NAMES; do
+        if ! mount_working_dir "$name"; then
+            echo "init: WARNING: failed to mount working directory '$name'"
+        fi
+    done
+    IFS="$OLD_IFS"
+fi
 
 # Create unprivileged user for command execution.
 # The shim runs as root (PID 1) but drops to this user when spawning
