@@ -11,30 +11,49 @@ use crate::error::McpError;
 ///
 /// Returns the resolved path on success, or `PathOutsideRoot` on failure.
 pub fn validate_path(path: &str, root: &Path) -> Result<PathBuf, McpError> {
-    let requested = Path::new(path);
+    validate_path_multi(path, &[root.to_path_buf()])
+}
 
-    let full_path = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        root.join(requested)
+/// Validate that a path is contained within any of the given root directories.
+///
+/// - Relative paths are tried against each root in order; the first match wins.
+/// - Absolute paths must be prefixed by at least one root.
+/// - `.` and `..` components are resolved logically (without touching the
+///   filesystem) to prevent traversal attacks.
+///
+/// Returns the resolved path on success, or `PathOutsideRoot` on failure.
+pub fn validate_path_multi(path: &str, roots: &[PathBuf]) -> Result<PathBuf, McpError> {
+    let requested = Path::new(path);
+    let make_err = || McpError::PathOutsideRoot {
+        path: path.to_string(),
     };
 
-    let resolved = resolve_components(&full_path).ok_or_else(|| McpError::PathOutsideRoot {
-        path: path.to_string(),
-    })?;
-
-    let canonical_root =
-        resolve_components(root).ok_or_else(|| McpError::PathOutsideRoot {
-            path: path.to_string(),
-        })?;
-
-    if !resolved.starts_with(&canonical_root) {
-        return Err(McpError::PathOutsideRoot {
-            path: path.to_string(),
-        });
+    if requested.is_absolute() {
+        let resolved = resolve_components(requested).ok_or_else(make_err)?;
+        for root in roots {
+            let canonical_root = resolve_components(root).ok_or_else(make_err)?;
+            if resolved.starts_with(&canonical_root) {
+                return Ok(resolved);
+            }
+        }
+        Err(make_err())
+    } else {
+        for root in roots {
+            let full_path = root.join(requested);
+            let resolved = match resolve_components(&full_path) {
+                Some(r) => r,
+                None => continue,
+            };
+            let canonical_root = match resolve_components(root) {
+                Some(r) => r,
+                None => continue,
+            };
+            if resolved.starts_with(&canonical_root) {
+                return Ok(resolved);
+            }
+        }
+        Err(make_err())
     }
-
-    Ok(resolved)
 }
 
 /// Resolve `.` and `..` components logically without touching the filesystem.
@@ -127,5 +146,55 @@ mod tests {
         let result = validate_path("", &test_root());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_root());
+    }
+
+    // --- Multi-root tests ---
+
+    fn test_root_secondary() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\sandbox\secondary")
+        } else {
+            PathBuf::from("/sandbox/secondary")
+        }
+    }
+
+    fn multi_roots() -> Vec<PathBuf> {
+        vec![test_root(), test_root_secondary()]
+    }
+
+    #[test]
+    fn multi_root_relative_resolves_against_first() {
+        let result = validate_path_multi("src/main.rs", &multi_roots());
+        assert!(result.is_ok());
+        assert!(result.unwrap().starts_with(test_root()));
+    }
+
+    #[test]
+    fn multi_root_absolute_in_secondary() {
+        let inside = if cfg!(windows) {
+            r"C:\sandbox\secondary\src\lib.rs"
+        } else {
+            "/sandbox/secondary/src/lib.rs"
+        };
+        let result = validate_path_multi(inside, &multi_roots());
+        assert!(result.is_ok());
+        assert!(result.unwrap().starts_with(test_root_secondary()));
+    }
+
+    #[test]
+    fn multi_root_absolute_outside_all_rejected() {
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32"
+        } else {
+            "/etc"
+        };
+        let err = validate_path_multi(outside, &multi_roots()).unwrap_err();
+        assert!(matches!(err, McpError::PathOutsideRoot { .. }));
+    }
+
+    #[test]
+    fn multi_root_traversal_rejected() {
+        let err = validate_path_multi("../../etc/passwd", &multi_roots()).unwrap_err();
+        assert!(matches!(err, McpError::PathOutsideRoot { .. }));
     }
 }

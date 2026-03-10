@@ -15,7 +15,7 @@ use codeagent_stdio::{Event, RequestHandler};
 fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliArgs {
     CliArgs {
         working_dirs: vec![working_dir.to_path_buf()],
-        undo_dir: undo_dir.to_path_buf(),
+        undo_dir: Some(undo_dir.to_path_buf()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -27,6 +27,11 @@ fn make_args(working_dir: &std::path::Path, undo_dir: &std::path::Path) -> CliAr
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
+        socket_path: None,
+        log_file: None,
+        disable_builtin_tools: false,
+        auto_allow_write_tools: false,
+        server_name: "codeagent-sandbox".into(),
     }
 }
 
@@ -316,7 +321,7 @@ fn ao_13_agent_execute_unavailable() {
 
 use codeagent_mcp::McpHandler;
 use codeagent_mcp::protocol::{
-    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs, ListDirectoryArgs,
+    BashArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
     ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 
@@ -334,23 +339,6 @@ fn mcp_01_read_file() {
         })
         .unwrap();
     assert_eq!(result["content"], "mcp content");
-}
-
-#[test]
-fn mcp_02_list_directory() {
-    let (orchestrator, _rx, working, _undo) = setup();
-    std::fs::write(working.path().join("file1.rs"), "").unwrap();
-
-    let payload = make_start_payload(&working.path().display().to_string());
-    let _ = orchestrator.session_start(payload);
-
-    let result = orchestrator
-        .list_directory(ListDirectoryArgs {
-            path: ".".to_string(),
-        })
-        .unwrap();
-    let entries = result["entries"].as_array().unwrap();
-    assert!(!entries.is_empty());
 }
 
 #[test]
@@ -659,7 +647,7 @@ fn ao_16_undo_inside_working_dir_rejected() {
     let (event_sender, _rx) = mpsc::unbounded_channel();
     let args = CliArgs {
         working_dirs: vec![working.path().to_path_buf()],
-        undo_dir: undo.clone(),
+        undo_dir: Some(undo.clone()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -671,6 +659,11 @@ fn ao_16_undo_inside_working_dir_rejected() {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
+        socket_path: None,
+        log_file: None,
+        disable_builtin_tools: false,
+        auto_allow_write_tools: false,
+        server_name: "codeagent-sandbox".into(),
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
@@ -693,7 +686,7 @@ fn ao_17_working_inside_undo_dir_rejected() {
     let (event_sender, _rx) = mpsc::unbounded_channel();
     let args = CliArgs {
         working_dirs: vec![working.clone()],
-        undo_dir: undo.path().to_path_buf(),
+        undo_dir: Some(undo.path().to_path_buf()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -705,6 +698,11 @@ fn ao_17_working_inside_undo_dir_rejected() {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
+        socket_path: None,
+        log_file: None,
+        disable_builtin_tools: false,
+        auto_allow_write_tools: false,
+        server_name: "codeagent-sandbox".into(),
     };
     let orchestrator = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
 
@@ -1160,7 +1158,7 @@ fn ao_21_reordered_dirs_stable_mapping() {
         let (event_sender, _rx) = mpsc::unbounded_channel();
         let args = CliArgs {
             working_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
-            undo_dir: undo.path().to_path_buf(),
+            undo_dir: Some(undo.path().to_path_buf()),
             ..make_args(dir_a.path(), undo.path())
         };
         let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });
@@ -1191,7 +1189,7 @@ fn ao_21_reordered_dirs_stable_mapping() {
         let (event_sender, _rx) = mpsc::unbounded_channel();
         let args = CliArgs {
             working_dirs: vec![dir_b.path().to_path_buf(), dir_a.path().to_path_buf()],
-            undo_dir: undo.path().to_path_buf(),
+            undo_dir: Some(undo.path().to_path_buf()),
             ..make_args(dir_b.path(), undo.path())
         };
         let orch = Orchestrator::new(args, event_sender, CommandClassifierConfig::default(), FileWatcherConfig { enabled: false, ..FileWatcherConfig::default() });

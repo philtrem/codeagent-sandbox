@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::Duration;
 
@@ -15,6 +16,144 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Timeout for graceful QEMU shutdown before sending SIGKILL.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum length for virtiofs tags and virtio-serial port names.
+const MAX_MOUNT_NAME_LEN: usize = 36;
+
+/// Length of the blake3 hash suffix used when truncating long names.
+const HASH_SUFFIX_LEN: usize = 7;
+
+/// Sanitize a single path component into a mount-safe name.
+///
+/// Lowercases, replaces non-alphanumeric characters with `-`, collapses
+/// consecutive dashes, and strips leading/trailing dashes.
+fn sanitize_path_component(component: &str) -> String {
+    let lowered = component.to_lowercase();
+    let replaced: String = lowered
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let collapsed = collapse_dashes(&replaced);
+    collapsed.trim_matches('-').to_string()
+}
+
+/// Collapse consecutive dashes into a single dash.
+fn collapse_dashes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c == '-' {
+            if !prev_dash {
+                result.push('-');
+            }
+            prev_dash = true;
+        } else {
+            result.push(c);
+            prev_dash = false;
+        }
+    }
+    result
+}
+
+/// Extract the sanitized parent directory component for disambiguation.
+fn extract_parent_component(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| sanitize_path_component(&n.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// Truncate a name to fit within [`MAX_MOUNT_NAME_LEN`] by appending a blake3 hash suffix.
+///
+/// If the name is already short enough, returns it unchanged.
+/// Otherwise: `name[..28]-<7-char hash>`.
+fn truncate_if_needed(name: &str, full_path: &Path) -> String {
+    if name.len() <= MAX_MOUNT_NAME_LEN {
+        return name.to_string();
+    }
+    let hash = blake3::hash(full_path.to_string_lossy().as_bytes());
+    let hash_str = &hash.to_hex()[..HASH_SUFFIX_LEN];
+    let prefix_len = MAX_MOUNT_NAME_LEN - 1 - HASH_SUFFIX_LEN; // 36 - 1 - 7 = 28
+    let prefix = &name[..prefix_len];
+    let prefix = prefix.trim_end_matches('-');
+    format!("{prefix}-{hash_str}")
+}
+
+/// Generate self-documenting mount names from a list of working directory paths.
+///
+/// Each name is derived from the directory's basename:
+/// 1. Sanitize (lowercase, non-alnum → `-`, collapse dashes, strip edges)
+/// 2. On collision: prepend parent dir (`parent-dir`)
+/// 3. If still colliding: append numeric suffix (`-2`, `-3`, ...)
+/// 4. Truncate to 36 chars if needed (28-char prefix + `-` + 7-char blake3 hash)
+/// 5. Empty name fallback: 7-char blake3 hash of the full path
+pub fn generate_mount_names(dirs: &[PathBuf]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::with_capacity(dirs.len());
+
+    // Phase 1: Generate base names
+    for dir in dirs {
+        let component = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let sanitized = sanitize_path_component(&component);
+        let name = if sanitized.is_empty() {
+            let hash = blake3::hash(dir.to_string_lossy().as_bytes());
+            hash.to_hex()[..HASH_SUFFIX_LEN].to_string()
+        } else {
+            sanitized
+        };
+        names.push(name);
+    }
+
+    // Phase 2: Resolve collisions with parent prefix
+    let collisions = find_collisions(&names);
+    for &idx in &collisions {
+        let parent = extract_parent_component(&dirs[idx]);
+        if !parent.is_empty() {
+            let prefixed = format!("{parent}-{}", names[idx]);
+            names[idx] = prefixed;
+        }
+    }
+
+    // Phase 3: Resolve remaining collisions with numeric suffix
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut final_names: Vec<String> = Vec::with_capacity(dirs.len());
+    for (i, name) in names.iter().enumerate() {
+        let count = counts.entry(name.clone()).or_insert(0);
+        *count += 1;
+        let unique = if *count > 1 {
+            format!("{name}-{count}")
+        } else {
+            // Check if this name appears more than once total
+            let total = names.iter().filter(|n| *n == name).count();
+            if total > 1 {
+                format!("{name}-1")
+            } else {
+                name.clone()
+            }
+        };
+        final_names.push(truncate_if_needed(&unique, &dirs[i]));
+    }
+
+    final_names
+}
+
+/// Find indices of names that appear more than once.
+fn find_collisions(names: &[String]) -> Vec<usize> {
+    let mut counts: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        counts.entry(name.as_str()).or_default().push(i);
+    }
+    let mut colliding = Vec::new();
+    for indices in counts.values() {
+        if indices.len() > 1 {
+            colliding.extend(indices);
+        }
+    }
+    colliding.sort();
+    colliding
+}
 
 /// Configuration for launching a QEMU virtual machine.
 #[derive(Debug, Clone)]
@@ -48,6 +187,10 @@ pub struct QemuConfig {
 
     /// VM lifecycle mode ("ephemeral" or "persistent").
     pub vm_mode: String,
+
+    /// Sanitized mount names for each working directory (same length as `working_dirs`).
+    /// Used as virtiofs tags (Unix) and virtio-serial port names (Windows).
+    pub mount_names: Vec<String>,
 
     /// Extra QEMU command-line arguments.
     pub extra_args: Vec<String>,
@@ -150,37 +293,30 @@ impl QemuConfig {
     fn add_filesystem_args(
         &self,
         args: &mut Vec<OsString>,
-        _extra_kernel_params: &mut Vec<String>,
+        extra_kernel_params: &mut Vec<String>,
     ) {
         for (index, socket_path) in self.fs_socket_paths.iter().enumerate() {
+            let mount_name = &self.mount_names[index];
+
             #[cfg(not(target_os = "windows"))]
             {
                 let chardev_id = format!("vfs{index}");
-                let tag = if index == 0 {
-                    "working".to_string()
-                } else {
-                    format!("working{index}")
-                };
                 args.extend([
                     "-chardev".into(),
                     format!("socket,id={chardev_id},path={}", socket_path.display()).into(),
                 ]);
                 args.extend([
                     "-device".into(),
-                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={tag}").into(),
+                    format!("vhost-user-fs-pci,chardev={chardev_id},tag={mount_name}").into(),
                 ]);
             }
 
             #[cfg(target_os = "windows")]
             {
-                // Read the TCP address from the socket_path file written by
-                // P9Backend::start(). QEMU connects to it via a chardev, and
-                // exposes a virtserialport named p9fsN to the guest.
                 let addr = std::fs::read_to_string(socket_path).unwrap_or_default();
                 let addr = addr.trim().to_string();
                 let (host, port) = addr.rsplit_once(':').unwrap_or((&addr, "0"));
                 let chardev_id = format!("p9fs{index}");
-                let port_name = format!("p9fs{index}");
 
                 args.extend([
                     "-chardev".into(),
@@ -188,9 +324,14 @@ impl QemuConfig {
                 ]);
                 args.extend([
                     "-device".into(),
-                    format!("virtserialport,chardev={chardev_id},name={port_name}").into(),
+                    format!("virtserialport,chardev={chardev_id},name={mount_name}").into(),
                 ]);
             }
+        }
+
+        // Pass mount names to guest via kernel cmdline
+        if !self.mount_names.is_empty() {
+            extra_kernel_params.push(format!("mount_names={}", self.mount_names.join(",")));
         }
     }
 
@@ -441,18 +582,27 @@ impl QemuProcess {
             std::process::Stdio::null()
         };
 
-        let child = std::process::Command::new(&binary)
+        let mut command = std::process::Command::new(&binary);
+        command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(stdout_mode)
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|error| AgentError::QemuSpawnFailed {
-                reason: format!(
-                    "failed to start {}: {error}",
-                    binary.display()
-                ),
-            })?;
+            .stderr(std::process::Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+            command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        }
+
+        let child = command.spawn().map_err(|error| AgentError::QemuSpawnFailed {
+            reason: format!(
+                "failed to start {}: {error}",
+                binary.display()
+            ),
+        })?;
 
         #[cfg(target_os = "windows")]
         let _job = {
@@ -603,6 +753,8 @@ mod tests {
     use super::*;
 
     fn test_config() -> QemuConfig {
+        let working_dirs = vec![PathBuf::from("/tmp/work")];
+        let mount_names = generate_mount_names(&working_dirs);
         QemuConfig {
             qemu_binary: Some(PathBuf::from("/usr/bin/qemu-system-x86_64")),
             kernel_path: PathBuf::from("/boot/vmlinuz"),
@@ -610,10 +762,11 @@ mod tests {
             rootfs_path: None,
             memory_mb: 2048,
             cpus: 2,
-            working_dirs: vec![PathBuf::from("/tmp/work")],
+            working_dirs,
             control_socket_path: PathBuf::from("/tmp/control.sock"),
             fs_socket_paths: vec![PathBuf::from("/tmp/vfs0.sock")],
             vm_mode: "ephemeral".to_string(),
+            mount_names,
             extra_args: vec![],
         }
     }
@@ -688,6 +841,7 @@ mod tests {
             PathBuf::from("/tmp/work0"),
             PathBuf::from("/tmp/work1"),
         ];
+        config.mount_names = generate_mount_names(&config.working_dirs);
         config.fs_socket_paths = vec![
             PathBuf::from("/tmp/vfs0.sock"),
             PathBuf::from("/tmp/vfs1.sock"),
@@ -698,6 +852,7 @@ mod tests {
 
         #[cfg(not(target_os = "windows"))]
         {
+            // Chardev IDs remain index-based (vfs0, vfs1)
             let fs_device_count = args
                 .iter()
                 .filter(|a| a.contains("vfs0") || a.contains("vfs1"))
@@ -706,11 +861,19 @@ mod tests {
                 fs_device_count >= 2,
                 "expected >=2 filesystem device args, got {fs_device_count}: {args:?}"
             );
+            // Tags use mount names derived from directory basenames
+            assert!(
+                args.iter().any(|a| a.contains("tag=work0")),
+                "expected virtiofs tag 'work0': {args:?}"
+            );
+            assert!(
+                args.iter().any(|a| a.contains("tag=work1")),
+                "expected virtiofs tag 'work1': {args:?}"
+            );
         }
 
         #[cfg(target_os = "windows")]
         {
-            // On Windows, filesystem ports use chardev + virtserialport
             let fs_chardev_count = args
                 .iter()
                 .filter(|a| a.contains("id=p9fs0") || a.contains("id=p9fs1"))
@@ -719,13 +882,14 @@ mod tests {
                 fs_chardev_count >= 2,
                 "expected >=2 filesystem chardev args, got {fs_chardev_count}: {args:?}"
             );
-            let fs_port_count = args
-                .iter()
-                .filter(|a| a.contains("name=p9fs0") || a.contains("name=p9fs1"))
-                .count();
+            // Port names use mount names derived from directory basenames
             assert!(
-                fs_port_count >= 2,
-                "expected >=2 filesystem virtserialport args, got {fs_port_count}: {args:?}"
+                args.iter().any(|a| a.contains("name=work0")),
+                "expected virtserialport named 'work0': {args:?}"
+            );
+            assert!(
+                args.iter().any(|a| a.contains("name=work1")),
+                "expected virtserialport named 'work1': {args:?}"
             );
         }
     }
@@ -772,7 +936,8 @@ mod tests {
         assert!(has_drive, "missing rootfs drive arg: {args:?}");
     }
 
-    /// QC-09: append line does not include root= when rootfs_path is None.
+    /// QC-09: append line does not include root= when rootfs_path is None,
+    /// but does include mount_names= with the generated names.
     #[test]
     fn qc_09_no_root_without_rootfs() {
         let config = test_config(); // rootfs_path: None
@@ -786,6 +951,10 @@ mod tests {
             "append should not contain root= without rootfs: {append_val}"
         );
         assert!(append_val.contains("console=hvc0"));
+        assert!(
+            append_val.contains("mount_names=work"),
+            "append should contain mount_names=: {append_val}"
+        );
     }
 
     /// QC-10: append line includes root=/dev/vda when rootfs_path is set.
@@ -820,6 +989,7 @@ mod tests {
 
     /// QC-11: Windows control chardev uses separate host/port; filesystem
     /// uses virtio-serial chardev + virtserialport connecting to the P9Backend.
+    /// Port names use the generated mount name (not index-based p9fsN).
     #[cfg(target_os = "windows")]
     #[test]
     fn qc_11_windows_chardev_transport() {
@@ -836,6 +1006,7 @@ mod tests {
         let mut config = test_config();
         config.control_socket_path = ctrl_addr_path;
         config.fs_socket_paths = vec![fs_addr_path];
+        // mount_names already set by test_config() from working_dirs
 
         let (_binary, args) = config.build_args().unwrap();
         let args = args_to_strings(&args);
@@ -858,10 +1029,125 @@ mod tests {
             "expected P9Backend address in filesystem chardev: {fs_chardev}"
         );
 
-        // Filesystem virtserialport should be named p9fs0
+        // Filesystem virtserialport should use the mount name
+        let mount_name = &config.mount_names[0];
         assert!(
-            args.iter().any(|a| a.contains("virtserialport,chardev=p9fs0,name=p9fs0")),
-            "expected virtserialport named p9fs0: {args:?}"
+            args.iter().any(|a| a.contains(&format!("virtserialport,chardev=p9fs0,name={mount_name}"))),
+            "expected virtserialport named '{mount_name}': {args:?}"
+        );
+    }
+
+    // --- Mount name generation tests (MN-01..MN-10) ---
+
+    /// MN-01: Single directory produces sanitized basename.
+    #[test]
+    fn mn_01_single_dir_basename() {
+        let names = generate_mount_names(&[PathBuf::from("/home/user/my-project")]);
+        assert_eq!(names, vec!["my-project"]);
+    }
+
+    /// MN-02: Non-alphanumeric characters are replaced with dashes and collapsed.
+    #[test]
+    fn mn_02_sanitize_special_chars() {
+        let names = generate_mount_names(&[PathBuf::from("/home/user/My___Project!!!")]);
+        assert_eq!(names, vec!["my-project"]);
+    }
+
+    /// MN-03: Colliding basenames get parent prefix.
+    #[test]
+    fn mn_03_collision_parent_prefix() {
+        let names = generate_mount_names(&[
+            PathBuf::from("/home/user/project"),
+            PathBuf::from("/home/work/project"),
+        ]);
+        assert_eq!(names, vec!["user-project", "work-project"]);
+    }
+
+    /// MN-04: Collisions surviving parent prefix get numeric suffix.
+    #[test]
+    fn mn_04_collision_numeric_suffix() {
+        let names = generate_mount_names(&[
+            PathBuf::from("/home/user/project"),
+            PathBuf::from("/opt/user/project"),
+        ]);
+        // Both have parent "user", so after parent prefix they're both "user-project"
+        assert_eq!(names, vec!["user-project-1", "user-project-2"]);
+    }
+
+    /// MN-05: Long names are truncated with blake3 hash suffix.
+    #[test]
+    fn mn_05_truncation() {
+        let long_name = "a".repeat(50);
+        let dir = PathBuf::from(format!("/home/user/{long_name}"));
+        let names = generate_mount_names(&[dir]);
+        assert!(
+            names[0].len() <= MAX_MOUNT_NAME_LEN,
+            "name too long: {} ({})",
+            names[0],
+            names[0].len()
+        );
+        assert!(
+            names[0].contains('-'),
+            "truncated name should have hash suffix: {}",
+            names[0]
+        );
+    }
+
+    /// MN-06: Empty basename (root path) falls back to hash.
+    #[test]
+    fn mn_06_empty_basename_hash_fallback() {
+        let names = generate_mount_names(&[PathBuf::from("/")]);
+        assert_eq!(names[0].len(), HASH_SUFFIX_LEN);
+        assert!(names[0].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// MN-07: Three distinct directories produce unique names without suffixes.
+    #[test]
+    fn mn_07_no_collision_no_suffix() {
+        let names = generate_mount_names(&[
+            PathBuf::from("/home/alice"),
+            PathBuf::from("/home/bob"),
+            PathBuf::from("/home/charlie"),
+        ]);
+        assert_eq!(names, vec!["alice", "bob", "charlie"]);
+    }
+
+    /// MN-08: Names are lowercased.
+    #[test]
+    fn mn_08_lowercase() {
+        let names = generate_mount_names(&[PathBuf::from("/home/user/MyProject")]);
+        assert_eq!(names, vec!["myproject"]);
+    }
+
+    /// MN-09: Leading/trailing special chars are stripped.
+    #[test]
+    fn mn_09_strip_edges() {
+        let names = generate_mount_names(&[PathBuf::from("/home/user/---test---")]);
+        assert_eq!(names, vec!["test"]);
+    }
+
+    /// MN-10: mount_names= appears in kernel cmdline.
+    #[test]
+    fn mn_10_mount_names_in_kernel_cmdline() {
+        let mut config = test_config();
+        config.working_dirs = vec![
+            PathBuf::from("/tmp/alpha"),
+            PathBuf::from("/tmp/beta"),
+        ];
+        config.mount_names = generate_mount_names(&config.working_dirs);
+        config.fs_socket_paths = vec![
+            PathBuf::from("/tmp/vfs0.sock"),
+            PathBuf::from("/tmp/vfs1.sock"),
+        ];
+
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let append_idx = args.iter().position(|a| a == "-append").unwrap();
+        let append_val = &args[append_idx + 1];
+        assert!(
+            append_val.contains("mount_names=alpha,beta"),
+            "expected mount_names=alpha,beta in append: {append_val}"
         );
     }
 }

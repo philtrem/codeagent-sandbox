@@ -37,7 +37,7 @@ use codeagent_stdio::{Event, RequestHandler};
 fn make_args(working_dir: &Path, undo_dir: &Path) -> CliArgs {
     CliArgs {
         working_dirs: vec![working_dir.to_path_buf()],
-        undo_dir: undo_dir.to_path_buf(),
+        undo_dir: Some(undo_dir.to_path_buf()),
         vm_mode: "ephemeral".to_string(),
         protocol: "stdio".to_string(),
         log_level: "info".to_string(),
@@ -49,6 +49,11 @@ fn make_args(working_dir: &Path, undo_dir: &Path) -> CliArgs {
         cpus: 2,
         virtiofsd_binary: None,
         config_file: None,
+        socket_path: None,
+        log_file: None,
+        disable_builtin_tools: false,
+        auto_allow_write_tools: false,
+        server_name: "codeagent-sandbox".into(),
     }
 }
 

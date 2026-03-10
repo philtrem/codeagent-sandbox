@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -10,34 +11,45 @@ use codeagent_interceptor::write_interceptor::WriteInterceptor;
 /// Accounts for OS event delivery delay (especially macOS FSEvents).
 const DEFAULT_TTL: Duration = Duration::from_secs(5);
 
-/// Extra buffer added on top of the watcher tick interval to account for
-/// OS event delivery latency (especially macOS FSEvents batching).
-const OS_EVENT_DELIVERY_BUFFER: Duration = Duration::from_millis(300);
+/// Small buffer to cover the gap between the OS delivering a filesystem event
+/// and our notify callback stamping `Instant::now()`. This only needs to
+/// account for thread scheduling jitter, not debounce or batching delays.
+const ARRIVAL_JITTER_BUFFER: Duration = Duration::from_millis(50);
 
 /// Tracks paths recently written by the sandbox's own backends (filesystem
 /// channel or MCP API). The filesystem watcher checks this map to distinguish
 /// backend-originated writes from genuine external modifications.
 ///
-/// Also provides a deadline-based suppression mechanism that the orchestrator
-/// activates during rollback. While the deadline has not expired, `was_recent`
-/// returns true for all paths, causing the watcher to skip all events.
+/// Provides two suppression layers:
+/// 1. **Per-path**: `record()` / `should_suppress()` — used by `WriteTrackingInterceptor`
+///    for VM filesystem writes, and by the orchestrator for MCP `write_file`/`edit_file`
+///    where we know the exact paths and can `record()` at write time.
+/// 2. **Blanket**: `begin_suppression()` / `end_suppression()` — used by the
+///    orchestrator for operations where we cannot enumerate the affected paths
+///    (rollback, host bash).
+///
+/// Blanket suppression is counter-based: while any guard is held, `should_suppress`
+/// returns true for all paths. When the last guard drops, the end timestamp is
+/// recorded. Events are then compared by their *arrival* time (when the OS
+/// delivered them to the notify callback) rather than by wall-clock time at
+/// processing, eliminating races caused by debounce delays.
 pub struct RecentBackendWrites {
     entries: Mutex<HashMap<PathBuf, Instant>>,
     ttl: Duration,
-    /// Grace period for rollback suppression, derived from the watcher tick
-    /// interval plus an OS event delivery buffer.
-    suppress_grace: Duration,
-    /// When set, all paths are suppressed until this instant passes.
-    suppress_until: Mutex<Option<Instant>>,
+    /// Number of active suppression guards. While > 0, all paths are suppressed.
+    active_suppressions: AtomicUsize,
+    /// Timestamp when the last suppression guard dropped. Events whose arrival
+    /// time is before this instant (plus a jitter buffer) are suppressed.
+    suppress_ended_at: Mutex<Option<Instant>>,
 }
 
 impl RecentBackendWrites {
-    pub fn new(ttl: Duration, watcher_tick: Duration) -> Self {
+    pub fn new(ttl: Duration) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             ttl,
-            suppress_grace: watcher_tick + OS_EVENT_DELIVERY_BUFFER,
-            suppress_until: Mutex::new(None),
+            active_suppressions: AtomicUsize::new(0),
+            suppress_ended_at: Mutex::new(None),
         }
     }
 
@@ -48,10 +60,6 @@ impl RecentBackendWrites {
     /// and we need to suppress those too.
     pub fn record(&self, path: &Path) {
         let canonical = normalize_path(path);
-        eprintln!(
-            "{{\"level\":\"trace\",\"component\":\"recent_writes\",\"action\":\"record\",\"path\":\"{}\"}}",
-            canonical.display()
-        );
         let now = Instant::now();
         let mut entries = self.entries.lock().unwrap();
         if let Some(parent) = canonical.parent() {
@@ -62,12 +70,23 @@ impl RecentBackendWrites {
         entries.insert(canonical, now);
     }
 
-    /// Returns true if `path` should be suppressed by the watcher — either
-    /// because it was written by the sandbox within the TTL window, or because
-    /// the suppression deadline has not yet expired (e.g. during/after rollback).
-    pub fn was_recent(&self, path: &Path) -> bool {
-        if let Some(deadline) = *self.suppress_until.lock().unwrap() {
-            if Instant::now() < deadline {
+    /// Returns true if `path` should be suppressed by the watcher.
+    ///
+    /// `event_time` is the `Instant` when the OS delivered the filesystem event
+    /// to our notify callback — NOT the current wall-clock time. This makes the
+    /// check independent of debounce delays: even if processing happens seconds
+    /// later, the comparison uses when the event actually arrived.
+    ///
+    /// Suppression triggers if any of these hold:
+    /// 1. A suppression guard is currently active (counter > 0).
+    /// 2. The event arrived before (or shortly after) the last guard dropped.
+    /// 3. The path was recorded by `record()` and hasn't expired.
+    pub fn should_suppress(&self, path: &Path, event_time: Instant) -> bool {
+        if self.active_suppressions.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+        if let Some(ended_at) = *self.suppress_ended_at.lock().unwrap() {
+            if event_time <= ended_at + ARRIVAL_JITTER_BUFFER {
                 return true;
             }
         }
@@ -75,21 +94,26 @@ impl RecentBackendWrites {
         let entries = self.entries.lock().unwrap();
         entries
             .get(&canonical)
-            .is_some_and(|timestamp| timestamp.elapsed() < self.ttl)
+            .is_some_and(|recorded_at| {
+                event_time.saturating_duration_since(*recorded_at) < self.ttl
+            })
     }
 
-    /// Begin suppressing all watcher events. Suppression lasts until the
-    /// grace period (watcher tick + OS buffer) expires. Call
-    /// `extend_suppression` to push the deadline further into the future
-    /// (e.g. after rollback completes).
+    /// Increment the active suppression counter. While any guard is active,
+    /// `should_suppress` returns true for all paths.
     pub fn begin_suppression(&self) {
-        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+        self.active_suppressions.fetch_add(1, Ordering::Release);
     }
 
-    /// Extend the suppression deadline by the grace period from now. Called
-    /// when rollback completes to cover late-arriving filesystem events.
-    pub fn extend_suppression(&self) {
-        *self.suppress_until.lock().unwrap() = Some(Instant::now() + self.suppress_grace);
+    /// Decrement the active suppression counter. When the counter reaches zero,
+    /// records the current instant so that events whose arrival time predates
+    /// this moment (plus jitter buffer) are still suppressed.
+    pub fn end_suppression(&self) {
+        let prev = self.active_suppressions.fetch_sub(1, Ordering::Release);
+        debug_assert!(prev > 0, "end_suppression called without matching begin_suppression");
+        if prev == 1 {
+            *self.suppress_ended_at.lock().unwrap() = Some(Instant::now());
+        }
     }
 
     /// Remove entries older than the TTL.
@@ -98,10 +122,10 @@ impl RecentBackendWrites {
         entries.retain(|_, timestamp| timestamp.elapsed() < self.ttl);
     }
 
-    /// Create a tracker with the given TTL and a default watcher tick (for tests).
+    /// Create a tracker with the given TTL (for tests).
     #[cfg(test)]
     pub fn default_with_ttl(ttl: Duration) -> Self {
-        Self::new(ttl, Duration::from_millis(200))
+        Self::new(ttl)
     }
 
     /// Number of tracked entries (for testing).
@@ -119,7 +143,7 @@ impl RecentBackendWrites {
 
 impl Default for RecentBackendWrites {
     fn default() -> Self {
-        Self::new(DEFAULT_TTL, Duration::from_millis(200))
+        Self::new(DEFAULT_TTL)
     }
 }
 
@@ -239,10 +263,11 @@ mod tests {
     fn record_and_check_recent() {
         let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         let path = Path::new("/tmp/test/file.txt");
+        let now = Instant::now();
 
-        assert!(!rw.was_recent(path));
+        assert!(!rw.should_suppress(path, now));
         rw.record(path);
-        assert!(rw.was_recent(path));
+        assert!(rw.should_suppress(path, now));
     }
 
     #[test]
@@ -252,7 +277,7 @@ mod tests {
 
         rw.record(path);
         std::thread::sleep(Duration::from_millis(10));
-        assert!(!rw.was_recent(path));
+        assert!(!rw.should_suppress(path, Instant::now()));
     }
 
     #[test]
@@ -279,7 +304,7 @@ mod tests {
     fn case_insensitive_on_windows() {
         let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("C:\\Users\\Test\\File.txt"));
-        assert!(rw.was_recent(Path::new("C:\\Users\\test\\file.txt")));
+        assert!(rw.should_suppress(Path::new("C:\\Users\\test\\file.txt"), Instant::now()));
     }
 
     #[test]
@@ -287,7 +312,7 @@ mod tests {
         let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("some/path/file.txt"));
         // On Windows, Path::new("some\\path\\file.txt") would normalize too
-        assert!(rw.was_recent(Path::new("some/path/file.txt")));
+        assert!(rw.should_suppress(Path::new("some/path/file.txt"), Instant::now()));
     }
 
     #[test]
@@ -300,8 +325,9 @@ mod tests {
     fn parent_directory_recorded() {
         let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
         rw.record(Path::new("/workspace/subdir/file.txt"));
-        assert!(rw.was_recent(Path::new("/workspace/subdir/file.txt")));
-        assert!(rw.was_recent(Path::new("/workspace/subdir")));
+        let now = Instant::now();
+        assert!(rw.should_suppress(Path::new("/workspace/subdir/file.txt"), now));
+        assert!(rw.should_suppress(Path::new("/workspace/subdir"), now));
     }
 
     #[test]
@@ -318,7 +344,7 @@ mod tests {
         // P9 server records a regular path.
         rw.record(Path::new("C:/Projects/test/file.txt"));
         // Filesystem watcher checks with extended-length path (after \\?\ → //?/).
-        assert!(rw.was_recent(Path::new("//?/C:/Projects/test/file.txt")));
+        assert!(rw.should_suppress(Path::new("//?/C:/Projects/test/file.txt"), Instant::now()));
     }
 
     #[test]
@@ -327,6 +353,44 @@ mod tests {
         // Recorded with extended-length prefix.
         rw.record(Path::new("//?/C:/Projects/test/file.txt"));
         // Checked with regular path.
-        assert!(rw.was_recent(Path::new("C:/Projects/test/file.txt")));
+        assert!(rw.should_suppress(Path::new("C:/Projects/test/file.txt"), Instant::now()));
+    }
+
+    #[test]
+    fn suppression_checked_by_event_time_not_wall_clock() {
+        // Simulates the race condition: event arrives during suppression but is
+        // processed (after debounce) long after the suppression guard drops.
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
+
+        // Suppression starts.
+        rw.begin_suppression();
+
+        // Event arrives while suppression is active.
+        let event_time = Instant::now();
+
+        // Suppression ends.
+        rw.end_suppression();
+
+        // Simulate debounce delay — processing happens much later.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // The event should still be suppressed because it arrived during the
+        // suppression window, even though we're checking long after it ended.
+        assert!(rw.should_suppress(Path::new("/any/path"), event_time));
+    }
+
+    #[test]
+    fn event_after_suppression_not_suppressed() {
+        let rw = RecentBackendWrites::default_with_ttl(Duration::from_secs(10));
+
+        rw.begin_suppression();
+        rw.end_suppression();
+
+        // Wait past the jitter buffer.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Event arrives well after suppression ended.
+        let event_time = Instant::now();
+        assert!(!rw.should_suppress(Path::new("/some/path"), event_time));
     }
 }

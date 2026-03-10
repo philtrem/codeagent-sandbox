@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration matching the `codeagent.toml` schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
     pub sandbox: SandboxSection,
@@ -13,22 +13,6 @@ pub struct SandboxConfig {
     pub gitignore: GitignoreSection,
     pub claude_code: ClaudeCodeSection,
     pub command_classifier: CommandClassifierSection,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            sandbox: SandboxSection::default(),
-            vm: VmSection::default(),
-            undo: UndoSection::default(),
-            safeguards: SafeguardSection::default(),
-            symlinks: SymlinkSection::default(),
-            external_modifications: ExternalModificationsSection::default(),
-            gitignore: GitignoreSection::default(),
-            claude_code: ClaudeCodeSection::default(),
-            command_classifier: CommandClassifierSection::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +54,7 @@ pub struct VmSection {
 impl Default for VmSection {
     fn default() -> Self {
         Self {
-            memory_mb: 2048,
+            memory_mb: 512,
             cpus: 2,
             qemu_binary: String::new(),
             kernel_path: String::new(),

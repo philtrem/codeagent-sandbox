@@ -32,6 +32,25 @@ pub fn build_gitignore(working_root: &Path) -> Option<Gitignore> {
     Some(matcher)
 }
 
+/// Directory names that are skipped during `.gitignore` discovery because they
+/// are typically huge (thousands of entries) and never contain meaningful
+/// `.gitignore` files. Traversing them would spike CPU for several seconds.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".cache",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "vendor",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+];
+
 /// Recursively discover `.gitignore` files and add them to the builder.
 fn discover_gitignore_files(
     dir: &Path,
@@ -54,8 +73,11 @@ fn discover_gitignore_files(
         if !path.is_dir() {
             continue;
         }
-        // Skip the .git directory itself
-        if path.file_name().is_some_and(|n| n == ".git") {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| SKIP_DIRS.contains(&n))
+        {
             continue;
         }
         discover_gitignore_files(&path, builder, found_sources);

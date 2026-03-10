@@ -12,7 +12,7 @@ use codeagent_interceptor::write_interceptor::WriteInterceptor;
 use codeagent_mcp::McpError;
 use codeagent_mcp::protocol::{
     BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-    ListDirectoryArgs, ReadFileArgs, UndoArgs, WriteFileArgs,
+    ReadFileArgs, UndoArgs, WriteFileArgs,
 };
 use codeagent_stdio::protocol::{
     AgentExecutePayload, AgentPromptPayload, FsListPayload, FsReadPayload,
@@ -68,14 +68,16 @@ fn check_paths_overlap(working_dir: &std::path::Path, undo_dir: &std::path::Path
     Ok(())
 }
 
-/// RAII guard that extends the watcher suppression deadline on drop.
-/// This ensures late-arriving filesystem events from rollback are still
-/// suppressed even after the rollback function returns.
+/// RAII guard that suppresses all watcher events while held.
+///
+/// On creation, increments the active suppression counter. On drop, decrements
+/// it — and when the count reaches zero, sets a grace-period deadline to cover
+/// late-arriving OS filesystem events.
 struct WatcherSuppressGuard(Arc<RecentBackendWrites>);
 
 impl Drop for WatcherSuppressGuard {
     fn drop(&mut self) {
-        self.0.extend_suppression();
+        self.0.end_suppression();
     }
 }
 
@@ -173,9 +175,15 @@ impl Orchestrator {
             }
         }
 
+        // Generate self-documenting mount names for each working directory.
+        let mount_names = crate::qemu::generate_mount_names(&working_dirs);
+
         // Validate undo directory does not overlap with any working directory
+        let undo_dir = self.cli_args.undo_dir.as_ref().ok_or_else(|| AgentError::Io(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "No undo directory configured"),
+        ))?;
         for dir in &working_dirs {
-            check_paths_overlap(dir, &self.cli_args.undo_dir)?;
+            check_paths_overlap(dir, undo_dir)?;
         }
 
         // Check VM availability early so we know whether to wire safeguards.
@@ -199,7 +207,7 @@ impl Orchestrator {
         let mut undo_dirs = Vec::with_capacity(working_dirs.len());
 
         for working_dir in &working_dirs {
-            let undo_dir = self.cli_args.undo_dir.join(undo_subdir_name(working_dir));
+            let undo_dir = undo_dir.join(undo_subdir_name(working_dir));
             let interceptor = if let Some(ref sender) = safeguard_sender {
                 use crate::safeguard_bridge::SafeguardBridge;
                 UndoInterceptor::new(
@@ -236,12 +244,12 @@ impl Orchestrator {
             // rollback across session boundaries where untracked changes may have occurred.
             if !interceptor.is_undo_disabled() && !interceptor.completed_steps().is_empty() {
                 if let Ok(Some(barrier)) = interceptor.notify_external_modification(
-                    vec![working_dir.clone()],
+                    vec![],
                     BarrierReason::SessionStart,
                 )
                 {
                     let _ = self.event_sender.send(Event::ExternalModification {
-                        affected_paths: vec![working_dir.to_string_lossy().into_owned()],
+                        affected_paths: vec![],
                         barrier_id: Some(barrier.barrier_id),
                     });
                 }
@@ -267,7 +275,7 @@ impl Orchestrator {
             std::time::Duration::from_millis(self.file_watcher_config.recent_write_ttl_ms);
         let watcher_tick =
             std::time::Duration::from_millis(self.file_watcher_config.debounce_ms);
-        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl, watcher_tick));
+        let recent_writes = Arc::new(RecentBackendWrites::new(recent_writes_ttl));
 
         let watcher_config = {
             let mut config = fs_watcher::FsWatcherConfig {
@@ -295,6 +303,7 @@ impl Orchestrator {
         let (vm_status, backend_name) = if vm_available {
             match self.launch_vm(
                 &working_dirs,
+                &mount_names,
                 &interceptors,
                 &recent_writes,
                 resolved_kernel.unwrap(),
@@ -341,6 +350,7 @@ impl Orchestrator {
                     let session = Session {
                         interceptors,
                         working_dirs: working_dirs.clone(),
+                        mount_names: mount_names.clone(),
                         undo_dirs,
                         vm_mode: payload.vm_mode.clone(),
                         safeguard_config: SafeguardConfig::default(),
@@ -374,7 +384,7 @@ impl Orchestrator {
                         message: format!("VM launch failed, falling back to host-only mode: {error}"),
                     });
                     let session = Self::create_non_vm_session(
-                        interceptors, working_dirs.clone(), undo_dirs, payload,
+                        interceptors, working_dirs.clone(), mount_names.clone(), undo_dirs, payload,
                         fs_watcher_handle, Some(recent_writes), initial_command_id,
                     );
                     *state = SessionState::Active(Box::new(session));
@@ -399,7 +409,7 @@ impl Orchestrator {
                 ),
             });
             let session = Self::create_non_vm_session(
-                interceptors, working_dirs.clone(), undo_dirs, payload,
+                interceptors, working_dirs.clone(), mount_names.clone(), undo_dirs, payload,
                 fs_watcher_handle, Some(recent_writes), initial_command_id,
             );
             *state = SessionState::Active(Box::new(session));
@@ -414,16 +424,18 @@ impl Orchestrator {
                 json!({
                     "index": i,
                     "path": d.display().to_string(),
-                    "mount_path": if i == 0 { "/mnt/working".to_string() } else { format!("/mnt/working{i}") },
+                    "mount_path": format!("/mnt/working/{}", mount_names[i]),
                 })
             }).collect::<Vec<_>>(),
         }))
     }
 
     /// Create a session without VM components.
+    #[allow(clippy::too_many_arguments)]
     fn create_non_vm_session(
         interceptors: Vec<Arc<UndoInterceptor>>,
         working_dirs: Vec<PathBuf>,
+        mount_names: Vec<String>,
         undo_dirs: Vec<PathBuf>,
         payload: SessionStartPayload,
         fs_watcher_handle: Option<tokio::task::JoinHandle<()>>,
@@ -433,6 +445,7 @@ impl Orchestrator {
         Session {
             interceptors,
             working_dirs,
+            mount_names,
             undo_dirs,
             vm_mode: payload.vm_mode.clone(),
             safeguard_config: SafeguardConfig::default(),
@@ -459,12 +472,15 @@ impl Orchestrator {
     fn launch_vm(
         &self,
         working_dirs: &[PathBuf],
+        mount_names: &[String],
         interceptors: &[Arc<UndoInterceptor>],
         recent_writes: &Arc<RecentBackendWrites>,
         kernel_path: PathBuf,
         initrd_path: PathBuf,
     ) -> Result<VmSessionParts, AgentError> {
-        let socket_dir = self.cli_args.undo_dir.join(".sockets");
+        let socket_dir = self.cli_args.undo_dir.as_ref()
+            .expect("undo_dir must be set before launching VM")
+            .join(".sockets");
         std::fs::create_dir_all(&socket_dir)?;
 
         let control_socket_path = socket_dir.join("control.sock");
@@ -552,6 +568,7 @@ impl Orchestrator {
             control_socket_path: control_socket_path.clone(),
             fs_socket_paths,
             vm_mode: self.cli_args.vm_mode.clone(),
+            mount_names: mount_names.to_vec(),
             extra_args: vec![],
         };
 
@@ -811,6 +828,53 @@ impl Orchestrator {
             })
     }
 
+    /// Get the interceptor for the working directory that contains the given path.
+    ///
+    /// For absolute paths, finds the working directory that contains the path.
+    /// For relative paths, returns the primary (index 0) interceptor.
+    fn resolve_interceptor_for_path(
+        &self,
+        path: &str,
+    ) -> Result<Arc<UndoInterceptor>, AgentError> {
+        let state = self.state.lock().unwrap();
+        let session = match &*state {
+            SessionState::Idle => return Err(AgentError::SessionNotActive),
+            SessionState::Active(s) => s,
+        };
+
+        let requested = std::path::Path::new(path);
+        if requested.is_absolute() {
+            for (i, working_dir) in session.working_dirs.iter().enumerate() {
+                if requested.starts_with(working_dir) {
+                    return session
+                        .interceptors
+                        .get(i)
+                        .cloned()
+                        .ok_or(AgentError::InvalidWorkingDir {
+                            path: format!("directory index {i} out of range"),
+                        });
+                }
+                if let Ok(canonical) = std::fs::canonicalize(working_dir) {
+                    if requested.starts_with(&canonical) {
+                        return session
+                            .interceptors
+                            .get(i)
+                            .cloned()
+                            .ok_or(AgentError::InvalidWorkingDir {
+                                path: format!("directory index {i} out of range"),
+                            });
+                    }
+                }
+            }
+        }
+
+        session
+            .interceptors
+            .first()
+            .cloned()
+            .ok_or(AgentError::SessionNotActive)
+    }
+
     /// Get the primary working directory path.
     fn primary_working_dir(&self) -> Result<PathBuf, AgentError> {
         let state = self.state.lock().unwrap();
@@ -819,6 +883,29 @@ impl Orchestrator {
             SessionState::Active(s) => {
                 Ok(s.working_dirs.first().cloned().unwrap_or_default())
             }
+        }
+    }
+
+    /// Get all configured working directory paths.
+    fn all_working_dirs(&self) -> Result<Vec<PathBuf>, AgentError> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            SessionState::Idle => Err(AgentError::SessionNotActive),
+            SessionState::Active(s) => Ok(s.working_dirs.clone()),
+        }
+    }
+
+    /// Resolve a tool path to an absolute filesystem path.
+    ///
+    /// Absolute paths are returned as-is; relative paths are joined with the
+    /// appropriate working directory.
+    fn resolve_target_path(&self, path: &str) -> Result<PathBuf, AgentError> {
+        let requested = std::path::Path::new(path);
+        if requested.is_absolute() {
+            Ok(requested.to_path_buf())
+        } else {
+            let working_dir = self.primary_working_dir()?;
+            Ok(working_dir.join(path))
         }
     }
 
@@ -853,10 +940,10 @@ impl Orchestrator {
     }
 
     /// Begin suppressing all watcher events and return a guard that extends
-    /// the suppression deadline on drop. This prevents rollback-originated
+    /// the suppression deadline on drop. This prevents sandbox-originated
     /// filesystem changes from being misidentified as external modifications,
-    /// including late-arriving OS events after the rollback returns.
-    fn suppress_watcher_during_rollback(&self) -> Option<WatcherSuppressGuard> {
+    /// including late-arriving OS events after the operation returns.
+    fn suppress_watcher(&self) -> Option<WatcherSuppressGuard> {
         let rw = self.recent_writes()?;
         rw.begin_suppression();
         Some(WatcherSuppressGuard(rw))
@@ -873,6 +960,9 @@ impl Orchestrator {
     }
 
     /// Open a synthetic API step, run `f`, then close or rollback on error.
+    ///
+    /// Suppresses the filesystem watcher for the duration of the step so that
+    /// writes made inside `f` are not misidentified as external modifications.
     fn with_api_step<F>(
         &self,
         interceptor: &UndoInterceptor,
@@ -881,6 +971,8 @@ impl Orchestrator {
     where
         F: FnOnce(i64) -> Result<(), McpError>,
     {
+        let _guard = self.suppress_watcher();
+
         let step_id = self.next_api_step_id()?;
         interceptor
             .open_step(step_id)
@@ -900,10 +992,10 @@ impl Orchestrator {
     }
 
     fn do_write_file(
-        &self,
         interceptor: &UndoInterceptor,
         target: &std::path::Path,
         args: &WriteFileArgs,
+        recent_writes: Option<&RecentBackendWrites>,
     ) -> Result<(), McpError> {
         interceptor.set_step_command(format!("write_file {}", args.path));
 
@@ -911,32 +1003,29 @@ impl Orchestrator {
 
         if existed_before {
             let _ = interceptor.pre_write(target);
-        } else {
+        } else if let Some(parent) = target.parent() {
             let mut dirs_to_track = Vec::new();
-            if let Some(parent) = target.parent() {
-                let mut ancestor = parent.to_path_buf();
-                while !ancestor.exists() {
-                    dirs_to_track.push(ancestor.clone());
-                    if !ancestor.pop() {
-                        break;
-                    }
+            let mut ancestor = parent.to_path_buf();
+            while !ancestor.exists() {
+                dirs_to_track.push(ancestor.clone());
+                if !ancestor.pop() {
+                    break;
                 }
-                std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
-                    message: e.to_string(),
-                })?;
-                for dir in dirs_to_track.iter().rev() {
-                    let _ = interceptor.post_mkdir(dir);
-                }
+            }
+            std::fs::create_dir_all(parent).map_err(|e| McpError::InternalError {
+                message: e.to_string(),
+            })?;
+            for dir in dirs_to_track.iter().rev() {
+                let _ = interceptor.post_mkdir(dir);
             }
         }
 
+        if let Some(rw) = recent_writes {
+            rw.record(target);
+        }
         std::fs::write(target, &args.content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
-
-        if let Some(rw) = self.recent_writes() {
-            rw.record(target);
-        }
 
         if !existed_before {
             let _ = interceptor.post_create(target);
@@ -946,23 +1035,22 @@ impl Orchestrator {
     }
 
     fn do_edit_file(
-        &self,
         interceptor: &UndoInterceptor,
         target: &std::path::Path,
         path: &str,
         new_content: &str,
+        recent_writes: Option<&RecentBackendWrites>,
     ) -> Result<(), McpError> {
         interceptor.set_step_command(format!("edit_file {}", path));
 
         let _ = interceptor.pre_write(target);
 
+        if let Some(rw) = recent_writes {
+            rw.record(target);
+        }
         std::fs::write(target, new_content).map_err(|e| McpError::InternalError {
             message: e.to_string(),
         })?;
-
-        if let Some(rw) = self.recent_writes() {
-            rw.record(target);
-        }
 
         Ok(())
     }
@@ -979,6 +1067,12 @@ impl Orchestrator {
         let working_dir = self
             .primary_working_dir()
             .map_err(Self::agent_error_to_mcp)?;
+
+        // Suppress watcher events for the duration of the command (and a grace
+        // period after) so that filesystem changes made by the command are not
+        // misidentified as external modifications. The guard extends the
+        // suppression deadline on drop to cover late-arriving OS events.
+        let _guard = self.suppress_watcher();
 
         let shell = if cfg!(windows) { "bash" } else { "sh" };
         let output = std::process::Command::new(shell)
@@ -1016,9 +1110,9 @@ impl Orchestrator {
 
 /// Strip a `cd '<cwd>' && ` or `cd "<cwd>" && ` prefix from a command string.
 ///
-/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working' && ` to
-/// commands even though the sandbox already sets the working directory via the
-/// `cwd` field. This strips the redundant prefix for cleaner display and
+/// MCP clients (e.g. Claude Code) often prepend `cd '/mnt/working/<name>' && `
+/// to commands even though the sandbox already sets the working directory via
+/// the `cwd` field. This strips the redundant prefix for cleaner display and
 /// execution.
 fn strip_cwd_prefix(command: &str, cwd: &str) -> String {
     for quote in ['\'', '"'] {
@@ -1075,7 +1169,7 @@ impl RequestHandler for Orchestrator {
             .resolve_interceptor(payload.directory.as_deref())
             .map_err(Self::agent_error_to_stdio)?;
 
-        let _guard = self.suppress_watcher_during_rollback();
+        let _guard = self.suppress_watcher();
 
         let result = interceptor
             .rollback(payload.count as usize, payload.force)
@@ -1149,7 +1243,9 @@ impl RequestHandler for Orchestrator {
         let exec_msg = codeagent_control::HostMessage::Exec {
             id: command_id,
             command: payload.command.clone(),
-            cwd: payload.cwd.or_else(|| Some("/mnt/working".to_string())),
+            cwd: payload.cwd.or_else(|| {
+                Some(format!("/mnt/working/{}", session.mount_names[0]))
+            }),
             env: payload.env,
         };
 
@@ -1322,7 +1418,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // Classify for response metadata (informational — no gate)
         let classification = self.classifier.classify(&args.command);
 
-        let (control_writer, control_handler, command_id) = {
+        let (control_writer, control_handler, command_id, default_cwd) = {
             let state = self.state.lock().unwrap();
             let session = match &*state {
                 SessionState::Active(s) => s,
@@ -1332,7 +1428,8 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             let writer = session.control_writer.clone();
             let handler = session.control_handler.clone();
             let id = session.next_command_id.fetch_add(1, Ordering::Relaxed);
-            (writer, handler, id)
+            let cwd = format!("/mnt/working/{}", session.mount_names[0]);
+            (writer, handler, id, cwd)
         };
 
         // No VM available — execute directly on the host.
@@ -1349,7 +1446,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         // (so it expects the StepStarted response from the VM) and get the
         // serializable HostMessage back. Uses block_in_place because send_exec
         // is async (may close an ambient step).
-        let cwd = "/mnt/working";
+        let cwd = &default_cwd;
         let command = strip_cwd_prefix(&args.command, cwd);
 
         let host_msg = tokio::task::block_in_place(|| {
@@ -1436,11 +1533,9 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
         let content = std::fs::read_to_string(&target)
             .map_err(|e| McpError::InternalError {
                 message: e.to_string(),
@@ -1451,68 +1546,29 @@ impl codeagent_mcp::McpHandler for Orchestrator {
 
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError> {
         let interceptor = self
-            .resolve_interceptor(None)
+            .resolve_interceptor_for_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
 
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
+        let rw = self.recent_writes();
 
         let step_id = self.with_api_step(&interceptor, |_| {
-            self.do_write_file(&interceptor, &target, &args)
+            Self::do_write_file(&interceptor, &target, &args, rw.as_deref())
         })?;
 
         Ok(json!({ "written": true, "step_id": step_id }))
     }
 
-    fn list_directory(
-        &self,
-        args: ListDirectoryArgs,
-    ) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
-
-        let entries: Vec<serde_json::Value> = std::fs::read_dir(&target)
-            .map_err(|e| McpError::InternalError {
-                message: e.to_string(),
-            })?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| {
-                let file_type = entry.file_type().ok();
-                json!({
-                    "name": entry.file_name().to_string_lossy(),
-                    "type": if file_type.as_ref().is_some_and(|ft| ft.is_dir()) {
-                        "directory"
-                    } else if file_type.as_ref().is_some_and(|ft| ft.is_symlink()) {
-                        "symlink"
-                    } else {
-                        "file"
-                    },
-                })
-            })
-            .collect();
-
-        Ok(json!({
-            "working_directory": target.display().to_string(),
-            "entries": entries,
-        }))
-    }
-
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError> {
         let interceptor = self
-            .resolve_interceptor(None)
+            .resolve_interceptor_for_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
 
-        let working_dir = self
-            .primary_working_dir()
+        let target = self
+            .resolve_target_path(&args.path)
             .map_err(Self::agent_error_to_mcp)?;
-
-        let target = working_dir.join(&args.path);
 
         let content = std::fs::read_to_string(&target).map_err(|e| McpError::InternalError {
             message: e.to_string(),
@@ -1541,8 +1597,10 @@ impl codeagent_mcp::McpHandler for Orchestrator {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
 
+        let rw = self.recent_writes();
+
         self.with_api_step(&interceptor, |_| {
-            self.do_edit_file(&interceptor, &target, &args.path, &new_content)
+            Self::do_edit_file(&interceptor, &target, &args.path, &new_content, rw.as_deref())
         })?;
 
         Ok(json!(format!(
@@ -1552,22 +1610,24 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
-        let search_dir = match &args.path {
-            Some(p) => working_dir.join(p),
-            None => working_dir.clone(),
+        let search_dirs: Vec<PathBuf> = match &args.path {
+            Some(p) => vec![self
+                .resolve_target_path(p)
+                .map_err(Self::agent_error_to_mcp)?],
+            None => self
+                .all_working_dirs()
+                .map_err(Self::agent_error_to_mcp)?,
         };
 
-        let pattern_str = search_dir
-            .join(&args.pattern)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let mut entries: Vec<(String, std::time::SystemTime)> = Vec::new();
 
-        let mut entries: Vec<(String, std::time::SystemTime)> =
-            glob::glob(&pattern_str)
+        for search_dir in &search_dirs {
+            let pattern_str = search_dir
+                .join(&args.pattern)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let dir_entries = glob::glob(&pattern_str)
                 .map_err(|e| McpError::InvalidParams {
                     message: format!("Invalid glob pattern: {e}"),
                 })?
@@ -1575,13 +1635,14 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 .filter_map(|path| {
                     let mtime = path.metadata().ok()?.modified().ok()?;
                     let relative = path
-                        .strip_prefix(&working_dir)
+                        .strip_prefix(search_dir)
                         .ok()?
                         .to_string_lossy()
                         .replace('\\', "/");
                     Some((relative, mtime))
-                })
-                .collect();
+                });
+            entries.extend(dir_entries);
+        }
 
         // Sort by modification time, newest first
         entries.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1600,13 +1661,13 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {
-        let working_dir = self
-            .primary_working_dir()
-            .map_err(Self::agent_error_to_mcp)?;
-
-        let search_path = match &args.path {
-            Some(p) => working_dir.join(p),
-            None => working_dir.clone(),
+        let search_roots: Vec<PathBuf> = match &args.path {
+            Some(p) => vec![self
+                .resolve_target_path(p)
+                .map_err(Self::agent_error_to_mcp)?],
+            None => self
+                .all_working_dirs()
+                .map_err(Self::agent_error_to_mcp)?,
         };
 
         let regex = regex::RegexBuilder::new(&args.pattern)
@@ -1628,86 +1689,110 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let context = args.context_lines.unwrap_or(0);
         let mut output = String::new();
 
-        // Collect files to search
-        let files: Vec<std::path::PathBuf> = if search_path.is_file() {
-            vec![search_path.clone()]
-        } else {
-            walkdir::WalkDir::new(&search_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    if let Some(ref pat) = include_glob {
-                        pat.matches(
-                            &e.path()
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy(),
-                        )
-                    } else {
-                        true
-                    }
-                })
-                .map(|e| e.into_path())
-                .collect()
-        };
-
-        for file_path in &files {
-            let content = match std::fs::read_to_string(file_path) {
-                Ok(c) => c,
-                Err(_) => continue, // skip binary/unreadable files
+        for search_path in &search_roots {
+            // Collect files to search
+            let files: Vec<(std::path::PathBuf, String)> = if search_path.is_file() {
+                let display_name = search_path
+                    .file_name()
+                    .unwrap_or(search_path.as_os_str())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                vec![(search_path.clone(), display_name)]
+            } else {
+                walkdir::WalkDir::new(search_path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| {
+                        if let Some(ref pat) = include_glob {
+                            let relative = e
+                                .path()
+                                .strip_prefix(search_path)
+                                .unwrap_or(e.path())
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            pat.matches(&relative)
+                                || pat.matches(
+                                    &e.path()
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                )
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|e| {
+                        let relative = e
+                            .path()
+                            .strip_prefix(search_path)
+                            .unwrap_or(e.path())
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        (e.into_path(), relative)
+                    })
+                    .collect()
             };
 
-            let lines: Vec<&str> = content.lines().collect();
-            let matching_lines: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| regex.is_match(line))
-                .map(|(i, _)| i)
-                .collect();
+            for (file_path, relative) in &files {
+                let content = match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue, // skip binary/unreadable files
+                };
 
-            if matching_lines.is_empty() {
-                continue;
-            }
+                let lines: Vec<&str> = content.lines().collect();
+                let matching_lines: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| regex.is_match(line))
+                    .map(|(i, _)| i)
+                    .collect();
 
-            let relative = file_path
-                .strip_prefix(&working_dir)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            match args.output_mode.as_str() {
-                "files_with_matches" => {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&relative);
+                if matching_lines.is_empty() {
+                    continue;
                 }
-                "count" => {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&format!("{}:{}", relative, matching_lines.len()));
-                }
-                _ => {
-                    if !output.is_empty() {
-                        output.push_str("\n\n");
-                    }
-                    output.push_str(&relative);
 
-                    // Build set of lines to show (matches + context)
-                    let mut visible: std::collections::BTreeSet<usize> =
-                        std::collections::BTreeSet::new();
-                    for &line_idx in &matching_lines {
-                        let start = line_idx.saturating_sub(context);
-                        let end = (line_idx + context + 1).min(lines.len());
-                        for i in start..end {
-                            visible.insert(i);
+                match args.output_mode.as_str() {
+                    "files_with_matches" => {
+                        if !output.is_empty() {
+                            output.push('\n');
                         }
+                        output.push_str(relative);
                     }
+                    "count" => {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str(&format!("{relative}:{}", matching_lines.len()));
+                    }
+                    _ => {
+                        if !output.is_empty() {
+                            output.push_str("\n\n");
+                        }
+                        output.push_str(relative);
 
-                    for &i in &visible {
-                        output.push_str(&format!("\n{}:{}", i + 1, lines[i]));
+                        // Build ranges of lines to show (matches + context)
+                        let mut ranges: Vec<(usize, usize)> = Vec::new();
+                        for &line_idx in &matching_lines {
+                            let start = line_idx.saturating_sub(context);
+                            let end = (line_idx + context + 1).min(lines.len());
+                            if let Some(last) = ranges.last_mut() {
+                                if start <= last.1 {
+                                    last.1 = end;
+                                    continue;
+                                }
+                            }
+                            ranges.push((start, end));
+                        }
+
+                        for (range_idx, &(start, end)) in ranges.iter().enumerate() {
+                            if range_idx > 0 {
+                                output.push_str("\n--");
+                            }
+                            for (i, line) in lines[start..end].iter().enumerate() {
+                                output.push_str(&format!("\n{}:{line}", start + i + 1));
+                            }
+                        }
                     }
                 }
             }
@@ -1724,7 +1809,7 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let count = args.count as usize;
         let force = args.force;
 
-        let _guard = self.suppress_watcher_during_rollback();
+        let _guard = self.suppress_watcher();
 
         let result = interceptor
             .rollback(count, force)

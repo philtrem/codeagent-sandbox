@@ -17,7 +17,9 @@ interface TerminalState {
   historyIndex: number;
   isRunning: boolean;
   cwd: string;
+  rootCwd: string;
 
+  setRootCwd: (cwd: string) => void;
   execute: (command: string, timeout?: number) => Promise<void>;
   clear: () => void;
   navigateHistory: (direction: "up" | "down") => string;
@@ -178,17 +180,28 @@ function shellQuote(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
-/** Root working directory inside the guest VM. */
-const ROOT_CWD = "/mnt/working";
+/** Default root working directory inside the guest VM. */
+const DEFAULT_ROOT_CWD = "/mnt/working";
 
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   entries: [],
   commandHistory: [],
   historyIndex: -1,
   isRunning: false,
-  cwd: ROOT_CWD,
+  cwd: DEFAULT_ROOT_CWD,
+  rootCwd: DEFAULT_ROOT_CWD,
+
+  setRootCwd: (cwd: string) => set({ rootCwd: cwd, cwd }),
 
   execute: async (command: string, timeout?: number) => {
+    const trimmed = command.trim();
+
+    // Handle shell-local commands that don't need to go to the VM.
+    if (trimmed === "clear" || trimmed === "cls") {
+      set({ entries: [], commandHistory: [...get().commandHistory, command], historyIndex: -1 });
+      return;
+    }
+
     const id = `entry-${nextEntryId++}`;
     const { cwd } = get();
 
@@ -239,13 +252,14 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       // directory is gone bash reports "cd: <path>: No such file or directory".
       // We check for this specific pattern to avoid false positives from the
       // user's own command (e.g. `cat nonexistent.txt`).
+      const { rootCwd } = get();
       if (
         result.exit_code !== 0 &&
-        cwd !== ROOT_CWD &&
+        cwd !== rootCwd &&
         output.includes(`cd: ${cwd}`)
       ) {
-        newCwd = ROOT_CWD;
-        output += `\n(directory no longer exists — returned to ${ROOT_CWD})`;
+        newCwd = rootCwd;
+        output += `\n(directory no longer exists — returned to ${rootCwd})`;
       }
 
       set((state) => ({

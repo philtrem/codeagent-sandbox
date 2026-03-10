@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use codeagent_common::{BarrierReason, CodeAgentError, ExternalModificationPolicy};
+use codeagent_common::{AffectedPath, BarrierReason, CodeAgentError, ExternalModificationPolicy};
 use codeagent_interceptor::undo_interceptor::{UndoConfig, UndoInterceptor};
 use codeagent_test_support::fixtures;
 use codeagent_test_support::snapshot::assert_tree_eq;
@@ -26,9 +26,9 @@ fn eb_01_external_modification_creates_barrier() {
     interceptor.close_step(1).unwrap();
 
     // Simulate external modification
-    let affected = vec![
-        PathBuf::from("src/main.rs"),
-        PathBuf::from("Cargo.toml"),
+    let affected: Vec<AffectedPath> = vec![
+        PathBuf::from("src/main.rs").into(),
+        PathBuf::from("Cargo.toml").into(),
     ];
     let result = interceptor
         .notify_external_modification(affected.clone(), BarrierReason::ExternalModification)
@@ -59,7 +59,7 @@ fn eb_02_rollback_blocked_by_barrier() {
 
     // External modification after step 1 (barrier blocks rollback of step 1)
     interceptor
-        .notify_external_modification(vec![PathBuf::from("README.md")], BarrierReason::ExternalModification)
+        .notify_external_modification(vec![PathBuf::from("README.md").into()], BarrierReason::ExternalModification)
         .unwrap();
 
     let after_step1 = ws.snapshot();
@@ -78,7 +78,7 @@ fn eb_02_rollback_blocked_by_barrier() {
         CodeAgentError::RollbackBlocked { count, barriers } => {
             assert_eq!(count, 1);
             assert_eq!(barriers[0].after_step_id, 1);
-            assert_eq!(barriers[0].affected_paths, vec![PathBuf::from("README.md")]);
+            assert_eq!(barriers[0].affected_paths, vec![AffectedPath::from(PathBuf::from("README.md"))]);
         }
         other => panic!("expected RollbackBlocked, got: {other:?}"),
     }
@@ -118,7 +118,7 @@ fn eb_03_force_rollback_crosses_barrier() {
 
     // External modification after step 1
     interceptor
-        .notify_external_modification(vec![PathBuf::from("config.toml")], BarrierReason::ExternalModification)
+        .notify_external_modification(vec![PathBuf::from("config.toml").into()], BarrierReason::ExternalModification)
         .unwrap();
 
     // Force rollback should succeed
@@ -155,7 +155,7 @@ fn eb_04_barriers_queryable_with_correct_data() {
     interceptor.close_step(2).unwrap();
 
     // Create a barrier
-    let paths = vec![PathBuf::from("externally_edited.txt")];
+    let paths: Vec<AffectedPath> = vec![PathBuf::from("externally_edited.txt").into()];
     interceptor
         .notify_external_modification(paths.clone(), BarrierReason::ExternalModification)
         .unwrap();
@@ -225,7 +225,7 @@ fn eb_06_multiple_barriers_all_reported() {
 
     // Barrier after step 1
     interceptor
-        .notify_external_modification(vec![PathBuf::from("file_a.txt")], BarrierReason::ExternalModification)
+        .notify_external_modification(vec![PathBuf::from("file_a.txt").into()], BarrierReason::ExternalModification)
         .unwrap();
 
     // Step 2
@@ -235,7 +235,7 @@ fn eb_06_multiple_barriers_all_reported() {
 
     // Barrier after step 2
     interceptor
-        .notify_external_modification(vec![PathBuf::from("file_b.txt")], BarrierReason::ExternalModification)
+        .notify_external_modification(vec![PathBuf::from("file_b.txt").into()], BarrierReason::ExternalModification)
         .unwrap();
 
     // Step 3
@@ -310,7 +310,7 @@ fn eb_08_warn_policy_no_barrier() {
 
     // External modification under Warn policy — no barrier
     let result = interceptor
-        .notify_external_modification(vec![PathBuf::from("external.txt")], BarrierReason::ExternalModification)
+        .notify_external_modification(vec![PathBuf::from("external.txt").into()], BarrierReason::ExternalModification)
         .unwrap();
     assert!(result.is_none());
 
@@ -343,13 +343,13 @@ fn eb_09_contiguous_external_modifications_merge() {
     // Two separate external modification calls (simulating two watcher ticks).
     interceptor
         .notify_external_modification(
-            vec![PathBuf::from("file_a.txt")],
+            vec![PathBuf::from("file_a.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();
     let result = interceptor
         .notify_external_modification(
-            vec![PathBuf::from("file_b.txt")],
+            vec![PathBuf::from("file_b.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap()
@@ -359,8 +359,8 @@ fn eb_09_contiguous_external_modifications_merge() {
     let barriers = interceptor.barriers();
     assert_eq!(barriers.len(), 1, "contiguous external modifications should merge: {barriers:?}");
     assert_eq!(barriers[0].affected_paths.len(), 2);
-    assert!(barriers[0].affected_paths.contains(&PathBuf::from("file_a.txt")));
-    assert!(barriers[0].affected_paths.contains(&PathBuf::from("file_b.txt")));
+    assert!(barriers[0].affected_paths.iter().any(|ap| ap.path.as_os_str() == "file_a.txt"));
+    assert!(barriers[0].affected_paths.iter().any(|ap| ap.path.as_os_str() == "file_b.txt"));
 
     // The returned BarrierInfo should reflect the merged state.
     assert_eq!(result.affected_paths.len(), 2);
@@ -388,7 +388,7 @@ fn eb_10_session_start_not_merged_with_external() {
     // ExternalModification barrier — different reason, should NOT merge.
     interceptor
         .notify_external_modification(
-            vec![PathBuf::from("external.txt")],
+            vec![PathBuf::from("external.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();
@@ -413,13 +413,13 @@ fn eb_11_merge_deduplicates_paths() {
     // Same path reported twice across two watcher ticks.
     interceptor
         .notify_external_modification(
-            vec![PathBuf::from("shared.txt")],
+            vec![PathBuf::from("shared.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();
     interceptor
         .notify_external_modification(
-            vec![PathBuf::from("shared.txt"), PathBuf::from("new.txt")],
+            vec![PathBuf::from("shared.txt").into(), PathBuf::from("new.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();
@@ -432,8 +432,8 @@ fn eb_11_merge_deduplicates_paths() {
         "duplicate should be removed: {:?}",
         barriers[0].affected_paths
     );
-    assert!(barriers[0].affected_paths.contains(&PathBuf::from("shared.txt")));
-    assert!(barriers[0].affected_paths.contains(&PathBuf::from("new.txt")));
+    assert!(barriers[0].affected_paths.iter().any(|ap| ap.path.as_os_str() == "shared.txt"));
+    assert!(barriers[0].affected_paths.iter().any(|ap| ap.path.as_os_str() == "new.txt"));
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +447,7 @@ fn eb_12_pre_step_barrier_uses_step_zero() {
     // No steps opened/closed yet.
     let result = interceptor
         .notify_external_modification(
-            vec![PathBuf::from("pre_step.txt")],
+            vec![PathBuf::from("pre_step.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();
@@ -455,7 +455,7 @@ fn eb_12_pre_step_barrier_uses_step_zero() {
     // Should create a barrier with after_step_id = 0.
     let barrier = result.expect("pre-step modifications should create a barrier");
     assert_eq!(barrier.after_step_id, 0);
-    assert_eq!(barrier.affected_paths, vec![PathBuf::from("pre_step.txt")]);
+    assert_eq!(barrier.affected_paths, vec![AffectedPath::from(PathBuf::from("pre_step.txt"))]);
 
     // barriers() should include it.
     let all = interceptor.barriers();
@@ -480,7 +480,7 @@ fn eb_13_pre_step_barrier_does_not_block_rollback() {
     // External modification before any step.
     interceptor
         .notify_external_modification(
-            vec![PathBuf::from("pre_step.txt")],
+            vec![PathBuf::from("pre_step.txt").into()],
             BarrierReason::ExternalModification,
         )
         .unwrap();

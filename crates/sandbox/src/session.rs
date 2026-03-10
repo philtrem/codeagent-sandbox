@@ -32,6 +32,9 @@ pub struct Session {
     /// Absolute paths of shared working directories.
     pub working_dirs: Vec<PathBuf>,
 
+    /// Sanitized mount names for each working directory (same order as `working_dirs`).
+    pub mount_names: Vec<String>,
+
     /// Absolute paths of per-directory undo log directories.
     pub undo_dirs: Vec<PathBuf>,
 

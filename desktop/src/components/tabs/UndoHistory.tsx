@@ -172,9 +172,22 @@ function BarrierIndicator({ barrier }: { barrier: BarrierDetail }) {
       {expanded && barrier.affected_paths.length > 0 && (
         <div className="mt-1.5 rounded border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2">
           <div className="space-y-0.5">
-            {[...barrier.affected_paths].reverse().map((path) => (
-              <div key={path} className="truncate text-xs font-mono text-[var(--color-text-secondary)]">
-                {path}
+            {[...barrier.affected_paths].reverse().map((ap) => (
+              <div key={typeof ap === "string" ? ap : ap.path} className="truncate text-xs font-mono text-[var(--color-text-secondary)]">
+                {typeof ap === "string" ? ap : (
+                  <>
+                    {ap.renamed_from ? (
+                      <>
+                        {ap.renamed_from}
+                        <span className="text-[var(--color-text-tertiary)]"> → </span>
+                        {ap.path}
+                      </>
+                    ) : (
+                      ap.path
+                    )}
+                    <span className="text-[var(--color-text-tertiary)]"> ({ap.kind})</span>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -306,13 +319,11 @@ function ClearHistoryDialog({
 function StepList({
   steps,
   startIndex = 0,
-  totalSteps,
   barriers,
   onRollback,
 }: {
   steps: UndoStepDetail[];
   startIndex?: number;
-  totalSteps: number;
   barriers: BarrierDetail[];
   onRollback: (stepsToRollBack: number) => void;
 }) {
@@ -320,9 +331,9 @@ function StepList({
     <div className="space-y-2">
       {steps.map((step, index) => {
         const stepIndex = startIndex + index;
-        const barriersAfterStep = barriers.filter(
-          (b) => b.after_step_id === step.step_id,
-        );
+        const barriersAfterStep = barriers
+          .filter((b) => b.after_step_id === step.step_id)
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return (
           <div key={step.step_id}>
             {barriersAfterStep.map((barrier) => (
@@ -334,7 +345,7 @@ function StepList({
             <StepCard
               step={step}
               stepIndex={stepIndex}
-              displayNumber={totalSteps - stepIndex}
+              displayNumber={steps.length - index}
               onRollback={onRollback}
             />
           </div>
@@ -395,7 +406,6 @@ function SessionGroupedSteps({
       {currentSteps.length > 0 && (
         <StepList
           steps={currentSteps}
-          totalSteps={data.steps.length}
           barriers={data.barriers}
           onRollback={onRollback}
         />
@@ -427,7 +437,6 @@ function SessionGroupedSteps({
               <StepList
                 steps={previousSteps}
                 startIndex={currentSteps.length}
-                totalSteps={data.steps.length}
                 barriers={data.barriers}
                 onRollback={onRollback}
               />
@@ -450,9 +459,10 @@ export default function UndoHistory() {
   const addToast = useToastStore((s) => s.addToast);
 
   const vmRunning = vmStatus.state === "running";
+  const socketConnected = vmStatus.socket_connected;
   const undoDir = config.sandbox.undo_dir;
 
-  useUndoHistoryPolling(undoDir, vmRunning);
+  useUndoHistoryPolling(undoDir, vmRunning, socketConnected);
 
   const [pendingRollback, setPendingRollback] = useState<number | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -483,7 +493,7 @@ export default function UndoHistory() {
   const confirmClear = async () => {
     setShowClearConfirm(false);
     try {
-      await clearHistory(undoDir, vmRunning);
+      await clearHistory(undoDir, vmRunning || socketConnected);
       addToast("success", "Undo history cleared");
     } catch (e) {
       addToast("error", `Failed to clear history: ${e}`);

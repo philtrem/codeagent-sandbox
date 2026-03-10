@@ -7,7 +7,10 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  AlertTriangle,
   Bug,
+  Link2,
+  Link2Off,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useVmStore, useVmPolling } from "../../hooks/useVmStatus";
@@ -66,6 +69,7 @@ function Slider({
   max,
   step,
   suffix,
+  warning,
 }: {
   label: string;
   value: number;
@@ -74,6 +78,7 @@ function Slider({
   max: number;
   step: number;
   suffix?: string;
+  warning?: boolean;
 }) {
   return (
     <div>
@@ -81,7 +86,7 @@ function Slider({
         <label className="text-xs text-[var(--color-text-secondary)]">
           {label}
         </label>
-        <span className="text-xs font-medium">
+        <span className={`text-xs font-medium ${warning ? "text-amber-400" : ""}`}>
           {value}
           {suffix ? ` ${suffix}` : ""}
         </span>
@@ -93,7 +98,7 @@ function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-[var(--color-accent)]"
+        className={`w-full ${warning ? "accent-amber-500" : "accent-[var(--color-accent)]"}`}
       />
     </div>
   );
@@ -138,16 +143,21 @@ function FilePicker({
 }
 
 export default function VmManager() {
-  const { status, sandboxMode, start, stop } = useVmStore();
+  const { status, sandboxMode, start, stop, connectSocket, disconnectSocket } =
+    useVmStore();
   const { config, loaded, updateSection } = useSandboxConfig();
   const [platform, setPlatform] = useState<string>("");
   const [cpuCount, setCpuCount] = useState<number>(16);
+  const [totalMemoryMb, setTotalMemoryMb] = useState<number>(16384);
 
-  useVmPolling();
+  const mcpEnabled = config.claude_code.enabled;
+
+  useVmPolling(mcpEnabled);
 
   useEffect(() => {
     invoke<string>("get_platform").then(setPlatform);
     invoke<number>("get_cpu_count").then(setCpuCount);
+    invoke<number>("get_total_memory_mb").then(setTotalMemoryMb);
   }, []);
 
   const handleStart = () => start(config);
@@ -161,6 +171,7 @@ export default function VmManager() {
 
   const isRunning = status.state === "running";
   const isStopped = status.state === "stopped";
+  const socketConnected = status.socket_connected;
 
   return (
     <div className="mx-auto max-w-2xl space-y-4">
@@ -170,12 +181,24 @@ export default function VmManager() {
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <StatusDot state={status.state} />
+            <StatusDot
+              state={
+                mcpEnabled
+                  ? socketConnected
+                    ? "running"
+                    : "stopped"
+                  : status.state
+              }
+            />
             <div>
               <div className="text-sm font-semibold capitalize">
-                {status.state}
+                {mcpEnabled
+                  ? socketConnected
+                    ? "Connected"
+                    : "Waiting for sandbox\u2026"
+                  : status.state}
               </div>
-              {status.pid && (
+              {!mcpEnabled && status.pid && (
                 <div className="text-xs text-[var(--color-text-secondary)]">
                   PID: {status.pid}
                 </div>
@@ -188,7 +211,7 @@ export default function VmManager() {
             </div>
           </div>
 
-          {isRunning && (
+          {isRunning && !mcpEnabled && (
             <div className="text-xs text-[var(--color-text-secondary)]">
               {sandboxMode === "vm" ? (
                 <>
@@ -206,8 +229,23 @@ export default function VmManager() {
         </div>
       </div>
 
+      {/* MCP mode info banner */}
+      {mcpEnabled && (
+        <div className="flex gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-[var(--color-text-secondary)]">
+          <Info size={14} className="mt-0.5 shrink-0 text-blue-400" />
+          <div>
+            <span className="font-medium text-[var(--color-text)]">
+              Managed by Claude Code
+            </span>{" "}
+            — The sandbox process is started and stopped by Claude Code. Use the
+            Claude Integration tab to configure the MCP server. Terminal and
+            debug tools are available once connected.
+          </div>
+        </div>
+      )}
+
       {/* Host-only mode info banner */}
-      {isRunning && sandboxMode === "host_only" && (
+      {!mcpEnabled && isRunning && sandboxMode === "host_only" && (
         <div className="flex gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-[var(--color-text-secondary)]">
           <Info size={14} className="mt-0.5 shrink-0 text-blue-400" />
           <div>
@@ -223,75 +261,120 @@ export default function VmManager() {
 
       {/* Controls */}
       <div className="flex gap-2">
-        <button
-          onClick={handleStart}
-          disabled={!isStopped || !loaded}
-          className="flex items-center gap-2 rounded bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
-        >
-          <Play size={14} /> Start
-        </button>
-        <button
-          onClick={handleStop}
-          disabled={!isRunning}
-          className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
-        >
-          <Square size={14} /> Stop
-        </button>
-        <button
-          onClick={handleRestart}
-          disabled={!isRunning}
-          className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
-        >
-          <RotateCcw size={14} /> Restart
-        </button>
-        <button
-          onClick={() => {
-            useDebugConsoleStore.getState().showPanel();
-            useLayoutStore.getState().setActiveTab("terminal");
-          }}
-          disabled={!isRunning}
-          className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
-        >
-          <Bug size={14} /> Debug
-        </button>
+        {mcpEnabled ? (
+          <>
+            <button
+              onClick={() =>
+                socketConnected ? disconnectSocket() : connectSocket()
+              }
+              className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)]"
+            >
+              {socketConnected ? (
+                <>
+                  <Link2Off size={14} /> Disconnect
+                </>
+              ) : (
+                <>
+                  <Link2 size={14} /> Connect
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => {
+                useDebugConsoleStore.getState().showPanel();
+                useLayoutStore.getState().setActiveTab("terminal");
+              }}
+              disabled={!socketConnected}
+              className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+            >
+              <Bug size={14} /> Debug
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={handleStart}
+              disabled={!isStopped || !loaded}
+              className="flex items-center gap-2 rounded bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
+            >
+              <Play size={14} /> Start
+            </button>
+            <button
+              onClick={handleStop}
+              disabled={!isRunning}
+              className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+            >
+              <Square size={14} /> Stop
+            </button>
+            <button
+              onClick={handleRestart}
+              disabled={!isRunning}
+              className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+            >
+              <RotateCcw size={14} /> Restart
+            </button>
+            <button
+              onClick={() => {
+                useDebugConsoleStore.getState().showPanel();
+                useLayoutStore.getState().setActiveTab("terminal");
+              }}
+              disabled={!isRunning}
+              className="flex items-center gap-2 rounded border border-[var(--color-border)] px-4 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40"
+            >
+              <Bug size={14} /> Debug
+            </button>
 
-        <div className="ml-auto flex items-center gap-4">
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={config.vm.auto_start}
-              onChange={(e) =>
-                updateSection("vm", { auto_start: e.target.checked })
-              }
-              className="accent-[var(--color-accent)]"
-            />
-            Auto-start
-          </label>
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={config.vm.persist_vm}
-              onChange={(e) =>
-                updateSection("vm", { persist_vm: e.target.checked })
-              }
-              className="accent-[var(--color-accent)]"
-            />
-            Keep alive on close
-          </label>
-        </div>
+            <div className="ml-auto flex items-center gap-4">
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={config.vm.auto_start}
+                  onChange={(e) =>
+                    updateSection("vm", { auto_start: e.target.checked })
+                  }
+                  className="accent-[var(--color-accent)]"
+                />
+                Auto-start
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={config.vm.persist_vm}
+                  onChange={(e) =>
+                    updateSection("vm", { persist_vm: e.target.checked })
+                  }
+                  className="accent-[var(--color-accent)]"
+                />
+                Keep alive on close
+              </label>
+            </div>
+          </>
+        )}
       </div>
 
       {/* VM Settings */}
       <CollapsibleSection title="VM Settings" defaultOpen={true}>
-        <Slider
-          label="Memory"
-          value={config.vm.memory_mb}
-          onChange={(v) => updateSection("vm", { memory_mb: v })}
-          min={512}
-          max={16384}
-          step={256}
-          suffix="MB"
-        />
+        <div>
+          <Slider
+            label="Memory"
+            value={config.vm.memory_mb}
+            onChange={(v) => updateSection("vm", { memory_mb: v })}
+            min={256}
+            max={totalMemoryMb}
+            step={256}
+            suffix="MB"
+            warning={config.vm.memory_mb > totalMemoryMb / 2}
+          />
+          {config.vm.memory_mb > totalMemoryMb / 2 && (
+            <div className="mt-1.5 flex items-start gap-1.5 text-xs text-amber-400">
+              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+              <span>
+                Exceeds 50% of system RAM ({Math.round(totalMemoryMb / 1024)} GB).
+                This may cause memory pressure, leading to paging and degraded system performance.
+              </span>
+            </div>
+          )}
+        </div>
         <Slider
           label="CPUs"
           value={config.vm.cpus}

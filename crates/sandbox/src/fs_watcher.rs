@@ -1,19 +1,27 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use codeagent_common::BarrierReason;
+use codeagent_common::{AffectedPath, BarrierReason, FileChangeKind};
 use codeagent_interceptor::gitignore::build_gitignore;
 use ignore::gitignore::Gitignore;
 use codeagent_interceptor::undo_interceptor::UndoInterceptor;
 use codeagent_stdio::Event;
 
 use crate::recent_writes::RecentBackendWrites;
+
+/// An `AffectedPath` stamped with the instant the OS delivered the event to
+/// our notify callback. Used to compare against the suppression window rather
+/// than relying on wall-clock time at processing.
+struct TimestampedEvent {
+    affected: AffectedPath,
+    observed_at: Instant,
+}
 
 /// Configuration for the filesystem watcher.
 #[derive(Debug, Clone)]
@@ -59,7 +67,7 @@ pub fn spawn_fs_watcher(
     }
 
     // Create a channel to bridge the synchronous notify callback to async tokio.
-    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
+    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel::<Vec<TimestampedEvent>>();
 
     // Build the watcher with a batching event handler.
     let watcher_result = build_watcher(bridge_tx);
@@ -128,21 +136,137 @@ pub fn spawn_fs_watcher(
 }
 
 /// Build a `notify::RecommendedWatcher` that collects changed paths into a
-/// sync channel. The watcher batches events internally.
+/// sync channel. Each event is stamped with `Instant::now()` at delivery time
+/// so the suppression check can compare against the event's arrival time
+/// rather than the (later) processing time.
 fn build_watcher(
-    bridge_tx: std::sync::mpsc::Sender<Vec<PathBuf>>,
+    bridge_tx: std::sync::mpsc::Sender<Vec<TimestampedEvent>>,
 ) -> Result<RecommendedWatcher, notify::Error> {
+    // Buffer for pairing consecutive From→To rename events (Windows delivers
+    // renames as two separate events; Linux inotify uses RenameMode::Both).
+    let mut pending_rename_from: Option<PathBuf> = None;
+
     notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
         if let Ok(event) = result {
             // Only care about modification events — not access-only events.
             if is_mutation_event(&event) {
-                let paths: Vec<PathBuf> = event.paths;
-                if !paths.is_empty() {
-                    let _ = bridge_tx.send(paths);
+                let observed_at = Instant::now();
+                let entries = event_to_affected_paths(event, &mut pending_rename_from);
+                if !entries.is_empty() {
+                    let timestamped: Vec<TimestampedEvent> = entries
+                        .into_iter()
+                        .map(|affected| TimestampedEvent { affected, observed_at })
+                        .collect();
+                    let _ = bridge_tx.send(timestamped);
                 }
             }
         }
     })
+}
+
+/// Convert a `notify::Event` into `AffectedPath` entries, pairing rename
+/// source/destination when possible.
+///
+/// On Linux, inotify pairs renames into a single `RenameMode::Both` event.
+/// On Windows, `ReadDirectoryChangesW` delivers them as consecutive
+/// `RenameMode::From` then `RenameMode::To` events — we buffer the `From`
+/// path and pair it with the next `To`. This works for both file and
+/// directory renames.
+fn event_to_affected_paths(
+    event: notify::Event,
+    pending_rename_from: &mut Option<PathBuf>,
+) -> Vec<AffectedPath> {
+    use notify::event::{ModifyKind, RenameMode};
+
+    match event.kind {
+        // Both paths in one event (Linux inotify).
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+            if event.paths.len() == 2 =>
+        {
+            *pending_rename_from = None;
+            vec![AffectedPath {
+                path: event.paths[1].clone(),
+                kind: FileChangeKind::Renamed,
+                renamed_from: Some(event.paths[0].clone()),
+            }]
+        }
+
+        // Source path of a rename — buffer it for pairing with the next To.
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            // Flush any previously unpaired From as standalone.
+            let mut result = Vec::new();
+            if let Some(old_from) = pending_rename_from.take() {
+                result.push(AffectedPath {
+                    path: old_from,
+                    kind: FileChangeKind::Renamed,
+                    renamed_from: None,
+                });
+            }
+            if let Some(path) = event.paths.into_iter().next() {
+                *pending_rename_from = Some(path);
+            }
+            result
+        }
+
+        // Destination path of a rename — pair with buffered From if available.
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            let from = pending_rename_from.take();
+            if let Some(dest) = event.paths.into_iter().next() {
+                vec![AffectedPath {
+                    path: dest,
+                    kind: FileChangeKind::Renamed,
+                    renamed_from: from,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        // Any other rename mode (macOS FSEvents) — emit standalone.
+        notify::EventKind::Modify(ModifyKind::Name(_)) => {
+            let kind = FileChangeKind::Renamed;
+            event
+                .paths
+                .into_iter()
+                .map(|p| AffectedPath {
+                    path: p,
+                    kind,
+                    renamed_from: None,
+                })
+                .collect()
+        }
+
+        // Non-rename event — flush any unpaired From, then emit normally.
+        _ => {
+            let mut result = Vec::new();
+            if let Some(old_from) = pending_rename_from.take() {
+                result.push(AffectedPath {
+                    path: old_from,
+                    kind: FileChangeKind::Renamed,
+                    renamed_from: None,
+                });
+            }
+            let kind = event_kind_to_change_kind(&event.kind);
+            result.extend(event.paths.into_iter().map(|p| AffectedPath {
+                path: p,
+                kind,
+                renamed_from: None,
+            }));
+            result
+        }
+    }
+}
+
+/// Map a `notify::EventKind` to our `FileChangeKind`.
+fn event_kind_to_change_kind(kind: &notify::EventKind) -> FileChangeKind {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+    match kind {
+        EventKind::Create(_) => FileChangeKind::Created,
+        EventKind::Remove(_) => FileChangeKind::Deleted,
+        EventKind::Modify(ModifyKind::Name(_)) => FileChangeKind::Renamed,
+        _ => FileChangeKind::Modified,
+    }
 }
 
 /// Check if a notify event represents a mutation (create/modify/remove/rename).
@@ -159,7 +283,7 @@ fn is_mutation_event(event: &notify::Event) -> bool {
 
 /// Grouped parameters for `run_watcher_loop` to satisfy clippy's argument limit.
 struct WatcherLoopParams<'a> {
-    bridge_rx: std::sync::mpsc::Receiver<Vec<PathBuf>>,
+    bridge_rx: std::sync::mpsc::Receiver<Vec<TimestampedEvent>>,
     debounce: Duration,
     working_dirs: &'a [PathBuf],
     interceptors: &'a [Arc<UndoInterceptor>],
@@ -186,18 +310,18 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
         gitignore_filters,
     } = params;
     // Use a tokio mpsc to forward from blocking recv to async select.
-    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let (async_tx, mut async_rx) = mpsc::unbounded_channel::<Vec<TimestampedEvent>>();
 
     // Spawn a blocking task that reads from the sync channel and forwards.
     let _reader = tokio::task::spawn_blocking(move || {
-        while let Ok(paths) = bridge_rx.recv() {
-            if async_tx.send(paths).is_err() {
+        while let Ok(entries) = bridge_rx.recv() {
+            if async_tx.send(entries).is_err() {
                 break;
             }
         }
     });
 
-    let mut pending_paths: Vec<PathBuf> = Vec::new();
+    let mut pending: Vec<TimestampedEvent> = Vec::new();
     let mut pending_seen: HashSet<PathBuf> = HashSet::new();
     let mut debounce_timer = tokio::time::interval(debounce);
     debounce_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -211,10 +335,21 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
 
     loop {
         tokio::select! {
-            Some(paths) = async_rx.recv() => {
-                for path in paths {
-                    if pending_seen.insert(path.clone()) {
-                        pending_paths.push(path);
+            Some(entries) = async_rx.recv() => {
+                for te in entries {
+                    if pending_seen.contains(&te.affected.path) {
+                        // Same path seen again in this debounce window — keep the
+                        // latest observed_at so the suppression check uses the
+                        // most recent event arrival time for this path.
+                        if let Some(existing) = pending.iter_mut().find(|p| p.affected.path == te.affected.path) {
+                            if te.observed_at > existing.observed_at {
+                                existing.observed_at = te.observed_at;
+                                existing.affected.kind = te.affected.kind;
+                            }
+                        }
+                    } else {
+                        pending_seen.insert(te.affected.path.clone());
+                        pending.push(te);
                     }
                 }
                 // No timer reset: use fixed-interval throttling instead of
@@ -223,12 +358,12 @@ async fn run_watcher_loop(params: WatcherLoopParams<'_>) {
                 // each event resets the timer.
             }
             _ = debounce_timer.tick() => {
-                if pending_paths.is_empty() {
+                if pending.is_empty() {
                     continue;
                 }
 
                 process_pending_paths(
-                    &mut pending_paths,
+                    &mut pending,
                     &ProcessParams {
                         working_dirs,
                         interceptors,
@@ -260,7 +395,10 @@ struct ProcessParams<'a> {
 }
 
 /// Process accumulated paths: filter, group by working dir, and emit events.
-fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParams<'_>) {
+fn process_pending_paths(
+    pending: &mut Vec<TimestampedEvent>,
+    params: &ProcessParams<'_>,
+) {
     let ProcessParams {
         working_dirs,
         interceptors,
@@ -272,53 +410,67 @@ fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParam
     } = params;
 
     // Group external paths by working directory index.
-    let mut per_dir: Vec<Vec<PathBuf>> = vec![vec![]; working_dirs.len()];
+    let mut per_dir: Vec<Vec<AffectedPath>> = vec![vec![]; working_dirs.len()];
 
-    for path in pending_paths.drain(..) {
-        let path_str = path.to_string_lossy().replace('\\', "/");
+    // Track ancestor directories of excluded paths. When a child is excluded
+    // (e.g., `.git/objects/xxx`), its parent directories may still appear as
+    // "modified" due to mtime propagation. We collect those ancestors here so
+    // we can remove them from the final set.
+    let mut excluded_ancestors: HashSet<PathBuf> = HashSet::new();
+
+    for te in pending.drain(..) {
+        let ap = te.affected;
+        let observed_at = te.observed_at;
+        let path_str = ap.path.to_string_lossy().replace('\\', "/");
 
         // Skip paths inside undo directories.
         if undo_dir_prefixes
             .iter()
             .any(|prefix| path_str.starts_with(prefix.as_str()))
         {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
 
-        // Skip excluded patterns (substring match).
+        // Skip excluded patterns.
         if exclude_patterns
             .iter()
-            .any(|pattern| path_str.contains(pattern.as_str()))
+            .any(|pattern| matches_exclude_pattern(&path_str, pattern))
         {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
 
-        // Skip if this was a recent backend write.
-        if recent_writes.was_recent(&path) {
+        // Skip if this event should be suppressed — compares the event's
+        // arrival time against the suppression window, not the current
+        // wall-clock time (which would race with the debounce delay).
+        if recent_writes.should_suppress(&ap.path, observed_at) {
+            record_ancestors(&ap.path, &mut excluded_ancestors);
             continue;
         }
-
-        // Log paths not suppressed — helps diagnose watcher vs. interceptor mismatches.
-        eprintln!(
-            "{{\"level\":\"debug\",\"component\":\"fs_watcher\",\"action\":\"external_candidate\",\"raw_path\":\"{}\",\"normalized_path\":\"{}\"}}",
-            path.display(),
-            path_str
-        );
+        if let Some(ref from) = ap.renamed_from {
+            if recent_writes.should_suppress(from, observed_at) {
+                record_ancestors(&ap.path, &mut excluded_ancestors);
+                record_ancestors(from, &mut excluded_ancestors);
+                continue;
+            }
+        }
 
         // Find which working directory this path belongs to.
         for (index, working_dir) in working_dirs.iter().enumerate() {
-            if path.starts_with(working_dir) {
+            if ap.path.starts_with(working_dir) {
                 // Check gitignore rules for this working directory.
                 if let Some(Some(filter)) = gitignore_filters.get(index) {
-                    if let Ok(relative) = path.strip_prefix(working_dir) {
+                    if let Ok(relative) = ap.path.strip_prefix(working_dir) {
                         let relative_str = relative.to_string_lossy().replace('\\', "/");
-                        let is_dir = path.is_dir();
+                        let is_dir = ap.path.is_dir();
                         if filter.matched_path_or_any_parents(&relative_str, is_dir).is_ignore() {
+                            record_ancestors(&ap.path, &mut excluded_ancestors);
                             break;
                         }
                     }
                 }
-                per_dir[index].push(path);
+                per_dir[index].push(ap);
                 break;
             }
         }
@@ -326,9 +478,15 @@ fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParam
 
     // Remove parent directories whose mtime changed only because a child was
     // modified — the child path is already in the set and is the real change.
-    for paths in &mut per_dir {
-        if paths.len() > 1 {
-            remove_redundant_parents(paths);
+    for entries in &mut per_dir {
+        if entries.len() > 1 {
+            remove_redundant_parents(entries);
+        }
+        // Remove directories that only appear because an excluded child's
+        // operation changed their mtime (e.g., .git/ writes propagating
+        // mtime changes up to the working directory).
+        if !excluded_ancestors.is_empty() {
+            entries.retain(|ap| !excluded_ancestors.contains(&ap.path));
         }
     }
 
@@ -340,7 +498,16 @@ fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParam
 
         let affected_strings: Vec<String> = external_paths
             .iter()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|ap| {
+                if let Some(ref from) = ap.renamed_from {
+                    let from_str = from.to_string_lossy();
+                    let to_str = ap.path.to_string_lossy();
+                    format!("{from_str} \u{2192} {to_str} (renamed)")
+                } else {
+                    let path_str = ap.path.to_string_lossy().into_owned();
+                    format!("{path_str} ({kind})", kind = format_change_kind(ap.kind))
+                }
+            })
             .collect();
 
         // Create a barrier on the interceptor if one exists for this directory.
@@ -363,22 +530,78 @@ fn process_pending_paths(pending_paths: &mut Vec<PathBuf>, params: &ProcessParam
     }
 }
 
+/// Format a `FileChangeKind` as a human-readable string for display.
+fn format_change_kind(kind: FileChangeKind) -> &'static str {
+    match kind {
+        FileChangeKind::Created => "created",
+        FileChangeKind::Modified => "modified",
+        FileChangeKind::Deleted => "deleted",
+        FileChangeKind::Renamed => "renamed",
+    }
+}
+
+/// Check if a normalized path matches an exclude pattern.
+///
+/// A pattern like `.git/` matches both paths *inside* the directory
+/// (`path/.git/objects/xxx`) and the directory itself (`path/.git`).
+fn matches_exclude_pattern(path_str: &str, pattern: &str) -> bool {
+    if path_str.contains(pattern) {
+        return true;
+    }
+    // If the pattern ends with '/', also match the directory name at the end
+    // of the path. E.g., ".git/" should also exclude the ".git" directory.
+    if let Some(dir_name) = pattern.strip_suffix('/') {
+        if path_str.ends_with(dir_name) {
+            let prefix_len = path_str.len() - dir_name.len();
+            if prefix_len == 0 || path_str.as_bytes()[prefix_len - 1] == b'/' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Record all ancestor directories of a path into a set.
+///
+/// Used to track which directories may have spurious mtime changes caused
+/// by excluded child operations.
+fn record_ancestors(path: &Path, ancestors: &mut HashSet<PathBuf>) {
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if !ancestors.insert(parent.to_path_buf()) {
+            break; // already recorded this subtree
+        }
+        current = parent.parent();
+    }
+}
+
 /// Remove paths that are a direct parent of another path in the list.
 ///
 /// When a child file is created or modified, the OS also updates the parent
 /// directory's mtime, causing `notify` to report both. The parent entry is
 /// noise — the child is the real change. However, a directory path with no
 /// child in the list is kept (it may be a genuine mkdir/rmdir event).
-fn remove_redundant_parents(paths: &mut Vec<PathBuf>) {
+fn remove_redundant_parents(entries: &mut Vec<AffectedPath>) {
     // Collect parents of all paths in the set to identify which directories
     // are only present because a child's creation/modification changed their mtime.
-    let parents_of_children: HashSet<PathBuf> = paths
+    // For renames, both the destination and source paths contribute parent dirs.
+    let parents_of_children: HashSet<PathBuf> = entries
         .iter()
-        .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+        .flat_map(|ap| {
+            let dest_parent = ap.path.parent().map(|p| p.to_path_buf());
+            let src_parent = ap
+                .renamed_from
+                .as_ref()
+                .and_then(|from| from.parent().map(|p| p.to_path_buf()));
+            dest_parent.into_iter().chain(src_parent)
+        })
         .collect();
-    paths.retain(|path| {
-        // Keep this path unless it is the parent of another path in the set.
-        !parents_of_children.contains(path)
+    entries.retain(|ap| {
+        // Keep this entry unless its path is the parent of another path in the set.
+        !parents_of_children.contains(&ap.path)
     });
 }
 
@@ -453,43 +676,240 @@ mod tests {
 
     #[test]
     fn redundant_parent_removed() {
-        let mut paths = vec![
-            PathBuf::from("/workspace/subdir"),
-            PathBuf::from("/workspace/subdir/file.txt"),
+        let mut entries = vec![
+            AffectedPath { path: PathBuf::from("/workspace/subdir"), kind: FileChangeKind::Modified, renamed_from: None },
+            AffectedPath { path: PathBuf::from("/workspace/subdir/file.txt"), kind: FileChangeKind::Created, renamed_from: None },
         ];
-        remove_redundant_parents(&mut paths);
-        assert_eq!(paths, vec![PathBuf::from("/workspace/subdir/file.txt")]);
+        remove_redundant_parents(&mut entries);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/workspace/subdir/file.txt"));
+        assert_eq!(entries[0].kind, FileChangeKind::Created);
     }
 
     #[test]
     fn standalone_directory_kept() {
-        let mut paths = vec![
-            PathBuf::from("/workspace/new_dir"),
-            PathBuf::from("/workspace/other_file.txt"),
+        let mut entries = vec![
+            AffectedPath { path: PathBuf::from("/workspace/new_dir"), kind: FileChangeKind::Created, renamed_from: None },
+            AffectedPath { path: PathBuf::from("/workspace/other_file.txt"), kind: FileChangeKind::Modified, renamed_from: None },
         ];
-        remove_redundant_parents(&mut paths);
-        assert_eq!(paths.len(), 2);
+        remove_redundant_parents(&mut entries);
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]
     fn multiple_children_remove_parent() {
-        let mut paths = vec![
-            PathBuf::from("/workspace/dir"),
-            PathBuf::from("/workspace/dir/a.txt"),
-            PathBuf::from("/workspace/dir/b.txt"),
+        let mut entries = vec![
+            AffectedPath { path: PathBuf::from("/workspace/dir"), kind: FileChangeKind::Modified, renamed_from: None },
+            AffectedPath { path: PathBuf::from("/workspace/dir/a.txt"), kind: FileChangeKind::Created, renamed_from: None },
+            AffectedPath { path: PathBuf::from("/workspace/dir/b.txt"), kind: FileChangeKind::Modified, renamed_from: None },
         ];
-        remove_redundant_parents(&mut paths);
-        assert_eq!(paths.len(), 2);
-        assert!(paths.contains(&PathBuf::from("/workspace/dir/a.txt")));
-        assert!(paths.contains(&PathBuf::from("/workspace/dir/b.txt")));
+        remove_redundant_parents(&mut entries);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|ap| ap.path.as_os_str() == "/workspace/dir/a.txt"));
+        assert!(entries.iter().any(|ap| ap.path.as_os_str() == "/workspace/dir/b.txt"));
     }
 
     #[test]
     fn single_path_unchanged() {
-        let mut paths = vec![PathBuf::from("/workspace/file.txt")];
+        let mut entries = vec![
+            AffectedPath { path: PathBuf::from("/workspace/file.txt"), kind: FileChangeKind::Modified, renamed_from: None },
+        ];
         // remove_redundant_parents is only called when len > 1, but test the
         // function directly to verify it handles edge cases.
-        remove_redundant_parents(&mut paths);
-        assert_eq!(paths, vec![PathBuf::from("/workspace/file.txt")]);
+        remove_redundant_parents(&mut entries);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/workspace/file.txt"));
+    }
+
+    #[test]
+    fn event_kind_mapping() {
+        use notify::EventKind;
+        use notify::event::{CreateKind, RemoveKind, ModifyKind, RenameMode, DataChange};
+
+        assert_eq!(
+            event_kind_to_change_kind(&EventKind::Create(CreateKind::File)),
+            FileChangeKind::Created,
+        );
+        assert_eq!(
+            event_kind_to_change_kind(&EventKind::Remove(RemoveKind::File)),
+            FileChangeKind::Deleted,
+        );
+        assert_eq!(
+            event_kind_to_change_kind(&EventKind::Modify(ModifyKind::Name(RenameMode::Both))),
+            FileChangeKind::Renamed,
+        );
+        assert_eq!(
+            event_kind_to_change_kind(&EventKind::Modify(ModifyKind::Data(DataChange::Content))),
+            FileChangeKind::Modified,
+        );
+    }
+
+    #[test]
+    fn rename_both_collapsed_into_single_entry() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let mut pending = None;
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            paths: vec![
+                PathBuf::from("/workspace/old_name.txt"),
+                PathBuf::from("/workspace/new_name.txt"),
+            ],
+            attrs: Default::default(),
+        };
+
+        let entries = event_to_affected_paths(event, &mut pending);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/workspace/new_name.txt"));
+        assert_eq!(entries[0].kind, FileChangeKind::Renamed);
+        assert_eq!(
+            entries[0].renamed_from,
+            Some(PathBuf::from("/workspace/old_name.txt")),
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn rename_from_to_paired_on_windows() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let mut pending = None;
+
+        // From event — buffers the source path, emits nothing.
+        let from_event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            paths: vec![PathBuf::from("/workspace/old.txt")],
+            attrs: Default::default(),
+        };
+        let entries = event_to_affected_paths(from_event, &mut pending);
+        assert!(entries.is_empty());
+        assert_eq!(pending, Some(PathBuf::from("/workspace/old.txt")));
+
+        // To event — pairs with buffered From.
+        let to_event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            paths: vec![PathBuf::from("/workspace/new.txt")],
+            attrs: Default::default(),
+        };
+        let entries = event_to_affected_paths(to_event, &mut pending);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/workspace/new.txt"));
+        assert_eq!(entries[0].kind, FileChangeKind::Renamed);
+        assert_eq!(
+            entries[0].renamed_from,
+            Some(PathBuf::from("/workspace/old.txt")),
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn unpaired_from_flushed_by_non_rename_event() {
+        use notify::event::{ModifyKind, RenameMode, DataChange};
+
+        let mut pending = None;
+
+        // From event with no matching To.
+        let from_event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            paths: vec![PathBuf::from("/workspace/orphan.txt")],
+            attrs: Default::default(),
+        };
+        let entries = event_to_affected_paths(from_event, &mut pending);
+        assert!(entries.is_empty());
+
+        // A non-rename event flushes the buffered From as standalone.
+        let modify_event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/workspace/other.txt")],
+            attrs: Default::default(),
+        };
+        let entries = event_to_affected_paths(modify_event, &mut pending);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/workspace/orphan.txt"));
+        assert_eq!(entries[0].kind, FileChangeKind::Renamed);
+        assert!(entries[0].renamed_from.is_none());
+        assert_eq!(entries[1].path, PathBuf::from("/workspace/other.txt"));
+        assert_eq!(entries[1].kind, FileChangeKind::Modified);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn rename_any_has_no_renamed_from() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let mut pending = None;
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            paths: vec![PathBuf::from("/workspace/file.txt")],
+            attrs: Default::default(),
+        };
+
+        let entries = event_to_affected_paths(event, &mut pending);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, FileChangeKind::Renamed);
+        assert!(entries[0].renamed_from.is_none());
+    }
+
+    #[test]
+    fn create_event_produces_created_kind() {
+        use notify::event::CreateKind;
+
+        let mut pending = None;
+        let event = notify::Event {
+            kind: notify::EventKind::Create(CreateKind::File),
+            paths: vec![PathBuf::from("/workspace/new.txt")],
+            attrs: Default::default(),
+        };
+
+        let entries = event_to_affected_paths(event, &mut pending);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, FileChangeKind::Created);
+        assert!(entries[0].renamed_from.is_none());
+    }
+
+    #[test]
+    fn exclude_pattern_matches_contents() {
+        assert!(matches_exclude_pattern("C:/workspace/.git/objects/xxx", ".git/"));
+        assert!(matches_exclude_pattern("/workspace/.git/HEAD", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_matches_directory_itself() {
+        assert!(matches_exclude_pattern("C:/workspace/.git", ".git/"));
+        assert!(matches_exclude_pattern("/workspace/.git", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_no_false_positive_on_similar_names() {
+        assert!(!matches_exclude_pattern("/workspace/.gitignore", ".git/"));
+        assert!(!matches_exclude_pattern("/workspace/.gitthing", ".git/"));
+        assert!(!matches_exclude_pattern("/workspace/not-git", ".git/"));
+    }
+
+    #[test]
+    fn exclude_pattern_without_trailing_slash() {
+        assert!(matches_exclude_pattern("/workspace/node_modules/foo", "node_modules"));
+        assert!(matches_exclude_pattern("/workspace/node_modules", "node_modules"));
+    }
+
+    #[test]
+    fn record_ancestors_collects_parents() {
+        let mut ancestors = HashSet::new();
+        record_ancestors(Path::new("/workspace/subdir/file.txt"), &mut ancestors);
+        assert!(ancestors.contains(Path::new("/workspace/subdir")));
+        assert!(ancestors.contains(Path::new("/workspace")));
+        assert!(ancestors.contains(Path::new("/")));
+    }
+
+    #[test]
+    fn record_ancestors_deduplicates() {
+        let mut ancestors = HashSet::new();
+        record_ancestors(Path::new("/workspace/.git/objects/a"), &mut ancestors);
+        let count_after_first = ancestors.len();
+        record_ancestors(Path::new("/workspace/.git/objects/b"), &mut ancestors);
+        // The second call shares the same ancestor chain, so only the
+        // immediate parent of "b" (if different from "a") could be new.
+        // Here both share /workspace/.git/objects as parent, so no new entries.
+        assert_eq!(ancestors.len(), count_after_first);
     }
 }

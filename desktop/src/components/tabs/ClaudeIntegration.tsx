@@ -7,11 +7,13 @@ import {
   Terminal,
   ShieldOff,
   ShieldCheck,
+  X,
+  AlertTriangle,
 } from "lucide-react";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { useToastStore } from "../../hooks/useToastStore";
-import { useVmStore } from "../../hooks/useVmStatus";
-import type { SandboxConfig, ClaudeConfigInfo, McpServerEntry } from "../../lib/types";
+import { buildMcpEntry, generatePreviewJson } from "../../lib/mcpEntry";
+import type { ClaudeConfigInfo } from "../../lib/types";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -33,53 +35,66 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function buildMcpEntry(
-  config: SandboxConfig,
-  serverName: string,
-  sandboxBinary: string,
-): McpServerEntry {
-  const args: string[] = [];
+function KillProcessesDialog({
+  count,
+  onConfirm,
+  onCancel,
+}: {
+  count: number;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-96 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-6 shadow-xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <AlertTriangle size={16} className="text-[var(--color-warning)]" />
+            Running Sandbox Processes
+          </h3>
+          <button
+            onClick={onCancel}
+            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+          >
+            <X size={16} />
+          </button>
+        </div>
 
-  for (const dir of config.sandbox.working_dirs) {
-    if (dir) {
-      args.push("--working-dir", dir);
-    }
-  }
-  if (config.sandbox.undo_dir) {
-    args.push("--undo-dir", config.sandbox.undo_dir);
-  }
-  args.push("--protocol", "mcp");
-  args.push("--memory-mb", String(config.vm.memory_mb));
-  args.push("--cpus", String(config.vm.cpus));
+        <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+          {count === 1
+            ? "There is 1 sandbox process still running."
+            : `There are ${count} sandbox processes still running.`}{" "}
+          Disabling the MCP server will end {count === 1 ? "it" : "them"}.
+        </p>
 
-  return {
-    server_name: serverName,
-    command: sandboxBinary,
-    args,
-  };
-}
-
-function generatePreviewJson(entry: McpServerEntry): string {
-  const config = {
-    mcpServers: {
-      [entry.server_name]: {
-        command: entry.command,
-        args: entry.args,
-      },
-    },
-  };
-  return JSON.stringify(config, null, 2);
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-bg-tertiary)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="rounded bg-[var(--color-error)] px-4 py-2 text-sm text-white hover:opacity-90"
+          >
+            End {count === 1 ? "Process" : "Processes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function ClaudeIntegration() {
   const { config, updateSection } = useSandboxConfig();
   const addToast = useToastStore((s) => s.addToast);
-  const vmStatus = useVmStore((s) => s.status);
   const [info, setInfo] = useState<ClaudeConfigInfo | null>(null);
   const [sandboxBinary, setSandboxBinary] = useState("sandbox");
+  const [socketPath, setSocketPath] = useState<string | undefined>();
+  const [logFilePath, setLogFilePath] = useState<string | undefined>();
   const [cliCommand, setCliCommand] = useState("");
-
-  const isVmRunning = vmStatus.state === "running";
+  const [killConfirm, setKillConfirm] = useState<number[] | null>(null);
 
   const detect = useCallback(async () => {
     try {
@@ -98,12 +113,20 @@ export default function ClaudeIntegration() {
     invoke<string>("resolve_sandbox_binary")
       .then(setSandboxBinary)
       .catch(() => {});
+    invoke<string>("get_socket_path")
+      .then(setSocketPath)
+      .catch(() => {});
+    invoke<string>("get_log_file_path")
+      .then(setLogFilePath)
+      .catch(() => {});
   }, [detect]);
 
   const entry = buildMcpEntry(
     config,
     config.claude_code.server_name,
     sandboxBinary,
+    socketPath,
+    logFilePath,
   );
   const preview = generatePreviewJson(entry);
 
@@ -113,58 +136,42 @@ export default function ClaudeIntegration() {
     );
   }, [entry.server_name, entry.command, entry.args.join(",")]);
 
-  const CODE_DENIED_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"];
-
-  // MCP registration is handled by the backend on VM start/stop.
-  // The toggle saves the preference; immediate effect only if the VM is running.
-  const handleToggle = async (enabled: boolean) => {
-    updateSection("claude_code", { enabled });
-    if (!isVmRunning) {
-      addToast(
-        "info",
-        enabled
-          ? "MCP server will be registered when the sandbox starts."
-          : "MCP server preference disabled.",
-      );
-      return;
-    }
+  const disableMcp = async (killPids?: number[]) => {
     try {
-      if (enabled) {
-        await invoke("write_claude_code_config", {
-          entry,
-          scope: config.claude_code.scope,
-        });
-        if (config.claude_code.disable_builtin_tools) {
-          await invoke("set_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
-        }
-        // Set allowed tools (read always; write if toggled)
-        const allowTools = [
-          "read_file", "list_directory", "glob", "grep",
-          "get_undo_history", "get_session_status", "get_working_directory",
-          ...(config.claude_code.auto_allow_write_tools
-            ? ["Bash", "write_file", "edit_file", "undo"]
-            : []),
-        ];
-        await invoke("set_claude_code_allowed_tools", {
-          serverName: config.claude_code.server_name,
-          tools: allowTools,
-        });
-        addToast("warning", "Restart Claude Code for changes to take effect.");
-      } else {
-        await invoke("remove_claude_code_config", {
-          serverName: config.claude_code.server_name,
-          scope: config.claude_code.scope,
-        });
-        await invoke("remove_claude_code_denied_tools", { tools: CODE_DENIED_TOOLS });
-        await invoke("remove_claude_code_allowed_tools", {
+      if (killPids && killPids.length > 0) {
+        await invoke("cleanup_claude_settings", {
           serverName: config.claude_code.server_name,
         });
-        addToast("warning", "Restart Claude Code for changes to take effect.");
+        await invoke("kill_sandbox_processes", { pids: killPids });
       }
+      await invoke("remove_claude_code_config", {
+        serverName: config.claude_code.server_name,
+        scope: config.claude_code.scope,
+      });
       detect();
     } catch (e) {
-      addToast("error", `Failed to update Claude Code config: ${e}`);
+      addToast("error", `Failed to disable MCP server: ${e}`);
     }
+    updateSection("claude_code", { enabled: false });
+  };
+
+  const handleToggle = async (enabled: boolean) => {
+    if (!enabled) {
+      const pids = await invoke<number[]>("find_sandbox_processes");
+      if (pids.length > 0) {
+        setKillConfirm(pids);
+        return;
+      }
+      await disableMcp();
+      return;
+    }
+    updateSection("claude_code", { enabled });
+  };
+
+  const confirmKill = async () => {
+    const pids = killConfirm!;
+    setKillConfirm(null);
+    await disableMcp(pids);
   };
 
   return (
@@ -223,8 +230,8 @@ export default function ClaudeIntegration() {
           </button>
         </div>
         <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-          The MCP server is automatically registered when the sandbox starts
-          and removed when it stops.
+          When enabled, Claude Code spawns the sandbox process. The desktop app
+          connects via a side-channel socket for terminal, debug, and rollback.
         </p>
 
         <div className="space-y-3">
@@ -296,29 +303,11 @@ export default function ClaudeIntegration() {
             <button
               role="switch"
               aria-checked={config.claude_code.auto_allow_write_tools}
-              onClick={async () => {
-                const next = !config.claude_code.auto_allow_write_tools;
-                updateSection("claude_code", { auto_allow_write_tools: next });
-                if (isVmRunning && config.claude_code.enabled) {
-                  try {
-                    // Remove existing allow entries and re-add with correct set
-                    await invoke("remove_claude_code_allowed_tools", {
-                      serverName: config.claude_code.server_name,
-                    });
-                    const tools = [
-                      "read_file", "list_directory", "glob", "grep",
-                      "get_undo_history", "get_session_status", "get_working_directory",
-                      ...(next ? ["Bash", "write_file", "edit_file", "undo"] : []),
-                    ];
-                    await invoke("set_claude_code_allowed_tools", {
-                      serverName: config.claude_code.server_name,
-                      tools,
-                    });
-                  } catch (e) {
-                    addToast("error", `Failed to update allowed tools: ${e}`);
-                  }
-                }
-              }}
+              onClick={() =>
+                updateSection("claude_code", {
+                  auto_allow_write_tools: !config.claude_code.auto_allow_write_tools,
+                })
+              }
               className={`relative h-5 w-9 rounded-full transition-colors ${
                 config.claude_code.auto_allow_write_tools
                   ? "bg-[var(--color-accent)]"
@@ -367,6 +356,14 @@ export default function ClaudeIntegration() {
           </div>
         )}
       </div>
+
+      {killConfirm !== null && (
+        <KillProcessesDialog
+          count={killConfirm.length}
+          onConfirm={confirmKill}
+          onCancel={() => setKillConfirm(null)}
+        />
+      )}
     </div>
   );
 }

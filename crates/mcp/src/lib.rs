@@ -12,5 +12,5 @@ pub use path_validation::validate_path;
 pub use protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDefinition,
 };
-pub use router::{McpHandler, McpRouter};
+pub use router::{CustomMethodHandler, McpHandler, McpRouter};
 pub use server::McpServer;

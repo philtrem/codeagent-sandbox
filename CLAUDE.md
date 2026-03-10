@@ -136,11 +136,11 @@ crates/
                                    #   ToolDefinition, ToolCallResult, ToolCallParams,
                                    #   tool arg structs (ExecuteCommandArgs, ReadFileArgs,
                                    #   WriteFileArgs, EditFileArgs, GlobArgs, GrepArgs,
-                                   #   ListDirectoryArgs, UndoArgs, etc.)
+                                   #   UndoArgs, etc.)
       parser.rs                    #   parse_jsonrpc() with 1MB size limit, extract_id(),
                                    #   extract_missing_field()
       path_validation.rs           #   validate_path() — logical .. resolution + containment
-      router.rs                    #   McpHandler trait (10 methods), tool_definitions(),
+      router.rs                    #   McpHandler trait (9 methods), tool_definitions(),
                                    #   McpRouter (initialize/tools_list/tools_call dispatch,
                                    #   path validation for fs tools)
       server.rs                    #   McpServer async loop (tokio::select! for requests +
@@ -250,7 +250,7 @@ crates/
                                    #   in_flight_tracker, control_writer, task handles, socket_dir),
                                    #   fs_watcher_handle, recent_writes
       orchestrator.rs              #   Orchestrator: implements RequestHandler (15 methods) +
-                                   #   McpHandler (10 methods), session lifecycle, undo delegation,
+                                   #   McpHandler (9 methods), session lifecycle, undo delegation,
                                    #   direct host fs access, safeguard confirm/configure,
                                    #   launch_vm() for QEMU + virtiofsd + control channel setup,
                                    #   agent_execute sends commands through control channel when VM
@@ -261,11 +261,13 @@ crates/
       control_bridge.rs            #   spawn_control_writer (mpsc → JSON Lines socket writer),
                                    #   spawn_control_reader (socket reader → ControlChannelHandler),
                                    #   serialize_host_message
-      recent_writes.rs             #   RecentBackendWrites (Mutex<HashMap<PathBuf, Instant>> + TTL),
-                                   #   WriteTrackingInterceptor (WriteInterceptor decorator that
-                                   #   records mutated paths for watcher suppression)
+      recent_writes.rs             #   RecentBackendWrites (event-time-based suppression:
+                                   #   per-path TTL + blanket counter + suppress_ended_at),
+                                   #   should_suppress(path, event_time), WriteTrackingInterceptor
+                                   #   (WriteInterceptor decorator for watcher suppression)
       fs_watcher.rs                #   FsWatcherConfig, spawn_fs_watcher() — notify crate v8,
-                                   #   debounced event processing, RecentBackendWrites filtering,
+                                   #   TimestampedEvent (Instant-stamped at OS delivery),
+                                   #   debounced event processing, event-time suppression,
                                    #   exclude patterns, undo dir filtering, barrier creation
       fs_backend.rs                #   FilesystemBackend trait, NullBackend stub,
                                    #   VirtioFsBackend [cfg(not(windows))] — spawns external
@@ -528,10 +530,10 @@ desktop/                           # Tauri v2 desktop app (NOT a workspace membe
   access — rejects traversal and absolute paths outside root.
 - **MCP server protocol**: JSON-RPC 2.0 over a local socket (Unix domain socket on
   Linux/macOS, named pipe on Windows). MCP lifecycle: `initialize` → `initialized` →
-  `tools/list` → `tools/call`. 10 tools: `execute_command`, `read_file`, `write_file`,
-  `edit_file`, `list_directory`, `glob`, `grep`, `undo`, `get_undo_history`,
+  `tools/list` → `tools/call`. 9 tools: `execute_command`, `read_file`, `write_file`,
+  `edit_file`, `glob`, `grep`, `undo`, `get_undo_history`,
   `get_session_status`. `write_file` and `edit_file` create synthetic "API steps" for undo.
-  Path containment validated for `read_file`, `write_file`, `edit_file`, `list_directory`,
+  Path containment validated for `read_file`, `write_file`, `edit_file`,
   `glob` (optional path), `grep` (optional path). Error codes use JSON-RPC 2.0 standard codes (-327xx)
   plus application-specific codes (-320xx). MCP and STDIO share the same undo log and
   safeguard system; safeguard events from MCP operations are forwarded as notifications.
@@ -686,7 +688,7 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - Unit tests: 31 (protocol, parser, path_validation). Contract tests: 37 (SA-01..SA-12 + edge cases)
 
 - **TDD Step 11 (MCP Server Contract Tests)** — complete
-  - `codeagent-mcp` crate: MCP server with JSON-RPC 2.0 protocol, 10 tools,
+  - `codeagent-mcp` crate: MCP server with JSON-RPC 2.0 protocol, 9 tools,
     path validation, async server loop, notification forwarding
   - `McpError` — 9 variants: ParseError, InvalidRequest, MethodNotFound, InvalidParams,
     MissingField, PathOutsideRoot, InternalError, OversizedMessage, Io
@@ -694,13 +696,13 @@ The project follows a TDD sequence defined in `testing-plan.md` §11. All 18 TDD
   - `JsonRpcRequest`, `JsonRpcResponse`, `JsonRpcNotification` — wire types
   - `ToolDefinition`, `ToolCallResult`, `ToolCallParams` — MCP tool protocol types
   - Tool argument structs: `ExecuteCommandArgs`, `ReadFileArgs`, `WriteFileArgs`,
-    `EditFileArgs`, `GlobArgs`, `GrepArgs`, `ListDirectoryArgs`, `UndoArgs`,
+    `EditFileArgs`, `GlobArgs`, `GrepArgs`, `UndoArgs`,
     `GetUndoHistoryArgs`
   - `parse_jsonrpc()` — JSONL parsing with 1MB size limit, version validation
   - `validate_path()` — logical `..` resolution + containment (same algorithm as STDIO)
-  - `McpHandler` trait — 10 methods for the 10 MCP tools
+  - `McpHandler` trait — 9 methods for the 9 MCP tools
   - `McpRouter` — dispatches `initialize`, `tools/list`, `tools/call`, validates paths
-    for `read_file`/`write_file`/`edit_file`/`list_directory`/`glob`/`grep`
+    for `read_file`/`write_file`/`edit_file`/`glob`/`grep`
   - `McpServer` — async loop with `tokio::select!` for request/notification multiplexing
   - `McpTestHarness` — in-process test server via `tokio::io::duplex`
   - `UndoMcpHandler` (test-only) — wraps real `UndoInterceptor` for MC-03/MC-04

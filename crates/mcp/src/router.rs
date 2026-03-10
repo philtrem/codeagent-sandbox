@@ -1,12 +1,13 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::McpError;
 use crate::parser::extract_missing_field;
-use crate::path_validation::validate_path;
+use crate::path_validation::validate_path_multi;
 use crate::protocol::{
     BashArgs, DiscardUndoHistoryArgs, EditFileArgs, GetUndoHistoryArgs, GlobArgs, GrepArgs,
-    JsonRpcRequest, JsonRpcResponse, ListDirectoryArgs, ReadFileArgs, ToolCallParams,
+    JsonRpcRequest, JsonRpcResponse, ReadFileArgs, ToolCallParams,
     ToolCallResult, ToolDefinition, UndoArgs, WriteFileArgs,
 };
 
@@ -20,7 +21,6 @@ pub trait McpHandler: Send + Sync {
     fn read_file(&self, args: ReadFileArgs) -> Result<serde_json::Value, McpError>;
     fn write_file(&self, args: WriteFileArgs) -> Result<serde_json::Value, McpError>;
     fn edit_file(&self, args: EditFileArgs) -> Result<serde_json::Value, McpError>;
-    fn list_directory(&self, args: ListDirectoryArgs) -> Result<serde_json::Value, McpError>;
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError>;
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError>;
     fn undo(&self, args: UndoArgs) -> Result<serde_json::Value, McpError>;
@@ -101,17 +101,6 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "list_directory".to_string(),
-            description: "List directory contents".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path to the directory" }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDefinition {
             name: "glob".to_string(),
             description: "Find files matching a glob pattern. Results sorted by modification time (newest first).".to_string(),
             input_schema: serde_json::json!({
@@ -186,19 +175,30 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Callback type for handling custom JSON-RPC methods (e.g. `sandbox/*`).
+///
+/// Receives the method name, optional request id, and params. Returns a
+/// response, or `None` to fall through to the default dispatch.
+pub type CustomMethodHandler = Box<
+    dyn Fn(&str, Option<serde_json::Value>, serde_json::Value) -> Option<JsonRpcResponse>
+        + Send
+        + Sync,
+>;
+
 /// Routes JSON-RPC requests to the `McpHandler`, performing path validation
 /// for filesystem operations and implementing the MCP lifecycle (initialize,
 /// tools/list, tools/call).
 pub struct McpRouter {
     root_dir: PathBuf,
     working_dirs: Vec<PathBuf>,
-    handler: Box<dyn McpHandler>,
+    handler: Arc<dyn McpHandler>,
     initialized: AtomicBool,
     instructions: String,
+    custom_method_handler: Option<CustomMethodHandler>,
 }
 
 impl McpRouter {
-    pub fn new(root_dir: PathBuf, handler: Box<dyn McpHandler>) -> Self {
+    pub fn new(root_dir: PathBuf, handler: Arc<dyn McpHandler>) -> Self {
         let instructions = format!(
             "IMPORTANT: You are operating inside a sandboxed environment. \
              Your working directory is NOT the project open in your editor. \
@@ -217,6 +217,7 @@ impl McpRouter {
             handler,
             initialized: AtomicBool::new(false),
             instructions,
+            custom_method_handler: None,
         }
     }
 
@@ -224,7 +225,7 @@ impl McpRouter {
     pub fn with_working_dirs(
         root_dir: PathBuf,
         all_dirs: &[PathBuf],
-        handler: Box<dyn McpHandler>,
+        handler: Arc<dyn McpHandler>,
     ) -> Self {
         let dir_list: Vec<String> = all_dirs.iter().map(|d| format!("  - {}", d.display())).collect();
         let instructions = format!(
@@ -245,7 +246,17 @@ impl McpRouter {
             handler,
             initialized: AtomicBool::new(false),
             instructions,
+            custom_method_handler: None,
         }
+    }
+
+    /// Register a handler for custom JSON-RPC methods (e.g. `sandbox/*`).
+    ///
+    /// The handler is called for any method not recognized by the standard
+    /// MCP dispatch. If it returns `Some`, that response is used; if `None`,
+    /// the default MethodNotFound error is returned.
+    pub fn set_custom_method_handler(&mut self, handler: CustomMethodHandler) {
+        self.custom_method_handler = Some(handler);
     }
 
     /// Dispatch a parsed JSON-RPC request, returning a response.
@@ -286,6 +297,15 @@ impl McpRouter {
             }
 
             _ => {
+                // Check custom method handler before returning MethodNotFound
+                if let Some(ref handler) = self.custom_method_handler {
+                    if let Some(response) =
+                        handler(&request.method, id.clone(), request.params)
+                    {
+                        return Some(response);
+                    }
+                }
+
                 if is_notification {
                     // Unknown notifications are silently ignored per JSON-RPC 2.0
                     None
@@ -319,32 +339,26 @@ impl McpRouter {
             }
             "read_file" => {
                 let args = parse_tool_args::<ReadFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.read_file(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "write_file" => {
                 let args = parse_tool_args::<WriteFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.write_file(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "edit_file" => {
                 let args = parse_tool_args::<EditFileArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
+                validate_path_multi(&args.path, &self.working_dirs)?;
                 let value = self.handler.edit_file(args)?;
-                Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
-            }
-            "list_directory" => {
-                let args = parse_tool_args::<ListDirectoryArgs>(tool_params.arguments)?;
-                validate_path(&args.path, &self.root_dir)?;
-                let value = self.handler.list_directory(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
             }
             "glob" => {
                 let args = parse_tool_args::<GlobArgs>(tool_params.arguments)?;
                 if let Some(ref path) = args.path {
-                    validate_path(path, &self.root_dir)?;
+                    validate_path_multi(path, &self.working_dirs)?;
                 }
                 let value = self.handler.glob(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))
@@ -352,7 +366,7 @@ impl McpRouter {
             "grep" => {
                 let args = parse_tool_args::<GrepArgs>(tool_params.arguments)?;
                 if let Some(ref path) = args.path {
-                    validate_path(path, &self.root_dir)?;
+                    validate_path_multi(path, &self.working_dirs)?;
                 }
                 let value = self.handler.grep(args)?;
                 Ok(ToolCallResult::text(serde_json::to_string(&value).unwrap()))

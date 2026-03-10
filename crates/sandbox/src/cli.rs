@@ -5,13 +5,15 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sandbox", about = "Sandboxed coding agent host")]
 pub struct CliArgs {
-    /// Host directories shared with the guest VM. At least one is required.
-    #[arg(long = "working-dir", required = true, num_args = 1..)]
+    /// Host directories shared with the guest VM.
+    /// If not provided, falls back to `[sandbox].working_dirs` in `codeagent.toml`.
+    #[arg(long = "working-dir")]
     pub working_dirs: Vec<PathBuf>,
 
     /// Directory for storing undo logs and preimages.
+    /// If not provided, falls back to `[sandbox].undo_dir` in `codeagent.toml`.
     #[arg(long)]
-    pub undo_dir: PathBuf,
+    pub undo_dir: Option<PathBuf>,
 
     /// VM lifecycle mode: "ephemeral" (destroyed on stop) or "persistent" (kept alive).
     #[arg(long, default_value = "ephemeral")]
@@ -42,7 +44,7 @@ pub struct CliArgs {
     pub rootfs_path: Option<PathBuf>,
 
     /// VM memory in megabytes.
-    #[arg(long, default_value = "2048")]
+    #[arg(long, default_value = "512")]
     pub memory_mb: u32,
 
     /// Number of virtual CPUs.
@@ -58,6 +60,30 @@ pub struct CliArgs {
     /// (`{config_dir}/CodeAgent/codeagent.toml`).
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+
+    /// Path to a Unix domain socket for side-channel access from the desktop app.
+    /// When set, the sandbox listens on this socket for additional MCP connections.
+    #[arg(long)]
+    pub socket_path: Option<PathBuf>,
+
+    /// Path to a log file. When set, stderr output is also teed to this file.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
+
+    /// Block Claude Code's built-in file/command tools (Read, Edit, Write, Glob,
+    /// Grep, Bash) while the sandbox is running, restoring them on exit.
+    #[arg(long)]
+    pub disable_builtin_tools: bool,
+
+    /// Auto-allow MCP write tools (Bash, write_file, edit_file, undo) in
+    /// Claude Code's permissions while the sandbox is running.
+    #[arg(long)]
+    pub auto_allow_write_tools: bool,
+
+    /// MCP server name used for registering allowed-tool entries in Claude Code
+    /// (e.g. `MCP(codeagent-sandbox:read_file)`).
+    #[arg(long, default_value = "codeagent-sandbox")]
+    pub server_name: String,
 }
 
 #[cfg(test)]
@@ -65,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_args_parse() {
+    fn cli_args_parse() {
         let args = CliArgs::try_parse_from([
             "sandbox",
             "--working-dir",
@@ -75,10 +101,30 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.working_dirs, vec![PathBuf::from("/tmp/work")]);
-        assert_eq!(args.undo_dir, PathBuf::from("/tmp/undo"));
+        assert_eq!(args.undo_dir, Some(PathBuf::from("/tmp/undo")));
         assert_eq!(args.vm_mode, "ephemeral");
         assert_eq!(args.protocol, "stdio");
         assert_eq!(args.log_level, "info");
+        assert!(args.socket_path.is_none());
+        assert!(args.log_file.is_none());
+    }
+
+    #[test]
+    fn socket_and_log_file_parse() {
+        let args = CliArgs::try_parse_from([
+            "sandbox",
+            "--working-dir",
+            "/tmp/work",
+            "--undo-dir",
+            "/tmp/undo",
+            "--socket-path",
+            "/tmp/mcp.sock",
+            "--log-file",
+            "/tmp/sandbox.log",
+        ])
+        .unwrap();
+        assert_eq!(args.socket_path, Some(PathBuf::from("/tmp/mcp.sock")));
+        assert_eq!(args.log_file, Some(PathBuf::from("/tmp/sandbox.log")));
     }
 
     #[test]
@@ -121,9 +167,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_args_fails() {
-        let result = CliArgs::try_parse_from(["sandbox"]);
-        assert!(result.is_err());
+    fn no_args_uses_defaults() {
+        let args = CliArgs::try_parse_from(["sandbox"]).unwrap();
+        assert!(args.working_dirs.is_empty());
+        assert!(args.undo_dir.is_none());
+        assert_eq!(args.vm_mode, "ephemeral");
+        assert_eq!(args.protocol, "stdio");
     }
 
     #[test]
@@ -179,7 +228,7 @@ mod tests {
         assert!(args.kernel_path.is_none());
         assert!(args.initrd_path.is_none());
         assert!(args.rootfs_path.is_none());
-        assert_eq!(args.memory_mb, 2048);
+        assert_eq!(args.memory_mb, 512);
         assert_eq!(args.cpus, 2);
         assert!(args.virtiofsd_binary.is_none());
     }
