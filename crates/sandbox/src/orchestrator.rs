@@ -886,6 +886,15 @@ impl Orchestrator {
         }
     }
 
+    /// Get all configured working directory paths.
+    fn all_working_dirs(&self) -> Result<Vec<PathBuf>, AgentError> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            SessionState::Idle => Err(AgentError::SessionNotActive),
+            SessionState::Active(s) => Ok(s.working_dirs.clone()),
+        }
+    }
+
     /// Resolve a tool path to an absolute filesystem path.
     ///
     /// Absolute paths are returned as-is; relative paths are joined with the
@@ -1601,22 +1610,24 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn glob(&self, args: GlobArgs) -> Result<serde_json::Value, McpError> {
-        let search_dir = match &args.path {
-            Some(p) => self
+        let search_dirs: Vec<PathBuf> = match &args.path {
+            Some(p) => vec![self
                 .resolve_target_path(p)
-                .map_err(Self::agent_error_to_mcp)?,
+                .map_err(Self::agent_error_to_mcp)?],
             None => self
-                .primary_working_dir()
+                .all_working_dirs()
                 .map_err(Self::agent_error_to_mcp)?,
         };
 
-        let pattern_str = search_dir
-            .join(&args.pattern)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let mut entries: Vec<(String, std::time::SystemTime)> = Vec::new();
 
-        let mut entries: Vec<(String, std::time::SystemTime)> =
-            glob::glob(&pattern_str)
+        for search_dir in &search_dirs {
+            let pattern_str = search_dir
+                .join(&args.pattern)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let dir_entries = glob::glob(&pattern_str)
                 .map_err(|e| McpError::InvalidParams {
                     message: format!("Invalid glob pattern: {e}"),
                 })?
@@ -1624,13 +1635,14 @@ impl codeagent_mcp::McpHandler for Orchestrator {
                 .filter_map(|path| {
                     let mtime = path.metadata().ok()?.modified().ok()?;
                     let relative = path
-                        .strip_prefix(&search_dir)
+                        .strip_prefix(search_dir)
                         .ok()?
                         .to_string_lossy()
                         .replace('\\', "/");
                     Some((relative, mtime))
-                })
-                .collect();
+                });
+            entries.extend(dir_entries);
+        }
 
         // Sort by modification time, newest first
         entries.sort_by(|a, b| b.1.cmp(&a.1));
@@ -1649,12 +1661,12 @@ impl codeagent_mcp::McpHandler for Orchestrator {
     }
 
     fn grep(&self, args: GrepArgs) -> Result<serde_json::Value, McpError> {
-        let search_path = match &args.path {
-            Some(p) => self
+        let search_roots: Vec<PathBuf> = match &args.path {
+            Some(p) => vec![self
                 .resolve_target_path(p)
-                .map_err(Self::agent_error_to_mcp)?,
+                .map_err(Self::agent_error_to_mcp)?],
             None => self
-                .primary_working_dir()
+                .all_working_dirs()
                 .map_err(Self::agent_error_to_mcp)?,
         };
 
@@ -1677,86 +1689,110 @@ impl codeagent_mcp::McpHandler for Orchestrator {
         let context = args.context_lines.unwrap_or(0);
         let mut output = String::new();
 
-        // Collect files to search
-        let files: Vec<std::path::PathBuf> = if search_path.is_file() {
-            vec![search_path.clone()]
-        } else {
-            walkdir::WalkDir::new(&search_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    if let Some(ref pat) = include_glob {
-                        pat.matches(
-                            &e.path()
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy(),
-                        )
-                    } else {
-                        true
-                    }
-                })
-                .map(|e| e.into_path())
-                .collect()
-        };
-
-        for file_path in &files {
-            let content = match std::fs::read_to_string(file_path) {
-                Ok(c) => c,
-                Err(_) => continue, // skip binary/unreadable files
+        for search_path in &search_roots {
+            // Collect files to search
+            let files: Vec<(std::path::PathBuf, String)> = if search_path.is_file() {
+                let display_name = search_path
+                    .file_name()
+                    .unwrap_or(search_path.as_os_str())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                vec![(search_path.clone(), display_name)]
+            } else {
+                walkdir::WalkDir::new(search_path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| {
+                        if let Some(ref pat) = include_glob {
+                            let relative = e
+                                .path()
+                                .strip_prefix(search_path)
+                                .unwrap_or(e.path())
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            pat.matches(&relative)
+                                || pat.matches(
+                                    &e.path()
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                )
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|e| {
+                        let relative = e
+                            .path()
+                            .strip_prefix(search_path)
+                            .unwrap_or(e.path())
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        (e.into_path(), relative)
+                    })
+                    .collect()
             };
 
-            let lines: Vec<&str> = content.lines().collect();
-            let matching_lines: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| regex.is_match(line))
-                .map(|(i, _)| i)
-                .collect();
+            for (file_path, relative) in &files {
+                let content = match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue, // skip binary/unreadable files
+                };
 
-            if matching_lines.is_empty() {
-                continue;
-            }
+                let lines: Vec<&str> = content.lines().collect();
+                let matching_lines: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| regex.is_match(line))
+                    .map(|(i, _)| i)
+                    .collect();
 
-            let relative = file_path
-                .strip_prefix(&search_path)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            match args.output_mode.as_str() {
-                "files_with_matches" => {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&relative);
+                if matching_lines.is_empty() {
+                    continue;
                 }
-                "count" => {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(&format!("{}:{}", relative, matching_lines.len()));
-                }
-                _ => {
-                    if !output.is_empty() {
-                        output.push_str("\n\n");
-                    }
-                    output.push_str(&relative);
 
-                    // Build set of lines to show (matches + context)
-                    let mut visible: std::collections::BTreeSet<usize> =
-                        std::collections::BTreeSet::new();
-                    for &line_idx in &matching_lines {
-                        let start = line_idx.saturating_sub(context);
-                        let end = (line_idx + context + 1).min(lines.len());
-                        for i in start..end {
-                            visible.insert(i);
+                match args.output_mode.as_str() {
+                    "files_with_matches" => {
+                        if !output.is_empty() {
+                            output.push('\n');
                         }
+                        output.push_str(relative);
                     }
+                    "count" => {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str(&format!("{relative}:{}", matching_lines.len()));
+                    }
+                    _ => {
+                        if !output.is_empty() {
+                            output.push_str("\n\n");
+                        }
+                        output.push_str(relative);
 
-                    for &i in &visible {
-                        output.push_str(&format!("\n{}:{}", i + 1, lines[i]));
+                        // Build ranges of lines to show (matches + context)
+                        let mut ranges: Vec<(usize, usize)> = Vec::new();
+                        for &line_idx in &matching_lines {
+                            let start = line_idx.saturating_sub(context);
+                            let end = (line_idx + context + 1).min(lines.len());
+                            if let Some(last) = ranges.last_mut() {
+                                if start <= last.1 {
+                                    last.1 = end;
+                                    continue;
+                                }
+                            }
+                            ranges.push((start, end));
+                        }
+
+                        for (range_idx, &(start, end)) in ranges.iter().enumerate() {
+                            if range_idx > 0 {
+                                output.push_str("\n--");
+                            }
+                            for (i, line) in lines[start..end].iter().enumerate() {
+                                output.push_str(&format!("\n{}:{line}", start + i + 1));
+                            }
+                        }
                     }
                 }
             }
