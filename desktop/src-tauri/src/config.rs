@@ -13,6 +13,7 @@ pub struct SandboxConfig {
     pub gitignore: GitignoreSection,
     pub claude_code: ClaudeCodeSection,
     pub command_classifier: CommandClassifierSection,
+    pub tools: ToolsSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +168,24 @@ impl Default for ClaudeCodeSection {
             scope: "user".into(),
             disable_builtin_tools: true,
             auto_allow_write_tools: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsSection {
+    pub selected_packages: Vec<String>,
+    pub additional_packages: Vec<String>,
+    pub image_path: String,
+}
+
+impl Default for ToolsSection {
+    fn default() -> Self {
+        Self {
+            selected_packages: vec![],
+            additional_packages: vec![],
+            image_path: String::new(),
         }
     }
 }

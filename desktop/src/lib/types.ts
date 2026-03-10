@@ -9,6 +9,7 @@ export interface SandboxConfig {
   gitignore: GitignoreSection;
   claude_code: ClaudeCodeSection;
   command_classifier: CommandClassifierSection;
+  tools: ToolsSection;
 }
 
 export interface SandboxSection {
@@ -65,6 +66,33 @@ export interface ClaudeCodeSection {
   disable_builtin_tools: boolean;
   auto_allow_write_tools: boolean;
 }
+
+export interface ToolsSection {
+  selected_packages: string[];
+  additional_packages: string[];
+  image_path: string;
+}
+
+export interface ToolsImageStatus {
+  exists: boolean;
+  size_bytes: number;
+  created_at: string;
+  packages: string[];
+}
+
+export interface ToolsBuildProgress {
+  stage: string;
+  message: string;
+}
+
+export const TOOL_CATEGORIES: Record<string, string[]> = {
+  "Languages": ["python3", "nodejs", "go", "ruby", "perl"],
+  "Version Control": ["git"],
+  "Build Tools": ["make", "cmake", "gcc", "g++"],
+  "Package Managers": ["npm", "py3-pip"],
+  "Editors": ["vim", "nano"],
+  "Utilities": ["curl", "wget", "jq", "ripgrep", "fd", "tree", "htop"],
+};
 
 export interface CommandClassifierSection {
   read_only_commands: string[];
@@ -229,5 +257,10 @@ export function defaultConfig(): SandboxConfig {
       auto_allow_write_tools: false,
     },
     command_classifier: defaultCommandClassifier(),
+    tools: {
+      selected_packages: [],
+      additional_packages: [],
+      image_path: "",
+    },
   };
 }

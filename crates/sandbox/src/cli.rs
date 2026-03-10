@@ -55,6 +55,11 @@ pub struct CliArgs {
     #[arg(long)]
     pub virtiofsd_binary: Option<PathBuf>,
 
+    /// Path to an ext4 tools image to attach as a read-only drive.
+    /// Contains additional packages (git, python, etc.) for the guest VM.
+    #[arg(long)]
+    pub tools_image: Option<PathBuf>,
+
     /// Path to a TOML configuration file.
     /// If not specified, the platform default path is used
     /// (`{config_dir}/CodeAgent/codeagent.toml`).
@@ -231,5 +236,22 @@ mod tests {
         assert_eq!(args.memory_mb, 512);
         assert_eq!(args.cpus, 2);
         assert!(args.virtiofsd_binary.is_none());
+        assert!(args.tools_image.is_none());
+    }
+
+    #[test]
+    fn tools_image_parse() {
+        let args = CliArgs::try_parse_from([
+            "sandbox",
+            "--working-dir",
+            "/tmp/work",
+            "--tools-image",
+            "/path/to/tools.img",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.tools_image,
+            Some(PathBuf::from("/path/to/tools.img"))
+        );
     }
 }

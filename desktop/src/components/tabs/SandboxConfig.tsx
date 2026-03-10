@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSandboxConfig } from "../../hooks/useSandboxConfig";
 import { defaultCommandClassifier } from "../../lib/types";
+import GuestToolsSection from "./GuestTools";
 
 function Section({
   title,
@@ -694,6 +695,10 @@ export default function SandboxConfig() {
             }
           />
         </Section>
+      </Section>
+
+      <Section title="Guest Tools" defaultOpen={false}>
+        <GuestToolsSection />
       </Section>
     </div>
   );

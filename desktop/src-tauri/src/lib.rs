@@ -2,7 +2,7 @@ mod commands;
 mod config;
 mod paths;
 
-use commands::{claude, config as config_cmd, system, undo, vm};
+use commands::{claude, config as config_cmd, system, tools, undo, vm};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -44,6 +44,12 @@ pub fn run() {
             system::get_log_file_path,
             system::find_sandbox_processes,
             system::kill_sandbox_processes,
+            // Tools commands
+            tools::build_tools_image,
+            tools::get_tools_image_status,
+            tools::delete_tools_image,
+            tools::get_default_tools_image_path,
+            tools::check_docker_available,
             // Undo commands
             undo::read_undo_history,
             undo::clear_undo_history,

@@ -26,6 +26,25 @@ enum XtaskCommand {
         #[arg(long)]
         no_cache: bool,
     },
+
+    /// Build a tools disk image (ext4) with Alpine packages for the guest VM
+    BuildTools {
+        /// Space-separated Alpine package names to install
+        #[arg(long)]
+        packages: String,
+
+        /// Target architecture: x86_64 or aarch64
+        #[arg(long, default_value_t = default_arch())]
+        arch: String,
+
+        /// Output directory for the built tools.img
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Disable Docker build cache
+        #[arg(long)]
+        no_cache: bool,
+    },
 }
 
 fn default_arch() -> String {
@@ -181,6 +200,111 @@ fn build_guest(arch: &str, output_dir: PathBuf, no_cache: bool) -> Result<(), St
     Ok(())
 }
 
+fn build_tools(packages: &str, arch: &str, output_dir: PathBuf, no_cache: bool) -> Result<(), String> {
+    if packages.trim().is_empty() {
+        return Err("no packages specified (use --packages \"git jq curl ...\")".to_string());
+    }
+
+    if arch != "x86_64" && arch != "aarch64" {
+        return Err(format!(
+            "unsupported architecture '{arch}': must be 'x86_64' or 'aarch64'"
+        ));
+    }
+
+    check_docker()?;
+
+    let root = project_root();
+    let dockerfile = root.join("guest").join("Dockerfile.tools");
+
+    if !dockerfile.exists() {
+        return Err(format!(
+            "Dockerfile.tools not found at {}\nRun this command from the project root.",
+            dockerfile.display()
+        ));
+    }
+
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        format!(
+            "failed to create output directory {}: {e}",
+            output_dir.display()
+        )
+    })?;
+
+    let output_dir_abs = output_dir
+        .canonicalize()
+        .unwrap_or_else(|_| output_dir.clone());
+
+    println!("Building tools image for {arch}...");
+    println!("  Dockerfile: {}", dockerfile.display());
+    println!("  Packages:   {packages}");
+    println!("  Output:     {}", output_dir_abs.display());
+    println!();
+
+    let docker_platform = match arch {
+        "aarch64" => "linux/arm64",
+        _ => "linux/amd64",
+    };
+
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&root)
+        .env("DOCKER_BUILDKIT", "1")
+        .args(["build", "--file"])
+        .arg(&dockerfile)
+        .args(["--platform", docker_platform])
+        .args(["--build-arg", &format!("PACKAGES={packages}")])
+        .args([
+            "--output",
+            &format!("type=local,dest={}", output_dir_abs.display()),
+        ]);
+
+    if no_cache {
+        cmd.arg("--no-cache");
+    }
+
+    cmd.arg(".");
+
+    println!("Running: docker build ...");
+    println!();
+
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to run docker build: {e}"))?;
+
+    if !status.success() {
+        return Err("Docker build failed. See output above for details.".to_string());
+    }
+
+    println!();
+
+    let tools_img = output_dir_abs.join("tools.img");
+
+    if !tools_img.exists() {
+        return Err(format!(
+            "build succeeded but tools.img not found at {}",
+            tools_img.display()
+        ));
+    }
+
+    let img_size = std::fs::metadata(&tools_img)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    if img_size == 0 {
+        return Err("tools.img is empty".to_string());
+    }
+
+    println!("Tools image built successfully!");
+    println!("  Architecture: {arch}");
+    println!(
+        "  tools.img:    {} ({:.1} MB)",
+        tools_img.display(),
+        img_size as f64 / 1_048_576.0
+    );
+    println!("  Packages:     {packages}");
+
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -193,6 +317,16 @@ fn main() -> ExitCode {
             let output_dir =
                 output_dir.unwrap_or_else(|| project_root().join("target/guest").join(&arch));
             build_guest(&arch, output_dir, no_cache)
+        }
+        XtaskCommand::BuildTools {
+            packages,
+            arch,
+            output_dir,
+            no_cache,
+        } => {
+            let output_dir =
+                output_dir.unwrap_or_else(|| project_root().join("target/guest").join(&arch));
+            build_tools(&packages, &arch, output_dir, no_cache)
         }
     };
 

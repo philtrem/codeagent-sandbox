@@ -1,0 +1,54 @@
+# Build an ext4 tools image containing user-selected Alpine packages.
+#
+# Usage:
+#   docker build -f guest/Dockerfile.tools \
+#     --build-arg PACKAGES="git jq curl python3" \
+#     --output type=local,dest=target/guest/x86_64 .
+#
+# Produces: tools.img (raw ext4 disk image)
+
+# Stage 1: Install requested packages into a staging root
+FROM alpine:3.21 AS installer
+
+ARG PACKAGES=""
+
+RUN mkdir -p /staging
+
+# Install packages into the staging root using --root.
+# This creates a self-contained directory tree with all binaries and libs.
+RUN if [ -n "$PACKAGES" ]; then \
+        apk add --no-cache --root /staging --initdb --no-scripts \
+            --repositories-file /etc/apk/repositories \
+            --keys-dir /etc/apk/keys \
+            $PACKAGES; \
+    fi
+
+# Write a manifest of installed packages
+RUN apk info --root /staging 2>/dev/null | sort > /staging/.packages.list || true
+RUN echo "{\"packages\": [$(apk info --root /staging 2>/dev/null | sort | sed 's/.*/"&"/' | tr '\n' ',' | sed 's/,$//')], \"built\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > /staging/.packages.json || true
+
+# Stage 2: Create the ext4 filesystem image
+FROM alpine:3.21 AS builder
+
+RUN apk add --no-cache e2fsprogs coreutils
+
+COPY --from=installer /staging /staging
+
+# Calculate required image size: actual content + 20% overhead, minimum 64MB
+RUN CONTENT_SIZE=$(du -sb /staging | cut -f1) && \
+    OVERHEAD_SIZE=$((CONTENT_SIZE * 120 / 100)) && \
+    MIN_SIZE=$((64 * 1024 * 1024)) && \
+    if [ "$OVERHEAD_SIZE" -lt "$MIN_SIZE" ]; then \
+        IMG_SIZE="$MIN_SIZE"; \
+    else \
+        IMG_SIZE="$OVERHEAD_SIZE"; \
+    fi && \
+    IMG_SIZE_MB=$(( (IMG_SIZE + 1048575) / 1048576 )) && \
+    echo "Content: ${CONTENT_SIZE} bytes, Image: ${IMG_SIZE_MB} MB" && \
+    # Create the ext4 image from the staging directory
+    mke2fs -t ext4 -d /staging -L tools -m 0 -F \
+        /tools.img "${IMG_SIZE_MB}M"
+
+# Stage 3: Output just the image
+FROM scratch AS output
+COPY --from=builder /tools.img /tools.img

@@ -186,6 +186,13 @@ fn build_sandbox_args(
         args.push(config.vm.virtiofsd_binary.clone());
     }
 
+    if !config.tools.image_path.is_empty()
+        && std::path::Path::new(&config.tools.image_path).exists()
+    {
+        args.push("--tools-image".into());
+        args.push(config.tools.image_path.clone());
+    }
+
     args
 }
 

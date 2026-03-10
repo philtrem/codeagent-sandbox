@@ -26,6 +26,7 @@ toml = "0.8"
 dirs = "6"
 which = "7"
 chrono = "0.4"
+tempfile = "3"
 codeagent-interceptor = { path = "../../crates/interceptor" }
 codeagent-common = { path = "../../crates/common" }
 

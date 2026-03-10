@@ -105,6 +105,68 @@ else
     IFS="$OLD_IFS"
 fi
 
+# Mount tools image if the kernel cmdline includes tools_image=1.
+# The tools image is an ext4 disk attached as a virtio drive containing
+# additional packages (git, python, etc.).
+mount_tools_image() {
+    local has_tools=0
+    for param in $(cat /proc/cmdline); do
+        case "$param" in
+            tools_image=1) has_tools=1 ;;
+        esac
+    done
+    [ "$has_tools" -eq 1 ] || return 0
+
+    # Scan /dev/vd{a..z} for an ext4 filesystem with the "tools" label.
+    # Try blkid first; if not available, probe-mount each device and check
+    # for the .packages.json marker file.
+    local dev=""
+    for candidate in /dev/vda /dev/vdb /dev/vdc /dev/vdd; do
+        [ -b "$candidate" ] || continue
+        if command -v blkid >/dev/null 2>&1; then
+            if blkid "$candidate" 2>/dev/null | grep -q 'LABEL="tools"'; then
+                dev="$candidate"
+                break
+            fi
+        else
+            mkdir -p /tmp/probe
+            if mount -t ext4 -o ro "$candidate" /tmp/probe 2>/dev/null; then
+                if [ -f /tmp/probe/.packages.json ]; then
+                    umount /tmp/probe
+                    dev="$candidate"
+                    break
+                fi
+                umount /tmp/probe
+            fi
+        fi
+    done
+
+    if [ -z "$dev" ]; then
+        echo "init: WARNING: tools_image=1 set but no tools drive found"
+        return 0
+    fi
+
+    mkdir -p /tools
+    if ! mount -t ext4 -o ro "$dev" /tools; then
+        echo "init: WARNING: failed to mount tools image from $dev"
+        return 0
+    fi
+    echo "init: mounted tools image from $dev at /tools"
+
+    # Extend PATH and LD_LIBRARY_PATH for tools binaries
+    export PATH="/tools/usr/bin:/tools/usr/sbin:/tools/usr/local/bin:$PATH"
+    export LD_LIBRARY_PATH="/tools/usr/lib:/tools/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    # Write profile script so child shells inherit the environment
+    mkdir -p /etc/profile.d
+    cat > /etc/profile.d/tools.sh <<'PROFILE'
+export PATH="/tools/usr/bin:/tools/usr/sbin:/tools/usr/local/bin:$PATH"
+export LD_LIBRARY_PATH="/tools/usr/lib:/tools/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+PROFILE
+}
+
+mount_tools_image
+
 # Create unprivileged user for command execution.
 # The shim runs as root (PID 1) but drops to this user when spawning
 # commands via setuid/setgid in the executor.

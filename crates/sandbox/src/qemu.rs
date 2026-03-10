@@ -192,6 +192,9 @@ pub struct QemuConfig {
     /// Used as virtiofs tags (Unix) and virtio-serial port names (Windows).
     pub mount_names: Vec<String>,
 
+    /// Path to a tools disk image to attach as a read-only virtio drive.
+    pub tools_image_path: Option<PathBuf>,
+
     /// Extra QEMU command-line arguments.
     pub extra_args: Vec<String>,
 }
@@ -212,6 +215,7 @@ impl QemuConfig {
         self.add_common_args(&mut args);
         self.add_filesystem_args(&mut args, &mut extra_kernel_params);
         self.add_control_channel_args(&mut args);
+        self.add_tools_drive_args(&mut args, &mut extra_kernel_params);
         self.add_boot_args(&mut args, &extra_kernel_params);
         self.add_extra_args(&mut args);
 
@@ -377,6 +381,21 @@ impl QemuConfig {
             "-device".into(),
             "virtserialport,chardev=ctrl,name=control".into(),
         ]);
+    }
+
+    /// Tools disk image: attached as a read-only virtio drive.
+    fn add_tools_drive_args(
+        &self,
+        args: &mut Vec<OsString>,
+        extra_kernel_params: &mut Vec<String>,
+    ) {
+        if let Some(path) = &self.tools_image_path {
+            args.extend([
+                "-drive".into(),
+                format!("file={},format=raw,if=virtio,readonly=on", path.display()).into(),
+            ]);
+            extra_kernel_params.push("tools_image=1".to_string());
+        }
     }
 
     /// Kernel, initrd, and rootfs boot arguments.
@@ -767,6 +786,7 @@ mod tests {
             fs_socket_paths: vec![PathBuf::from("/tmp/vfs0.sock")],
             vm_mode: "ephemeral".to_string(),
             mount_names,
+            tools_image_path: None,
             extra_args: vec![],
         }
     }
@@ -1124,6 +1144,52 @@ mod tests {
     fn mn_09_strip_edges() {
         let names = generate_mount_names(&[PathBuf::from("/home/user/---test---")]);
         assert_eq!(names, vec!["test"]);
+    }
+
+    /// QC-12: tools drive args present when tools_image_path is set.
+    #[test]
+    fn qc_12_tools_drive_present() {
+        let mut config = test_config();
+        config.tools_image_path = Some(PathBuf::from("/path/to/tools.img"));
+
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let has_drive = args.iter().any(|a| {
+            a.contains("file=/path/to/tools.img")
+                && a.contains("format=raw")
+                && a.contains("if=virtio")
+                && a.contains("readonly=on")
+        });
+        assert!(has_drive, "missing tools drive arg: {args:?}");
+    }
+
+    /// QC-13: tools drive args absent when tools_image_path is None.
+    #[test]
+    fn qc_13_tools_drive_absent() {
+        let config = test_config(); // tools_image_path: None
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let has_tools_drive = args.iter().any(|a| a.contains("tools.img"));
+        assert!(!has_tools_drive, "unexpected tools drive arg: {args:?}");
+    }
+
+    /// QC-14: tools_image=1 kernel param added when tools image is set.
+    #[test]
+    fn qc_14_tools_kernel_param() {
+        let mut config = test_config();
+        config.tools_image_path = Some(PathBuf::from("/path/to/tools.img"));
+
+        let (_binary, args) = config.build_args().unwrap();
+        let args = args_to_strings(&args);
+
+        let append_idx = args.iter().position(|a| a == "-append").unwrap();
+        let append_val = &args[append_idx + 1];
+        assert!(
+            append_val.contains("tools_image=1"),
+            "append should contain tools_image=1: {append_val}"
+        );
     }
 
     /// MN-10: mount_names= appears in kernel cmdline.

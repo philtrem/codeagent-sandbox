@@ -569,6 +569,7 @@ impl Orchestrator {
             fs_socket_paths,
             vm_mode: self.cli_args.vm_mode.clone(),
             mount_names: mount_names.to_vec(),
+            tools_image_path: self.cli_args.tools_image.clone(),
             extra_args: vec![],
         };
 
